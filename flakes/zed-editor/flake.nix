@@ -34,6 +34,14 @@
             rm "$TEMP_DIR/zed/merged.json"
           fi
 
+          # If user has any extensions already saved
+          USER_EXTENSIONS="$HOME/.local/share/zed/extensions"
+          if [ -f "$USER_EXTENSIONS" ]; then
+            cp -r "$USER_EXTENSIONS" "$TEMP_DIR/zed"
+          fi
+
+          mkdir -p "$TEMP_DIR/zed/extensions"
+
           # Copy any user themes if they exist
           if [ -d "$HOME/.config/zed/themes" ]; then
             mkdir -p "$TEMP_DIR/zed/themes"
@@ -42,6 +50,7 @@
 
           # Set the temporary config directory for this session only
           export XDG_CONFIG_HOME="$TEMP_DIR"
+          export XDG_DATA_HOME="$TEMP_DIR"
 
           # Clean up temp directory when Zed exits
           trap "rm -rf \"$TEMP_DIR\"" EXIT
