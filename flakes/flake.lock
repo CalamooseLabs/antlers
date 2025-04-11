@@ -2,11 +2,11 @@
   "nodes": {
     "nixpkgs": {
       "locked": {
-        "lastModified": 1741379970,
-        "narHash": "sha256-Wh7esNh7G24qYleLvgOSY/7HlDUzWaL/n4qzlBePpiw=",
+        "lastModified": 1744232761,
+        "narHash": "sha256-gbl9hE39nQRpZaLjhWKmEu5ejtQsgI5TWYrIVVJn30U=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "36fd87baa9083f34f7f5027900b62ee6d09b1f2f",
+        "rev": "f675531bc7e6657c10a18b565cfebd8aa9e24c14",
         "type": "github"
       },
       "original": {
@@ -23,14 +23,20 @@
         ]
       },
       "locked": {
-        "lastModified": 1,
-        "narHash": "sha256-nx5U08g49Gu/DPKswwfWn9/UACMCIdxSjLDWHQ3GzL0=",
-        "path": "./plex-desktop",
-        "type": "path"
+        "dir": "flakes/plex-desktop",
+        "lastModified": 1741640139,
+        "narHash": "sha256-G/b6lEmU+6e8hirLfau/5ew7+xJylJ8t93qBrJ29mpU=",
+        "owner": "calamooselabs",
+        "repo": "antlers",
+        "rev": "5e32d02d044e422d29a073a4d92436d5aea614e6",
+        "type": "github"
       },
       "original": {
-        "path": "./plex-desktop",
-        "type": "path"
+        "dir": "flakes/plex-desktop",
+        "owner": "calamooselabs",
+        "ref": "master",
+        "repo": "antlers",
+        "type": "github"
       }
     },
     "root": {
@@ -47,14 +53,20 @@
         ]
       },
       "locked": {
-        "lastModified": 1,
-        "narHash": "sha256-vFAHHWsGsWZlgWH3+t6Qre3X6bcnv8otxhVS5AV/3MI=",
-        "path": "./zed-editor",
-        "type": "path"
+        "dir": "flakes/zed-editor",
+        "lastModified": 1741640139,
+        "narHash": "sha256-G/b6lEmU+6e8hirLfau/5ew7+xJylJ8t93qBrJ29mpU=",
+        "owner": "calamooselabs",
+        "repo": "antlers",
+        "rev": "5e32d02d044e422d29a073a4d92436d5aea614e6",
+        "type": "github"
       },
       "original": {
-        "path": "./zed-editor",
-        "type": "path"
+        "dir": "flakes/zed-editor",
+        "owner": "calamooselabs",
+        "ref": "master",
+        "repo": "antlers",
+        "type": "github"
       }
     }
   },
