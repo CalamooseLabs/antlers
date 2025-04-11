@@ -6,12 +6,12 @@
 
     # Reference local flakes
     zed-editor-flake = {
-      url = "path:./zed-editor";
+      url = "github:calamooselabs/antlers/master?dir=flakes/zed-editor";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
     plex-desktop-flake = {
-      url = "path:./plex-desktop";
+      url = "github:calamooselabs/antlers/master?dir=flakes/plex-desktop";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
