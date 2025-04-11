@@ -1,0 +1,51 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1744232761,
+        "narHash": "sha256-gbl9hE39nQRpZaLjhWKmEu5ejtQsgI5TWYrIVVJn30U=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "f675531bc7e6657c10a18b565cfebd8aa9e24c14",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "plex-desktop-flake": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "dir": "flakes/plex-desktop",
+        "lastModified": 1741640139,
+        "narHash": "sha256-G/b6lEmU+6e8hirLfau/5ew7+xJylJ8t93qBrJ29mpU=",
+        "owner": "calamooselabs",
+        "repo": "antlers",
+        "rev": "5e32d02d044e422d29a073a4d92436d5aea614e6",
+        "type": "github"
+      },
+      "original": {
+        "dir": "flakes/plex-desktop",
+        "owner": "calamooselabs",
+        "ref": "master",
+        "repo": "antlers",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "plex-desktop-flake": "plex-desktop-flake"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
