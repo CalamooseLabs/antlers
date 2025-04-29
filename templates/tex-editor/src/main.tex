@@ -1,0 +1,16 @@
+\documentclass[
+  12pt
+  toc=flat,         % Flattens TOC formatting
+  toc=noindent,     % Removes indentation in TOC
+  toc=noentrynumbers % Removes numbers from TOC entries
+]{scrartcl}
+\usepackage{import}
+
+\subimport{./src}{style}
+\subimport{./src}{variables}
+
+\title{\uppercase{\documentTitle}}
+\begin{document}
+\maketitle
+\subimport{./src}{content}
+\end{document}
