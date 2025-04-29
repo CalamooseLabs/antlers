@@ -1,0 +1,13 @@
+\subimport{.}{variables}
+
+\begin{center}
+  \textbf{\uline{\uppercase{Exhibit A}}}
+  \ifthenelse{\boolean{includeA}}{
+    \subimport{.}{content}
+  }{
+
+  \omitText
+
+  \blankspace
+  }
+\end{center}
