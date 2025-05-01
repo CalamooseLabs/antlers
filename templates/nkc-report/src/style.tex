@@ -1,0 +1,33 @@
+% Define colors
+\definecolor{primary}{HTML}{003366} % Corporate blue
+\definecolor{warning}{HTML}{FF0000}
+\definecolor{note}{HTML}{0066CC}
+
+% Headers and footers
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textcolor{primary}{\myCompany}}
+\fancyhead[R]{\textcolor{primary}{\iftrue \myTitle \fi}}
+\fancyfoot[C]{\thepage}
+
+% Section formatting
+\titleformat{\section}{\Large \bfseries \color{primary}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize \bfseries \color{note}}{\thesubsection}{1em}{}
+
+% Toggle confidential header
+\iftoggle{confidential}{
+  \fancyhead[L]{\textcolor{primary}{\myCompany} - CONFIDENTIAL}
+}{}
+
+% Draft watermark
+\iftoggle{showdraft}{
+  \SetWatermarkText{DRAFT}
+  \SetWatermarkScale{2}
+  \SetWatermarkColor[gray]{0.9}
+}{}
+
+% Theorem-like styles
+\newtheorem{note}{Note}
+\newtheorem{warning}{Warning}
+\renewcommand{\notehead}{\textcolor{note}{\textbf{Note:}}}
+\renewcommand{\warninghead}{\textcolor{warning}{\textbf{Warning:}}}

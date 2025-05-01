@@ -46,4 +46,11 @@
       Ensure to run direnv allow
     '';
   };
+
+  nkc-report= {
+    path = ./nkc-report;
+    description = "Document template in LaTeX";
+    welcomeText = ''
+      Ensure to run direnv allow
+    '';
 }

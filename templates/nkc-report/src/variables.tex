@@ -1,0 +1,16 @@
+% Toggleable options
+\newtoggle{showdraft}
+\newtoggle{showcomments}
+\newtoggle{confidential}
+
+% Set toggle values (true/false)
+\toggletrue{confidential}  % Show "CONFIDENTIAL" header
+\togglefalse{showdraft}    % Hide draft watermark
+\togglefalse{showcomments} % Hide comments (if enabled later)
+
+% Document metadata
+\newcommand{\myTitle}{Confidential Report}
+\newcommand{\myAuthor}{Internal Team}
+\newcommand{\myDate}{\today}
+\newcommand{\myCompany}{Acme Corporation}
+\newcommand{\myAddress}{123 Main Street, City, Country}

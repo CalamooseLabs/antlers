@@ -1,0 +1,36 @@
+\documentclass[11pt, oneside]{article}
+
+% Packages
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+\usepackage{etoolbox}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{draftwatermark}
+\usepackage{lipsum} % For placeholder text (can remove later)
+\usepackage{graphicx}
+
+% Set geometry
+\geometry{margin=1in}
+
+% Load variables and styles
+\input{variables}
+\input{styles}
+
+% Title
+\title{%
+  \textbf{\Huge \myTitle} \\
+  \Large \myAuthor \\
+  \small \myDate
+}
+\author{}
+\date{}
+
+% Begin document
+\begin{document}
+\maketitle
+
+\input{content}
+
+\end{document}
