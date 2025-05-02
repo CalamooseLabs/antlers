@@ -8,7 +8,7 @@
 \fancyhf{}
 \fancyhead[L]{\textcolor{primary}{\myCompany}}
 \fancyhead[R]{\textcolor{primary}{\iftrue \myTitle \fi}}
-\fancyfoot[C]{\thepage}
+\fancyfoot[C]{Page \thepage\ of \ztotpages}
 
 % Section formatting
 \titleformat{\section}{\Large \bfseries \color{primary}}{\thesection}{1em}{}
@@ -22,12 +22,15 @@
 % Draft watermark
 \iftoggle{showdraft}{
   \SetWatermarkText{DRAFT}
-  \SetWatermarkScale{2}
+  \SetWatermarkScale{5}
   \SetWatermarkColor[gray]{0.9}
-}{}
+}{
+  \SetWatermarkText{}
+  \SetWatermarkScale{0}
+}
 
 % Theorem-like styles
 \newtheorem{note}{Note}
 \newtheorem{warning}{Warning}
-\renewcommand{\notehead}{\textcolor{note}{\textbf{Note:}}}
-\renewcommand{\warninghead}{\textcolor{warning}{\textbf{Warning:}}}
+\newcommand{\notehead}{\textcolor{note}{\textbf{Note:}}}
+\newcommand{\warninghead}{\textcolor{warning}{\textbf{Warning:}}}

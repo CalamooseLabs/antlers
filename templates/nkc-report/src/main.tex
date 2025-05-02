@@ -3,6 +3,7 @@
 % Packages
 \usepackage{geometry}
 \usepackage{fancyhdr}
+\usepackage[totpages]{zref}
 \usepackage{xcolor}
 \usepackage{etoolbox}
 \usepackage{titlesec}
@@ -15,8 +16,8 @@
 \geometry{margin=1in}
 
 % Load variables and styles
-\input{variables}
-\input{styles}
+\input{src/variables}
+\input{src/styles}
 
 % Title
 \title{%
@@ -31,6 +32,6 @@
 \begin{document}
 \maketitle
 
-\input{content}
+\input{src/content}
 
 \end{document}
