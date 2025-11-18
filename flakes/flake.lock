@@ -2,11 +2,11 @@
   "nodes": {
     "nixpkgs": {
       "locked": {
-        "lastModified": 1744232761,
-        "narHash": "sha256-gbl9hE39nQRpZaLjhWKmEu5ejtQsgI5TWYrIVVJn30U=",
+        "lastModified": 1763283776,
+        "narHash": "sha256-Y7TDFPK4GlqrKrivOcsHG8xSGqQx3A6c+i7novT85Uk=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "f675531bc7e6657c10a18b565cfebd8aa9e24c14",
+        "rev": "50a96edd8d0db6cc8db57dab6bb6d6ee1f3dc49a",
         "type": "github"
       },
       "original": {
@@ -24,11 +24,11 @@
       },
       "locked": {
         "dir": "flakes/plex-desktop",
-        "lastModified": 1741640139,
-        "narHash": "sha256-G/b6lEmU+6e8hirLfau/5ew7+xJylJ8t93qBrJ29mpU=",
+        "lastModified": 1746209960,
+        "narHash": "sha256-Wi+nW0OUl2pdInKtO/RQ/JBp5jtAnDPLZWyy1jbDCO4=",
         "owner": "calamooselabs",
         "repo": "antlers",
-        "rev": "5e32d02d044e422d29a073a4d92436d5aea614e6",
+        "rev": "34b6b7f35933e0d947284e9c51472f8064f04181",
         "type": "github"
       },
       "original": {
@@ -54,11 +54,11 @@
       },
       "locked": {
         "dir": "flakes/zed-editor",
-        "lastModified": 1741640139,
-        "narHash": "sha256-G/b6lEmU+6e8hirLfau/5ew7+xJylJ8t93qBrJ29mpU=",
+        "lastModified": 1746209960,
+        "narHash": "sha256-Wi+nW0OUl2pdInKtO/RQ/JBp5jtAnDPLZWyy1jbDCO4=",
         "owner": "calamooselabs",
         "repo": "antlers",
-        "rev": "5e32d02d044e422d29a073a4d92436d5aea614e6",
+        "rev": "34b6b7f35933e0d947284e9c51472f8064f04181",
         "type": "github"
       },
       "original": {
