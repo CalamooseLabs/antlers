@@ -25,7 +25,7 @@
 
   nkc-farmland-lease = {
     path = ./nkc-farmland-lease;
-    description = "Farmland Masrer Lease template in LaTeX";
+    description = "Farmland Master Lease template in LaTeX";
     welcomeText = ''
       Ensure to run direnv allow
     '';
@@ -52,6 +52,14 @@
     description = "Document template in LaTeX";
     welcomeText = ''
       Ensure to run direnv allow
+    '';
+  };
+
+  nkc-master-lease = {
+    path = ./nkc-master-lease;
+    description = "Commercial Master Lease builder with the create-lease wizard (LaTeX)";
+    welcomeText = ''
+      Ensure to run direnv allow, then run `create-lease` to fill in the deal.
     '';
   };
 }

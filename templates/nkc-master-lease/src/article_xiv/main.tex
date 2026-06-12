@@ -1,0 +1,9 @@
+\subimport{.}{variables}
+
+\ifthenelse{\boolean{includeXIV}}{
+	\section{Holding Over}
+	\subimport{.}{content}
+}{
+	\section{\omitText}
+	\blankspace
+}

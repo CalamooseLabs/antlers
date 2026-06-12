@@ -10,47 +10,137 @@
   <br />
 </h1>
 
-**Antlers** is a repository of different helper scripts, flakes and templates to make working easier.
+**Antlers** is a single-flake grab-bag of reusable packages and templates for
+NixOS. One repository, one branch (`master`), one root flake — you reach in and
+pull out exactly the one package or template you need by name.
 
 ---
 
-## Features
+## How it is laid out
 
-- **Scripts**: Some text here.
-- **Templates**: Keep in the flow.
-- **Flakes**: Nix Flakes.
+Everything is exposed by the **root `flake.nix`**, which aggregates:
+
+- **`packages/`** (`flakes/`) — buildable packages, selected with `#<name>`.
+- **`templates/`** — `nix flake init` templates, selected with `-t #<name>`.
+
+> **Why one repo and not a branch per package?** With any `github:` reference,
+> Nix downloads the **whole** repository tarball for that revision — `?dir=` and
+> `#attr` only pick *which* flake and output to use *after* the download. Per-package
+> branches therefore reduce nothing for the consumer and just create N branches to
+> keep merged. A single root flake gives the same "grab one thing" experience with
+> one lockfile and no cross-branch maintenance. (The only way to genuinely shrink a
+> download is a separate repo per package.)
 
 ---
 
-## Getting Started
+## Grab a single package
 
-### Flakes
+```sh
+nix run   github:CalamooseLabs/antlers#zed-editor      # wrapped Zed editor
+nix build github:CalamooseLabs/antlers#plex-desktop    # Plex w/ Hyprland+Stylix fixes
+```
 
-1. ...
+Pin to a tag or commit for reproducibility: `github:CalamooseLabs/antlers/<rev>#zed-editor`.
 
-2. ...
+As a flake input:
 
-3 ....
+```nix
+inputs.antlers.url = "github:CalamooseLabs/antlers";
+# inputs.antlers.packages.x86_64-linux.zed-editor          # ready-to-run derivation
+# inputs.antlers.lib.x86_64-linux.mkZedWrapper { … }       # custom Zed settings
+# or add inputs.antlers.overlays.default to nixpkgs.overlays
+```
 
-### Templates
+| Package        | Selector        | What it is                                                       |
+| -------------- | --------------- | ---------------------------------------------------------------- |
+| `zed-editor`   | `#zed-editor`   | Zed launched against a project-pinned config merged over the user's global Zed settings |
+| `plex-desktop` | `#plex-desktop` | `plex-desktop` wrapped with the Hyprland/Stylix Qt + portal fixes |
 
-1. ...
+### You only pull what you name
 
-2. ...
+Adding `antlers` as an input fetches its *source* (a few tiny `.nix`/`.tex`
+files), but Nix is lazy — nothing under `packages` is evaluated or built unless
+you actually reference it. Referencing `inputs.antlers.packages.x86_64-linux.zed-editor`
+(or `lib.x86_64-linux.mkZedWrapper`) **never touches `plex-desktop`**: it isn't
+built, downloaded, or even evaluated, and its `unfree`-ness can't trip you up
+(no `allowUnfree` needed on your side). So "just zed-editor, not plex-desktop"
+is the default — there is no separate import to do.
 
-### Scripts
+The one thing that adds *names* (still lazily, nothing builds) is the overlay:
+`inputs.antlers.overlays.default` defines both `antlers-zed-editor` and
+`plex-desktop-fixed` on `pkgs`. If you want strictly one, reference the package
+directly instead of adding the overlay.
 
-1. ...
+---
 
-2. ...
+## Grab a single template
 
-3. ...
+```sh
+nix flake init      -t github:CalamooseLabs/antlers#nkc-report      # into current dir
+nix flake new ./out -t github:CalamooseLabs/antlers#nkc-report      # into a new dir
+nix flake show github:CalamooseLabs/antlers                         # list everything
+```
 
-4. ...
+`init` copies only that template's directory and won't overwrite existing files.
+Afterwards run `direnv allow` (each template ships an `.envrc` with `use flake`).
+
+| Template                | What it scaffolds                                   |
+| ----------------------- | --------------------------------------------------- |
+| `dev-shell`             | a minimal direnv + Nix dev shell                    |
+| `zed-editor-shell`      | a dev shell with the wrapped Zed editor             |
+| `spreadsheet-pdf`       | SC-IM spreadsheet → PDF (via `pandoc`)             |
+| `tex-editor`            | a modular LaTeX document builder                    |
+| `nkc-report`            | the NKC report document                             |
+| `nkc-farmland-lease`    | the NKC farmland master lease document              |
+| `nkc-lease-amendment`   | the NKC lease amendment document                    |
+| `nkc-master-lease`      | the NKC commercial master lease + `create-lease` wizard |
+
+The LaTeX/SC-IM templates build a PDF with `nix build` (output at `./result/`).
+The document templates add sections with `nix flake new <path> -t .#article`
+(also `section` / `subsection` / `subsubsection`).
+
+**`nkc-master-lease`** is the most full-featured: the lease lives as a tree
+of LaTeX nodes, and an interactive Python wizard (`create-lease`, on `PATH` in the
+dev shell) fills the deal-specific variables, toggles which clauses to include, and
+builds the PDF. Firm-wide defaults (lessor block, counsel, governing law) live in
+its tracked `settings.json`; per-deal answers persist in a git-ignored `lease.json`.
+See the template's own `CLAUDE.md` for the full workflow.
+
+---
+
+## Develop on antlers
+
+```sh
+direnv allow          # or: nix develop      (root dev shell ships claude-code)
+nix fmt               # format with alejandra
+nix flake check       # validate all outputs
+nix flake show        # inspect the output tree
+```
+
+**Gotcha:** new `.nix` files must be `git add`-ed (no commit needed) or flake
+evaluation can't see them. Packages are plain in-tree `package.nix` files consumed
+via `callPackage` — no self-referencing `github:` inputs — so local edits take
+effect immediately without pushing.
+
+### Add a package
+
+1. Create `flakes/<name>/package.nix` as a `{ <deps>, ... }: <derivation>` function.
+2. Wire it into the root `flake.nix` (`packages.${system}.<name> = pkgs.callPackage ./flakes/<name>/package.nix {};`), plus an `apps`/`overlays` entry if runnable.
+3. `git add`, then `nix flake check` / `nix build .#<name>`.
+
+### Add a template
+
+1. Create `templates/<name>/` (its `flake.nix`, `.envrc`, build files, `src/`).
+2. Register it in `templates/templates.nix` with `{ path; description; welcomeText; }`.
+3. If it consumes a shared antlers package, reference it via `github:CalamooseLabs/antlers` (a scaffolded-out repo can't use a relative path).
+4. Test with `nix flake init -t .#<name>`.
+
+**Conventions:** channel `nixos-unstable`, owner casing `NixOS` / `CalamooseLabs`,
+format with `nix fmt` (alejandra) before committing.
 
 ## License
 
-Internal App is open-source software licensed under the MIT License.
+Antlers is open-source software licensed under the MIT License.
 
 <p align="right">
   <br />

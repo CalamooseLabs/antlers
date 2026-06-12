@@ -1,0 +1,9 @@
+\subimport{.}{variables}
+
+\ifthenelse{\boolean{includeXV}}{
+	\section{Rent Deduction}
+	\subimport{.}{content}
+}{
+	\section{\omitText}
+	\blankspace
+}

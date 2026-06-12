@@ -1,0 +1,9 @@
+\subimport{.}{variables}
+
+\ifthenelse{\boolean{includeXXV}}{
+	\section{Rules and Regulations}
+	\subimport{.}{content}
+}{
+	\section{\omitText}
+	\blankspace
+}

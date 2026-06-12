@@ -1,0 +1,9 @@
+\subimport{.}{variables}
+
+\ifthenelse{\boolean{includeXX}}{
+	\section{Alterations}
+	\subimport{.}{content}
+}{
+	\section{\omitText}
+	\blankspace
+}

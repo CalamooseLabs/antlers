@@ -1,5 +1,4 @@
-{ pkgs ? import <nixpkgs> { }, ... }:
-
+{pkgs ? import <nixpkgs> {}, ...}:
 pkgs.stdenv.mkDerivation {
   name = "pdf";
   src = ./.;
@@ -7,11 +6,10 @@ pkgs.stdenv.mkDerivation {
     texliveFull
   ];
   buildPhase = ''
-    mkdir -p .cache/latex
-    latexmk -interaction=nonstopmode -auxdir=.cache/latex -pdf ./src/main.tex
+    latexmk -interaction=nonstopmode -outdir=build -pdf ./src/main.tex
   '';
   installPhase = ''
     mkdir -p $out
-    cp main.pdf $out
+    cp build/main.pdf $out/
   '';
 }

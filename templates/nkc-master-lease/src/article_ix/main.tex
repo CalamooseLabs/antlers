@@ -1,0 +1,9 @@
+\subimport{.}{variables}
+
+\ifthenelse{\boolean{includeIX}}{
+	\section{Repair and Maintenance}
+	\subimport{.}{content}
+}{
+	\section{\omitText}
+	\blankspace
+}

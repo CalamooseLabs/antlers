@@ -1,0 +1,9 @@
+\subimport{.}{variables}
+
+\ifthenelse{\boolean{includeX}}{
+	\section{SECTION NAME}
+	\subimport{.}{content}
+}{
+	\section{\omitText}
+	\blankspace
+}

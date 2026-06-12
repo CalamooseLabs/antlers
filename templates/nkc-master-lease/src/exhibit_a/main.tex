@@ -1,0 +1,7 @@
+\subimport{.}{variables}
+
+\ifthenelse{\boolean{includeExhibitA}}{
+	\newpage
+	\exhibithead{A}{Description of Premises}
+	\subimport{.}{content}
+}{}

@@ -1,0 +1,9 @@
+\subimport{.}{variables}
+
+\ifthenelse{\boolean{includeIV}}{
+	\section{Rent}
+	\subimport{.}{content}
+}{
+	\section{\omitText}
+	\blankspace
+}

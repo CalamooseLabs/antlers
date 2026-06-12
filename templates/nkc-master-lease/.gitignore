@@ -1,0 +1,8 @@
+.direnv/
+resources/
+example/
+result/
+result
+.direnv
+__pycache__/
+lease.json

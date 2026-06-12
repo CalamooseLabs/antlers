@@ -1,0 +1,9 @@
+\subimport{.}{variables}
+
+\ifthenelse{\boolean{includeXXI}}{
+	\section{Events of Default}
+	\subimport{.}{content}
+}{
+	\section{\omitText}
+	\blankspace
+}

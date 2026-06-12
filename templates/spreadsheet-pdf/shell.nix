@@ -54,7 +54,7 @@
 in
   pkgs.mkShell {
     buildInputs = [
-      (inputs.zed-editor.packages.x86_64-linux.default zedSettings)
+      (inputs.antlers.lib.x86_64-linux.mkZedWrapper zedSettings)
       pkgs.alejandra
       pkgs.nixd
       pkgs.nil

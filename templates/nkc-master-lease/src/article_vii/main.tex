@@ -1,0 +1,9 @@
+\subimport{.}{variables}
+
+\ifthenelse{\boolean{includeVII}}{
+	\section{Additional Rent}
+	\subimport{.}{content}
+}{
+	\section{\omitText}
+	\blankspace
+}

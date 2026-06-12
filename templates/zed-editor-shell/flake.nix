@@ -1,18 +1,18 @@
 {
-  description = "Development environment with custom zed-editor configuration";
+  description = "Wrapped Zed editor dev shell";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    zed-editor = {
-      url = "github:CalamooseLabs/antlers/flakes.zed-editor?dir=flakes/zed-editor";
+    antlers = {
+      url = "github:CalamooseLabs/antlers";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
   outputs = {nixpkgs, ...} @ inputs: let
     system = "x86_64-linux";
-    pkgs = import nixpkgs {system = system;};
+    pkgs = import nixpkgs {inherit system;};
   in {
     devShells.${system}.default = import ./shell.nix {
       inherit pkgs;
