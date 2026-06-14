@@ -23,10 +23,13 @@
     # Concrete, ready-to-run derivations.
     zed-editor = mkZedWrapper {};
     plex-desktop = pkgs.callPackage ./flakes/plex-desktop/package.nix {};
+
+    # Shorthand CLI over the flake's templates/packages (`antlers new …`, `antlers build …`).
+    antlers = pkgs.callPackage ./flakes/antlers/package.nix {};
   in {
     # ---- Buildable packages: `nix build .#zed-editor`, `nix run .#zed-editor` ----
     packages.${system} = {
-      inherit zed-editor plex-desktop;
+      inherit zed-editor plex-desktop antlers;
       default = zed-editor;
     };
 
@@ -38,6 +41,7 @@
 
     # ---- Overlay so NixOS / home-manager configs can consume directly ----
     overlays.default = final: _prev: {
+      antlers = final.callPackage ./flakes/antlers/package.nix {};
       antlers-zed-editor = (final.callPackage ./flakes/zed-editor/package.nix {}) {};
       plex-desktop-fixed = final.callPackage ./flakes/plex-desktop/package.nix {};
     };
@@ -47,6 +51,10 @@
       zed-editor = {
         type = "app";
         program = "${zed-editor}/bin/zeditor";
+      };
+      antlers = {
+        type = "app";
+        program = "${antlers}/bin/antlers";
       };
       default = self.apps.${system}.zed-editor;
     };

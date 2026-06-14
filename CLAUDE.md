@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Antlers is a single-flake Nix monorepo of reusable packages and templates for Calamoose Labs / NKC. There is no application code. It targets `x86_64-linux` only (hardcoded). Layout:
 
-- `flakes/` — package definitions as plain `callPackage`-able `package.nix` files (e.g. a wrapped `zed-editor`, a fixed `plex-desktop`). **Not** flakes themselves.
+- `flakes/` — package definitions as plain `callPackage`-able `package.nix` files (e.g. a wrapped `zed-editor`, a fixed `plex-desktop`, the `antlers` CLI). **Not** flakes themselves.
 - `templates/` — `nix flake init`/`new` templates, registered in `templates/templates.nix`. Most are LaTeX/SC-IM document builders.
 - `scripts/` — currently empty (placeholder).
 
@@ -29,6 +29,15 @@ nix run   .#zed-editor
 nix flake init      -t .#<name>          # into cwd  (name ∈ templates/templates.nix)
 nix flake new ./out -t .#<name>          # into a new dir
 
+# Or use the `antlers` CLI (shorthand over all of the above — once it's on PATH)
+antlers list                              # show every template + package (queried from the flake)
+antlers new <name> [dir]                  # scaffold a template (dir defaults to ./<name>)
+antlers init <name>                       # scaffold into the current directory
+antlers build <package>                   # nix build .#<package>
+antlers run <package>                     # nix run .#<package>
+antlers shell                             # enter the antlers dev shell
+# Targets github:CalamooseLabs/antlers by default; override with ANTLERS_REF.
+
 # Build a document template's PDF (run inside the scaffolded/template dir)
 nix build                                 # → ./result/main.pdf
 ```
@@ -42,13 +51,19 @@ There are no tests; `nix flake check` + `nix fmt` (alejandra) are the only gates
 ### Flake topology (single root aggregator)
 
 The root `flake.nix` is the only flake exposing packages/templates. It:
-- `callPackage`s each `flakes/<name>/package.nix` and exposes concrete derivations under `packages.${system}.{zed-editor, plex-desktop, default}`.
+- `callPackage`s each `flakes/<name>/package.nix` and exposes concrete derivations under `packages.${system}.{zed-editor, plex-desktop, antlers, default}`.
 - exposes the **parameterized** Zed builder under `lib.${system}.mkZedWrapper` (a function, which is *not* allowed under `packages` — flake `packages.<system>.<name>` must be derivations).
 - exposes `overlays.default` (so NixOS/home-manager can consume), `apps.${system}` (for `nix run`), `templates = import ./templates/templates.nix`, the root `devShells.default`, and `formatter` (alejandra).
 
 Packages live in `package.nix` files (not sub-flakes) so the root flake reads them in-tree via `callPackage` — no `github:`-self-reference, no extra lockfiles, local edits visible immediately. **Do not** reintroduce a `flakes/flake.nix` or per-dir flakes; add new packages as `flakes/<name>/package.nix` and wire them into the root flake.
 
 **The zed-editor wrapper** (`flakes/zed-editor/package.nix`) is the key reusable abstraction: a function `settings: derivation`. The resulting `zeditor` launcher writes the settings into a throwaway `XDG_CONFIG_HOME`/`XDG_DATA_HOME`, deep-merges the user's real `~/.config/zed/settings.json` via `jq -s '.[0] * .[1]'` (**right operand wins → the project's pinned settings take precedence**), copies the user's extensions/themes, and cleans up on exit. Get a concrete editor with `packages.zed-editor` (default settings) or customize via `lib.${system}.mkZedWrapper { … }`.
+
+### The `antlers` CLI
+
+`flakes/antlers/` packages a `writeShellApplication` named `antlers` that is a thin shorthand over the `nix` invocations against this flake — it does **not** reimplement anything. `package.nix` bakes a `defaultRef` (`github:CalamooseLabs/antlers`) into `antlers.sh` via `replaceStrings`/`readFile`; the user overrides it per-invocation with `ANTLERS_REF`. Subcommands: `list` (queries `#templates` and `#packages.<system>` with `nix eval --apply` + `jq` so it auto-discovers — nothing to hardcode), `new`/`init` (→ `nix flake new`/`init -t`), `build`/`run` (→ `nix build`/`run`), `shell` (→ `nix develop`). Per-template commands like `create-lease` are **not** wrapped — they live in each scaffolded template's own dev shell.
+
+It is exposed three ways so it can land on a system: `packages.<system>.antlers`, `apps.<system>.antlers` (`nix run`), and `overlays.default.antlers`. To put it on a NixOS system, add the overlay and `environment.systemPackages = [ pkgs.antlers ];`, or reference `inputs.antlers.packages.${system}.antlers` directly. Editing the script is editing `flakes/antlers/antlers.sh` (a plain bash body — no shebang; `writeShellApplication` adds the shebang, `set -euo pipefail`, and a build-time shellcheck gate). `git add` it after creating, per the flake/git gotcha above.
 
 ### Templates consuming antlers
 
