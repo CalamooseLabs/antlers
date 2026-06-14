@@ -7,9 +7,12 @@ form (e.g. "Two Thousand and 00/100 dollars ($2,000.00)", "first (1st)", "Januar
 It then lets you toggle which sections to include (at every level), regenerates only the
 value-bearing LaTeX, saves your answers to lease.json, and runs `nix build`.
 
-  create-lease                 # interactive
+  create-lease                 # start a NEW deal (firm fields prefilled from settings.json; deal fields blank)
+  create-lease --edit          # edit the existing lease.json — same prompts, prefilled with prior answers
   create-lease --no-build      # regenerate the .tex but skip the build
   create-lease --defaults      # non-interactive: regenerate from lease.json / defaults
+
+The `edit-lease` command is an alias for `create-lease --edit`.
 """
 
 import argparse
@@ -175,16 +178,19 @@ def top_component(path):
 
 
 # ----------------------------------------------------------------------------- wizard
-def run_wizard(state):
+def run_wizard(state, edit=False):
     import questionary
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table
 
     console = Console()
-    console.print(Panel.fit("Commercial Master Lease — interactive setup",
-                            subtitle="numbers/dates/addresses are auto-formatted; answers saved to lease.json",
-                            style="bold cyan"))
+    title = ("Commercial Master Lease — edit existing deal" if edit
+             else "Commercial Master Lease — interactive setup")
+    subtitle = ("every prompt is prefilled from lease.json — press Enter to keep, type to change"
+                if edit
+                else "numbers/dates/addresses are auto-formatted; answers saved to lease.json")
+    console.print(Panel.fit(title, subtitle=subtitle, style="bold cyan"))
 
     settings = load_settings()
     inputs = dict(state.get("inputs", {}))
@@ -316,6 +322,8 @@ def run_wizard(state):
 # ------------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description="Fill the master lease and build the PDF.")
+    ap.add_argument("--edit", action="store_true",
+                    help="edit the existing lease.json — same prompts, prefilled with prior answers")
     ap.add_argument("--defaults", action="store_true",
                     help="non-interactive: regenerate from lease.json / manifest defaults")
     ap.add_argument("--no-build", action="store_true", help="regenerate the .tex but skip nix build")
@@ -326,6 +334,10 @@ def main():
     if seed_settings_if_missing():
         print("Created settings.json (firm defaults) — edit it to set your firm's standing info.")
 
+    if args.edit and not os.path.exists(STATE_PATH):
+        print("No lease.json found — nothing to edit yet. Run `create-lease` to start a new lease.")
+        return 1
+
     state = load_state()
     if args.save_settings:
         save_settings(merged_inputs(state))
@@ -334,8 +346,23 @@ def main():
 
     proceed = True
     if not args.defaults:
+        # A fresh `create-lease` starts from scratch — only firm fields (settings.json) and
+        # manifest defaults prefill; the prior deal's answers are ignored. `--edit` keeps them.
+        if not args.edit:
+            if os.path.exists(STATE_PATH):
+                try:
+                    import questionary
+                    ok = questionary.confirm(
+                        "A lease.json already exists. Start a NEW lease and overwrite it?",
+                        default=False).ask()
+                except (KeyboardInterrupt, EOFError):
+                    ok = None
+                if not ok:
+                    print("Cancelled — to modify the existing lease, run `edit-lease`.")
+                    return 1
+            state = {"inputs": {}, "includes": {}}
         try:
-            state, proceed = run_wizard(state)
+            state, proceed = run_wizard(state, edit=args.edit)
         except (KeyboardInterrupt, EOFError):
             print("\nCancelled — no files changed.")
             return 1

@@ -13,7 +13,8 @@ output; Nix pins the toolchain. The Word/ODT/PDF originals the lease was transcr
 ## Commands
 
 ```sh
-create-lease                 # interactive wizard: fill variables, pick sections, build the PDF
+create-lease                 # NEW deal: firm fields prefill from settings.json, deal fields start blank
+edit-lease                   # same wizard, prefilled from lease.json for quick edits (= create-lease --edit)
 create-lease --no-build      # regenerate the .tex from answers but skip the build
 create-lease --defaults      # non-interactive: regenerate from settings.json / lease.json / defaults
 create-lease --save-settings # write the firm fields to settings.json and exit
@@ -24,11 +25,18 @@ alejandra <file.nix>         # format Nix
 
 - `create-lease` is the primary entry point (a `writeShellApplication` wrapper defined in `shell.nix`
   that runs `scripts/create_lease.py` under a Python with `questionary` + `rich` + `num2words`).
+  A plain `create-lease` starts a **fresh** deal — only firm fields (`settings.json`) and manifest
+  defaults prefill, the prior deal's answers in `lease.json` are ignored, and if a `lease.json` already
+  exists it confirms before overwriting it. `edit-lease` is a sibling wrapper that runs the same script
+  with `--edit`: it requires an existing `lease.json` (errors otherwise) and walks every prompt prefilled
+  with the prior answers — Enter keeps a value, typing replaces it — for quick edits to that deal.
 - **`settings.json`** (repo root, tracked) holds firm-wide defaults — the Lessor block, copy-to counsel,
   emails, and governing law. It's auto-seeded on first run and overrides the manifest defaults; edit it
-  once and every new lease prefills from it. **Precedence: this deal's `lease.json` > `settings.json` >
-  manifest default.** Deal-specific fields default to empty (text) or render as a blank rule (unfilled
-  numbers), so an unfilled template shows clean fill-in blanks, not `____` or `zero (0)`.
+  once and every new lease prefills from it. **Precedence when `lease.json` is in play (`edit-lease`,
+  `--defaults`): this deal's `lease.json` > `settings.json` > manifest default;** a fresh `create-lease`
+  drops the `lease.json` tier and prefills from `settings.json` > manifest default only. Deal-specific
+  fields default to empty (text) or render as a blank rule (unfilled numbers), so an unfilled template
+  shows clean fill-in blanks, not `____` or `zero (0)`.
 - `src/main.tex` is the **only** compile root — individual nodes are not independently compilable
   (they have no preamble; they rely on the root's imported `style`/`variables`).
 - No tests/linters beyond formatters (`alejandra` for Nix, `texlab` LSP for LaTeX).
