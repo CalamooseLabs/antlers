@@ -26,10 +26,13 @@
 
     # Shorthand CLI over the flake's templates/packages (`antlers new …`, `antlers build …`).
     antlers = pkgs.callPackage ./flakes/antlers/package.nix {};
+
+    # LanServer (vendored from CalamooseLabs/LanServer) — Deno LAN command server.
+    lanserver = pkgs.callPackage ./flakes/lanserver/package.nix {};
   in {
     # ---- Buildable packages: `nix build .#zed-editor`, `nix run .#zed-editor` ----
     packages.${system} = {
-      inherit zed-editor plex-desktop antlers;
+      inherit zed-editor plex-desktop antlers lanserver;
       default = zed-editor;
     };
 
@@ -44,7 +47,11 @@
       antlers = final.callPackage ./flakes/antlers/package.nix {};
       antlers-zed-editor = (final.callPackage ./flakes/zed-editor/package.nix {}) {};
       plex-desktop-fixed = final.callPackage ./flakes/plex-desktop/package.nix {};
+      lanserver = final.callPackage ./flakes/lanserver/package.nix {};
     };
+
+    # ---- NixOS modules (e.g. inputs.antlers.nixosModules.lanserver) ----
+    nixosModules.lanserver = import ./flakes/lanserver/module.nix self;
 
     # ---- Explicit `nix run` targets ----
     apps.${system} = {

@@ -11,6 +11,8 @@ there is a single source of truth and no per-package flakes to keep in sync.
 | `zed-editor/`  | `lib.<system>.mkZedWrapper`         | builder: settings → a `zeditor` launcher that runs Zed against a throwaway, project-pinned config merged over the user's global Zed settings |
 | `zed-editor/`  | `packages.<system>.zed-editor`      | the above called with default settings (ready to run) |
 | `plex-desktop/`| `packages.<system>.plex-desktop`    | `plex-desktop` wrapped with Hyprland/Stylix fixes |
+| `lanserver/`   | `packages.<system>.lanserver`       | a Deno LAN command server (source in `lanserver/app`, compiled with `deno compile`) |
+| `lanserver/`   | `nixosModules.lanserver`            | NixOS service module (`services.lanserver`) whose `ExecStart` is the package above |
 
 Consume from the root flake:
 
