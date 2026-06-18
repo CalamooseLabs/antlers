@@ -15,6 +15,23 @@
     '';
   };
 
+  vibe-shell = {
+    path = ./vibe-shell;
+    description = "a direnv nix flake shell with Claude Code + signed-commit (gcommit) and wiki helpers";
+    welcomeText = ''
+      # Vibe Shell Template (Claude Code)
+
+      Run `direnv allow` (or `nix develop`) to enter the shell.
+
+      Helpers:
+        gcommit       review + sign + commit GIT_COMMIT_MSG (then optional signed tag)
+        build-wiki    preview docs/ -> ./wiki-build
+        publish-wiki  publish docs/ -> the repo's GitHub wiki
+
+      See CLAUDE.md for the signed-commit workflow.
+    '';
+  };
+
   spreadsheet-pdf = {
     path = ./spreadsheet-pdf;
     description = "Spreadsheet to PDF template in SC-IM";
