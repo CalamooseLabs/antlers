@@ -11,6 +11,7 @@ export interface ServerConfig {
   port: number;
   hostname: string;
   stateDir: string;
+  // Path to the shared-password file. Empty = passwordless login.
   passwordFile: string;
   directories: DirConfig[];
   sessionCommand: string[];
@@ -34,7 +35,7 @@ export const DEFAULTS: ServerConfig = {
   port: 8420,
   hostname: "0.0.0.0",
   stateDir: "/var/lib/vibe",
-  passwordFile: "/run/secrets/vibe-password",
+  passwordFile: "",
   directories: [],
   sessionCommand: ["vibe", "--remote-control", "@NAME@"],
   extraEnv: [],

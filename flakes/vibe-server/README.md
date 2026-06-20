@@ -1,20 +1,24 @@
 # vibe-server
 
-The Deno web service behind [`services.vibe`](../vibe/README.md) — a small
-**lifecycle manager** for Claude Code sessions. A shared-password login gates a
-single-page UI that lists predefined directories, spawns a `vibe` session in each
-(in Claude Code **Remote Control** mode), lists/kills sessions, and streams each
-session's captured output read-only. You actually *drive* a session from
-[claude.ai/code](https://claude.ai/code) or the mobile app — the browser only
-manages lifecycle.
+The Deno web service behind **`services.vibe`** — a small **lifecycle manager**
+for Claude Code sessions. An optional shared-password login (passwordless when no
+`passwordFile` is set) gates a single-page UI that lists predefined directories,
+spawns a `vibe` session in each (in Claude Code **Remote Control** mode),
+lists/kills sessions, and streams each session's captured output read-only. You
+actually *drive* a session from [claude.ai/code](https://claude.ai/code) or the
+mobile app — the browser only manages lifecycle.
 
 Exposed by the root flake as `packages.<system>.vibe-server`; its `ExecStart` is
-wired up by `nixosModules.vibe` (`../vibe/module.nix`).
+wired up by `nixosModules.vibe-server` (`./module.nix`). The `vibe` launcher that
+sessions are spawned with is the separate [`nixosModules.vibe`](../vibe/README.md)
+(`programs.vibe`) — import both so sessions inherit your pinned
+model/effort/permissions; imported alone, vibe-server falls back to a
+default-config launcher.
 
 ## Running it (NixOS)
 
 You don't run `vibe-server` directly — it's a `deno compile` binary (a generic
-ELF) that the `nixosModules.vibe` systemd unit launches under **nix-ld**.
+ELF) that the `nixosModules.vibe-server` systemd unit launches under **nix-ld**.
 (`nix run …#vibe-server` on NixOS fails with a `stub-ld` error for that reason —
 that's expected; use the service.) Configure everything through `services.vibe`;
 the module renders `/etc/vibe/config.json` (`$VIBE_CONFIG`) and wires the unit:
@@ -22,11 +26,17 @@ the module renders `/etc/vibe/config.json` (`$VIBE_CONFIG`) and wires the unit:
 ```nix
 { inputs, ... }:
 {
-  imports = [ inputs.antlers.nixosModules.vibe ];
+  # vibe-server runs the service; vibe gives it the launcher (model/effort pins).
+  imports = [
+    inputs.antlers.nixosModules.vibe-server
+    inputs.antlers.nixosModules.vibe
+  ];
+
+  programs.vibe = { model = "opus[1m]"; effort = "high"; };  # pins flow to sessions
 
   services.vibe = {
     enable = true;
-    passwordFile = "/run/secrets/vibe-password";   # shared login password
+    passwordFile = "/run/secrets/vibe-password";   # shared login password (omit for passwordless)
     claudeConfigDir = "/var/lib/vibe/claude";       # pre-seeded OAuth login (subscription)
     directories = [
       { name = "antlers"; path = "/srv/projects/antlers"; }
@@ -54,10 +64,148 @@ the module renders `/etc/vibe/config.json` (`$VIBE_CONFIG`) and wires the unit:
 }
 ```
 
-See the [`vibe` module README](../vibe/README.md#servicesvibe-options) for the
-full option set and more examples (TLS reverse proxy, API-key billing,
-per-session env). To smoke-test the app from source without the module, point
-`$VIBE_CONFIG` at a hand-written config and run `deno run -A src/main.ts`.
+To smoke-test the app from source without the module, point `$VIBE_CONFIG` at a
+hand-written config and run `deno run -A src/main.ts`.
+
+## Auth & billing
+
+The service user must be authenticated to Claude. For **subscription** plans
+(Max/Team/Pro) pre-seed `claudeConfigDir` with an OAuth `/login` (run `claude`
+once as the service user, or copy its `~/.claude`). Only use `environmentFile`
+with `ANTHROPIC_API_KEY=…` for API-key billing — and then also set
+`programs.vibe.subscriptionAuth = false`, or the launcher drops the key. See the
+[`vibe` README](../vibe/README.md#auth--billing) for the launcher's auth model.
+
+The web UI's own login is separate: a shared password (`passwordFile`) gates who
+can reach the session manager. Leave `passwordFile` unset for a **passwordless**
+UI (trusted host / loopback only) — see [Behavior notes](#behavior-notes).
+
+## Quick-launch directories
+
+`directories` is the heart of day-to-day use: a list of `{ name; path; }` entries
+that the web UI turns into a **quick-launch list**. Each one is pre-registered —
+pick it from the dropdown and click *Start session* to spin up a `vibe` session
+(in Remote Control mode) in that directory, no typing required. Each session also
+gets a per-session **Diff** button (a modal showing `git diff` of that working
+tree) alongside its log.
+
+```nix
+services.vibe.directories = [
+  { name = "antlers"; path = "/srv/projects/antlers"; }
+  { name = "infra";   path = "/srv/projects/infra"; }
+  { name = "notes";   path = "/home/me/notes"; }
+];
+```
+
+`name` must match `[A-Za-z0-9_-]+` and `path` must be absolute (both enforced by
+module assertions). These config-defined directories are **immutable** from the
+UI. To let users add more at runtime, leave `projectsDir` set (the default) — the
+UI's *Add directory* form then creates/registers directories under it (see
+[Directory management](#behavior-notes)).
+
+## `services.vibe` options
+
+| Option                    | Default                          | Notes                                                                       |
+| ------------------------- | -------------------------------- | --------------------------------------------------------------------------- |
+| `enable`                  | `false`                          | run the web session manager                                                 |
+| `port`                    | `8420`                           | port the web UI listens on                                                  |
+| `hostname`                | `"0.0.0.0"`                      | bind address (use `"127.0.0.1"` behind a reverse proxy)                     |
+| `passwordFile`            | `null` (passwordless)            | file holding the shared login password (read at runtime, never in the store). Null = passwordless: anyone who can reach the UI signs in automatically — set it (or restrict the network) when exposing beyond a trusted host |
+| `directories`             | `[]`                             | quick-launch `{ name; path; }` list (see above)                            |
+| `vibePackage`             | the `programs.vibe` launcher     | the `vibe` package sessions are spawned with (carries the model/effort pins; a default-config launcher if `programs.vibe` is not imported) |
+| `package`                 | `vibe-server`                    | the server package to run                                                   |
+| `sessionCommand`          | `vibe --remote-control @NAME@`   | command run per session; `@DIR@`/`@NAME@` substituted, cwd = chosen dir     |
+| `remoteControl.enable`    | `true`                           | default `sessionCommand` launches in Remote Control mode (false → set a headless `sessionCommand`) |
+| `extraEnv`                | `[]`                             | extra env-var **names** to propagate into sessions (values from the service env); everything else is dropped |
+| `projectsDir`             | `"/var/lib/vibe/projects"`       | base dir the UI may create/register projects under; `null` disables UI directory management |
+| `newProjectTemplate`      | the `vibe-shell` template        | template copied into a newly-created project (`null` → empty dir)           |
+| `sessionNamePrefix`       | `""`                             | prefix for generated Remote Control session names (e.g. `"prod"`)          |
+| `maxLogBytes`             | `26214400` (25 MiB)              | per-session captured-log size cap (`0` = unlimited; a cap, not rotation)    |
+| `requireTLS`              | `false`                          | reject plain-HTTP requests (HTTP 426, except `/healthz`); set behind a TLS proxy |
+| `claudeConfigDir`         | `null`                           | pre-seeded OAuth login dir (recommended subscription auth → `CLAUDE_CONFIG_DIR`) |
+| `environmentFile`         | `null`                           | systemd `EnvironmentFile` (e.g. `ANTHROPIC_API_KEY=…` for API-key billing)  |
+| `user` / `group`          | `"vibe"` / `"vibe"`              | service identity (only the default `vibe` user/group is auto-created)       |
+| `openFirewall`            | `false`                          | open `port` in the firewall                                                 |
+| `localNetworkOnly`        | `false`                          | when opening the firewall, restrict to LAN subnets only                     |
+| `localNetworkSubnets`     | RFC1918 (`192.168/16`, `10/8`, `172.16/12`) | IPv4 subnets allowed when `localNetworkOnly`                     |
+| `localNetworkSubnets6`    | ULA + link-local (`fc00::/7`, `fe80::/10`) | IPv6 subnets allowed when `localNetworkOnly`                      |
+| `protectHome`             | `null` (auto)                    | systemd `ProtectHome`; auto `false` when a configured dir is under `/home`, else `"tmpfs"` |
+| `enableNixLd`             | `true`                           | enable nix-ld so the compiled Deno binary can run                           |
+
+The `programs.vibe` knobs (`model`, `effort`, `permissions`, `subscriptionAuth`,
+`remoteControl.name`, `extraSettings`, `extraArgs`) shape the launcher that
+`vibePackage` defaults to (when that module is imported), so they apply to web
+sessions too.
+
+### Example: production behind a TLS reverse proxy
+
+Bind to loopback, require TLS (so the app rejects any non-proxied plain-HTTP
+request), and let nginx terminate TLS. `programs.vibe` pins flow to the web
+sessions via the default `vibePackage`. `proxy_buffering off` keeps the live log
+SSE stream flowing.
+
+```nix
+{ inputs, ... }:
+{
+  imports = [
+    inputs.antlers.nixosModules.vibe-server
+    inputs.antlers.nixosModules.vibe
+  ];
+
+  programs.vibe = { model = "opus[1m]"; effort = "high"; };
+
+  services.vibe = {
+    enable = true;
+    hostname = "127.0.0.1";                      # only the proxy reaches it
+    requireTLS = true;                           # reject non-TLS (X-Forwarded-Proto)
+    passwordFile = "/run/secrets/vibe-password";
+    claudeConfigDir = "/var/lib/vibe/claude";
+    sessionNamePrefix = "prod";                  # → session names like prod-antlers-a1b2
+    extraEnv = [ "GITHUB_TOKEN" ];               # propagate this var into sessions
+    directories = [
+      { name = "antlers"; path = "/srv/projects/antlers"; }
+      { name = "infra";   path = "/srv/projects/infra"; }
+    ];
+  };
+
+  services.nginx = {
+    enable = true;
+    virtualHosts."vibe.example.com" = {
+      forceSSL = true;
+      enableACME = true;
+      locations."/" = {
+        proxyPass = "http://127.0.0.1:8420";
+        extraConfig = ''
+          proxy_buffering off;     # stream the SSE log tail
+          proxy_read_timeout 1h;
+        '';
+      };
+    };
+  };
+  security.acme = { acceptTerms = true; defaults.email = "admin@example.com"; };
+}
+```
+
+### Example: API-key billing instead of a subscription
+
+```nix
+{ inputs, ... }:
+{
+  imports = [
+    inputs.antlers.nixosModules.vibe-server
+    inputs.antlers.nixosModules.vibe
+  ];
+
+  programs.vibe.subscriptionAuth = false;        # keep ANTHROPIC_API_KEY (don't drop it)
+
+  services.vibe = {
+    enable = true;
+    passwordFile = "/run/secrets/vibe-password";
+    environmentFile = "/run/secrets/vibe-env";   # contains ANTHROPIC_API_KEY=…
+    directories = [ { name = "work"; path = "/srv/work"; } ];
+  };
+}
+```
 
 ## Zero external imports (build constraint)
 
@@ -106,7 +254,8 @@ module: `port`, `hostname`, `stateDir`, `passwordFile`, `directories`
 | ------------------------------------- | ---- | ----------------------------------------- |
 | `GET /`                               | no   | the UI                                    |
 | `GET /healthz`                        | no   | liveness probe (`{ok, sessions}`)         |
-| `POST /api/login` / `POST /api/logout`| no   | shared-password login (rate-limited)      |
+| `GET /api/auth-mode`                  | no   | `{passwordRequired}` — drives the login page |
+| `POST /api/login` / `POST /api/logout`| no   | shared-password login (rate-limited; passwordless when unset) |
 | `GET /api/me`                         | yes  | cookie check                              |
 | `GET /api/directories`                | yes  | list directories (config + user-added) + `canManage` |
 | `POST /api/directories`               | yes  | create-from-template or register (`{name}`) |
@@ -123,7 +272,10 @@ module: `port`, `hostname`, `stateDir`, `passwordFile`, `directories`
 - **Auth** — login compares SHA-256 digests in constant time; success sets an
   HMAC-signed cookie (7-day TTL). `Secure` is added only when the request arrived
   over TLS (`x-forwarded-proto: https`), so plain-HTTP LAN use still works.
-  Failed logins are throttled per client IP with exponential backoff.
+  Failed logins are throttled per client IP with exponential backoff. With no
+  `passwordFile` configured the service is **passwordless**: `/api/login` issues a
+  cookie to anyone (no check, no throttle) and the UI signs in automatically —
+  intended for a trusted host / loopback bind; gate the network otherwise.
 - **Spawn** — each session runs under `setsid` (its own process group, so
   `kill(-pid)` reaps the tree). The spawn environment is **allowlisted**
   (`PATH`, `HOME`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, … + `extraEnv`) so

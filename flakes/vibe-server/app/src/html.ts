@@ -110,7 +110,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
 </style>
 </head>
 <body>
-<div id="login">
+<div id="login" class="hidden">
   <h1>vibe</h1>
   <p class="muted">Sign in to manage Claude Code sessions.</p>
   <div class="row">
@@ -123,7 +123,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
 <div id="app" class="hidden">
   <header>
     <h1>vibe</h1>
-    <button onclick="logout()">Sign out</button>
+    <button id="signout" onclick="logout()">Sign out</button>
   </header>
   <main>
     <div class="row">
@@ -178,6 +178,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
 
 <script>
 let es = null;
+let pwRequired = true; // set from /api/auth-mode on load; false = passwordless
 
 async function api(path, opts) {
   const r = await fetch(path, { headers: { "content-type": "application/json" }, ...opts });
@@ -197,12 +198,17 @@ async function logout() {
   closeLog();
   closeDiff();
   document.getElementById("app").classList.add("hidden");
-  document.getElementById("login").classList.remove("hidden");
+  // Passwordless mode has nothing to sign out to — re-run the boot decision,
+  // which signs back in automatically. (The Sign out button is hidden there.)
+  if (pwRequired) document.getElementById("login").classList.remove("hidden");
+  else boot();
 }
 
 function show() {
   document.getElementById("login").classList.add("hidden");
   document.getElementById("app").classList.remove("hidden");
+  // No password means there's nothing meaningful to sign out from.
+  document.getElementById("signout").style.display = pwRequired ? "" : "none";
   loadDirs();
   refresh();
 }
@@ -669,11 +675,22 @@ setInterval(() => {
   refresh();
 }, 3000);
 
-// Decide which view to show on load.
-(async () => {
+// Decide which view to show: already authed → app; passwordless → auto sign-in;
+// otherwise reveal the login form.
+async function boot() {
   const r = await api("/api/me");
-  if (r.ok) show();
-})();
+  if (r.ok) return show();
+  try {
+    const m = await api("/api/auth-mode");
+    if (m.ok) pwRequired = (await m.json()).passwordRequired !== false;
+  } catch (e) { /* default to requiring a password if the probe fails */ }
+  if (!pwRequired) {
+    const lr = await api("/api/login", { method: "POST", body: JSON.stringify({}) });
+    if (lr.ok) return show();
+  }
+  document.getElementById("login").classList.remove("hidden");
+}
+boot();
 </script>
 </body>
 </html>`;

@@ -10,6 +10,7 @@ import {
   loginFailed,
   loginSucceeded,
   newSessionCookie,
+  passwordRequired,
 } from "./auth.ts";
 import {
   getSession,
@@ -53,7 +54,18 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     return json({ ok: true, sessions: sessionCount() });
   }
 
+  // Public: lets the login page decide whether to prompt for a password or sign
+  // in automatically (passwordless mode). Reveals nothing sensitive.
+  if (path === "/api/auth-mode" && method === "GET") {
+    return json({ passwordRequired: passwordRequired(config.passwordFile) });
+  }
+
   if (path === "/api/login" && method === "POST") {
+    // Passwordless mode (no passwordFile configured): grant a session cookie to
+    // anyone who can reach the service — no password check, no rate limiting.
+    if (!passwordRequired(config.passwordFile)) {
+      return json({ ok: true }, 200, { "set-cookie": await newSessionCookie(secure) });
+    }
     const gate = loginAllowed(clientIp);
     if (!gate.ok) return json({ error: "Too many attempts" }, 429, { "retry-after": String(gate.retryAfter) });
     const body: Record<string, unknown> = await readJsonLimited(req).catch(() => ({}));

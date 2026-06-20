@@ -59,10 +59,16 @@
       vibe-server = final.callPackage ./flakes/vibe-server/package.nix {};
     };
 
-    # ---- NixOS modules (e.g. inputs.antlers.nixosModules.{lanserver,vibe}) ----
+    # ---- NixOS modules ----
+    # inputs.antlers.nixosModules.{lanserver,vibe,vibe-server}
+    #   vibe        → programs.vibe  (the `vibe` Claude Code launcher)
+    #   vibe-server → services.vibe  (the browser session-manager web service)
+    # Import both to run the service with sessions launched by the configured
+    # `vibe`; each is independently usable.
     nixosModules = {
       lanserver = import ./flakes/lanserver/module.nix self;
       vibe = import ./flakes/vibe/module.nix self;
+      vibe-server = import ./flakes/vibe-server/module.nix self;
     };
 
     # ---- Explicit `nix run` targets ----

@@ -22,6 +22,13 @@
 # remote client at claude.ai / mobile can still switch model client-side;
 # `--settings` only sets the session default.)
 #
+# Remote Control session name: when none is given explicitly (no positional name
+# after --remote-control, no VIBE_NAME, no configured remoteControlName), vibe
+# auto-generates `[<namePrefix>-]<repo>-<YYMMDD>` where <repo> is the basename of
+# the working directory's git toplevel (falling back to the cwd) and <YYMMDD> is
+# today's date. So a session in /srv/projects/antlers on 2026-06-20 with
+# namePrefix = "work" is named `work-antlers-260620`.
+#
 # Subscription-first defaults: vibe targets Claude Code subscription plans
 # (Max/Team/Pro). `model` defaults to `opus[1m]` (latest Opus + 1M context —
 # included on Max/Team; Pro draws usage credits), and `subscriptionAuth`
@@ -38,11 +45,13 @@
   claude-code,
   jq,
   coreutils,
+  git,
 }: {
   model ? "opus[1m]",
   effort ? null,
   remoteControl ? false,
   remoteControlName ? null,
+  namePrefix ? "",
   permissions ? {},
   subscriptionAuth ? true,
   extraSettings ? {},
@@ -56,14 +65,15 @@
 
   settingsFile = writeText "vibe-settings.json" (builtins.toJSON settings);
 
-  defaultName =
+  # An explicitly configured name; empty string means "auto-generate at runtime".
+  configuredName =
     if remoteControlName != null
     then remoteControlName
-    else "vibe";
+    else "";
 in
   writeShellApplication {
     name = "vibe";
-    runtimeInputs = [claude-code jq coreutils];
+    runtimeInputs = [claude-code jq coreutils git];
     text = ''
       # vibe — run Claude Code with antlers-pinned settings.
       # (writeShellApplication supplies the shebang + `set -euo pipefail` + shellcheck.)
@@ -80,8 +90,10 @@ in
             '  vibe --remote-control [name]   drive from claude.ai / mobile' \
             '  vibe --show-config             print the pinned settings.json and exit' \
             '  vibe --help                    this help' \
+            'Remote Control name defaults to [<prefix>-]<repo>-<YYMMDD>' \
+            '  (<repo> = basename of the working dir git toplevel); [name] overrides it.' \
             'Env overrides: VIBE_MODEL, VIBE_EFFORT, VIBE_REMOTE_CONTROL=1,' \
-            '  VIBE_NAME=<name>, VIBE_API_KEY_AUTH=1 (API billing not subscription).'
+            '  VIBE_NAME=<name>, VIBE_NAME_PREFIX=<prefix>, VIBE_API_KEY_AUTH=1 (API billing).'
           echo
           echo "Pinned settings:"
           jq . "$BAKED_SETTINGS" 2>/dev/null || cat "$BAKED_SETTINGS"
@@ -99,7 +111,10 @@ in
       # Remote-control mode: `vibe --remote-control [name]` or VIBE_REMOTE_CONTROL=1.
       # The session can then be driven from claude.ai / the mobile app.
       REMOTE=${lib.boolToString remoteControl}
-      NAME=${lib.escapeShellArg defaultName}
+      # NAME stays empty to mean "not explicitly set" → auto-generate below.
+      NAME=""
+      CONFIGURED_NAME=${lib.escapeShellArg configuredName}
+      NAME_PREFIX=${lib.escapeShellArg namePrefix}
       if [ "''${1:-}" = "--remote-control" ]; then
         REMOTE=true
         shift
@@ -111,6 +126,7 @@ in
       fi
       [ -n "''${VIBE_REMOTE_CONTROL:-}" ] && REMOTE=true
       [ -n "''${VIBE_NAME:-}" ] && NAME="$VIBE_NAME"
+      [ -n "''${VIBE_NAME_PREFIX:-}" ] && NAME_PREFIX="$VIBE_NAME_PREFIX"
 
       # Subscription-first auth: vibe targets Claude Code subscription plans
       # (Max/Team/Pro), which authenticate via the OAuth login in ~/.claude /
@@ -148,6 +164,25 @@ in
       # the mobile app.
       RC_ARGS=()
       if [ "$REMOTE" = true ]; then
+        # Resolve the Remote Control session name. Precedence: an explicit
+        # --remote-control <name> / VIBE_NAME (already in $NAME), then a configured
+        # remoteControlName, then auto-generated [<prefix>-]<repo>-<YYMMDD> from the
+        # working directory's git toplevel (cwd fallback).
+        if [ -z "$NAME" ]; then
+          if [ -n "$CONFIGURED_NAME" ]; then
+            NAME="$CONFIGURED_NAME"
+          else
+            REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
+            # Restrict the repo segment to a safe session-name charset.
+            REPO="$(printf '%s' "$REPO" | tr -c 'A-Za-z0-9_-' '-')"
+            DATE="$(date +%y%m%d)"
+            if [ -n "$NAME_PREFIX" ]; then
+              NAME="$NAME_PREFIX-$REPO-$DATE"
+            else
+              NAME="$REPO-$DATE"
+            fi
+          fi
+        fi
         RC_ARGS=(--remote-control "$NAME")
       fi
 

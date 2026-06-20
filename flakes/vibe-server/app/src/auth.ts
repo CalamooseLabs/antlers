@@ -66,6 +66,13 @@ function ctEq(a: Uint8Array, b: Uint8Array): boolean {
   return d === 0;
 }
 
+// Whether a shared password is configured at all. An empty/whitespace
+// passwordFile means none was passed → the UI runs passwordless (anyone who can
+// reach the service may sign in). Trimmed so a stray whitespace path is "none".
+export function passwordRequired(passwordFile: string): boolean {
+  return passwordFile.trim().length > 0;
+}
+
 export async function checkPassword(submitted: string, passwordFile: string): Promise<boolean> {
   let expected: string;
   try {
