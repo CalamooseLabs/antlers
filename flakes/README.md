@@ -13,6 +13,10 @@ there is a single source of truth and no per-package flakes to keep in sync.
 | `plex-desktop/`| `packages.<system>.plex-desktop`    | `plex-desktop` wrapped with Hyprland/Stylix fixes |
 | `lanserver/`   | `packages.<system>.lanserver`       | a Deno LAN command server (source in `lanserver/app`, compiled with `deno compile`) |
 | `lanserver/`   | `nixosModules.lanserver`            | NixOS service module (`services.lanserver`) whose `ExecStart` is the package above |
+| `vibe/`        | `lib.<system>.mkVibeWrapper`        | builder: cfg → a `vibe` launcher that runs Claude Code with pinned model/effort/permissions (and optional Remote Control) |
+| `vibe/`        | `packages.<system>.vibe`            | the above with default settings (ready to run) |
+| `vibe/`        | `nixosModules.vibe`                 | NixOS module: `programs.vibe` (the launcher) + `services.vibe` (browser session manager) |
+| `vibe-server/` | `packages.<system>.vibe-server`     | Deno web service behind `services.vibe` (source in `vibe-server/app`, compiled with `deno compile`) |
 
 Consume from the root flake:
 

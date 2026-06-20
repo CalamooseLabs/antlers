@@ -29,17 +29,24 @@
 
     # LanServer (vendored from CalamooseLabs/LanServer) — Deno LAN command server.
     lanserver = pkgs.callPackage ./flakes/lanserver/package.nix {};
+
+    # Vibe — configured Claude Code launcher (programs.vibe) + browser session
+    # manager (services.vibe, backed by the vibe-server Deno web service).
+    mkVibeWrapper = pkgs.callPackage ./flakes/vibe/package.nix {};
+    vibe = mkVibeWrapper {};
+    vibe-server = pkgs.callPackage ./flakes/vibe-server/package.nix {};
   in {
     # ---- Buildable packages: `nix build .#zed-editor`, `nix run .#zed-editor` ----
     packages.${system} = {
-      inherit zed-editor plex-desktop antlers lanserver;
+      inherit zed-editor plex-desktop antlers lanserver vibe vibe-server;
       default = zed-editor;
     };
 
     # ---- Parameterized builders for downstream flakes that need custom config ----
     # e.g. inputs.antlers.lib.x86_64-linux.mkZedWrapper { ...zed settings... }
+    #      inputs.antlers.lib.x86_64-linux.mkVibeWrapper { model = "opus"; ... }
     lib.${system} = {
-      inherit mkZedWrapper;
+      inherit mkZedWrapper mkVibeWrapper;
     };
 
     # ---- Overlay so NixOS / home-manager configs can consume directly ----
@@ -48,10 +55,15 @@
       antlers-zed-editor = (final.callPackage ./flakes/zed-editor/package.nix {}) {};
       plex-desktop-fixed = final.callPackage ./flakes/plex-desktop/package.nix {};
       lanserver = final.callPackage ./flakes/lanserver/package.nix {};
+      vibe = (final.callPackage ./flakes/vibe/package.nix {}) {};
+      vibe-server = final.callPackage ./flakes/vibe-server/package.nix {};
     };
 
-    # ---- NixOS modules (e.g. inputs.antlers.nixosModules.lanserver) ----
-    nixosModules.lanserver = import ./flakes/lanserver/module.nix self;
+    # ---- NixOS modules (e.g. inputs.antlers.nixosModules.{lanserver,vibe}) ----
+    nixosModules = {
+      lanserver = import ./flakes/lanserver/module.nix self;
+      vibe = import ./flakes/vibe/module.nix self;
+    };
 
     # ---- Explicit `nix run` targets ----
     apps.${system} = {
@@ -62,6 +74,10 @@
       antlers = {
         type = "app";
         program = "${antlers}/bin/antlers";
+      };
+      vibe = {
+        type = "app";
+        program = "${vibe}/bin/vibe";
       };
       default = self.apps.${system}.zed-editor;
     };
