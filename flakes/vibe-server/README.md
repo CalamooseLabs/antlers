@@ -11,6 +11,54 @@ manages lifecycle.
 Exposed by the root flake as `packages.<system>.vibe-server`; its `ExecStart` is
 wired up by `nixosModules.vibe` (`../vibe/module.nix`).
 
+## Running it (NixOS)
+
+You don't run `vibe-server` directly — it's a `deno compile` binary (a generic
+ELF) that the `nixosModules.vibe` systemd unit launches under **nix-ld**.
+(`nix run …#vibe-server` on NixOS fails with a `stub-ld` error for that reason —
+that's expected; use the service.) Configure everything through `services.vibe`;
+the module renders `/etc/vibe/config.json` (`$VIBE_CONFIG`) and wires the unit:
+
+```nix
+{ inputs, ... }:
+{
+  imports = [ inputs.antlers.nixosModules.vibe ];
+
+  services.vibe = {
+    enable = true;
+    passwordFile = "/run/secrets/vibe-password";   # shared login password
+    claudeConfigDir = "/var/lib/vibe/claude";       # pre-seeded OAuth login (subscription)
+    directories = [
+      { name = "antlers"; path = "/srv/projects/antlers"; }
+    ];
+    openFirewall = true;
+    localNetworkOnly = true;                         # restrict to LAN subnets
+  };
+}
+```
+
+…which renders this `/etc/vibe/config.json` (defaults filled in by the module):
+
+```json
+{
+  "port": 8420,
+  "hostname": "0.0.0.0",
+  "stateDir": "/var/lib/vibe",
+  "passwordFile": "/run/secrets/vibe-password",
+  "directories": [ { "name": "antlers", "path": "/srv/projects/antlers" } ],
+  "sessionCommand": [ "/nix/store/…-vibe/bin/vibe", "--remote-control", "@NAME@" ],
+  "projectsDir": "/var/lib/vibe/projects",
+  "requireTLS": false,
+  "sessionNamePrefix": "",
+  "maxLogBytes": 26214400
+}
+```
+
+See the [`vibe` module README](../vibe/README.md#servicesvibe-options) for the
+full option set and more examples (TLS reverse proxy, API-key billing,
+per-session env). To smoke-test the app from source without the module, point
+`$VIBE_CONFIG` at a hand-written config and run `deno run -A src/main.ts`.
+
 ## Zero external imports (build constraint)
 
 `app/src/` uses **only** `Deno.*` and Web platform globals (`crypto.subtle`,
@@ -35,6 +83,7 @@ wired up by `nixosModules.vibe` (`../vibe/module.nix`).
 | `auth.ts`     | HMAC-signed cookie, constant-time password check, per-IP login throttle |
 | `sessions.ts` | spawn (env-allowlisted), kill, snapshot/recover, login-URL scan, reaper |
 | `directories.ts` | runtime project dirs: create-from-template / register / unregister + persist |
+| `diff.ts`     | read-only git working-tree diff (tracked + untracked) for the Diff modal |
 | `sse.ts`      | read-only SSE tail of a session log                                  |
 | `http.ts`     | JSON responses + size-capped JSON body reader                        |
 | `html.ts`     | the inlined single-page UI                                           |
@@ -67,6 +116,7 @@ module: `port`, `hostname`, `stateDir`, `passwordFile`, `directories`
 | `DELETE /api/sessions/:id`            | yes  | kill a session                            |
 | `GET /api/sessions/:id/logs`          | yes  | SSE stream of the captured log            |
 | `GET /api/sessions/:id/logs/download` | yes  | download the captured log (attachment)    |
+| `GET /api/sessions/:id/diff`          | yes  | git diff of the session's working dir (JSON) |
 
 ## Behavior notes
 
@@ -82,6 +132,32 @@ module: `port`, `hostname`, `stateDir`, `passwordFile`, `directories`
   URL, it's captured as `SessionInfo.loginUrl` and rendered as a clickable link
   in the UI (host-validated client- and server-side) so the user can
   authenticate.
+- **Diff viewer** — `GET /api/sessions/:id/diff` returns a JSON `DiffResult`
+  (`{ isRepo, branch?, empty, diff, truncated, error? }`) for the session's
+  working directory, rendered by the UI's per-session **Diff** modal (responsive,
+  collapsible per-file cards, +/- stats, colored lines). git runs **read-only**
+  (never mutates the index/repo) via `Deno.Command` with a fixed argv, a scrubbed
+  env (`GIT_OPTIONAL_LOCKS=0` so it never waits on `index.lock` while Claude
+  writes; `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL=/dev/null`/`HOME=/var/empty` so
+  a repo's `.git/config` aliases/hooks can't run; `--no-ext-diff`/`--no-textconv`
+  on **both** diff invocations so no attacker-controlled external-diff/textconv
+  program is exec'd; `core.bigFileThreshold` so one giant blob diffs as "binary"
+  rather than emitting gigabytes), a `--` terminator on every argv (a file named
+  `-x` is a path, not a flag), a 10s per-call timeout plus a 30s aggregate
+  deadline, and byte/file caps (`truncated: true` when hit — note the tracked
+  byte cap is applied after buffering, so it is `bigFileThreshold` + the timeouts
+  that bound peak memory). It covers tracked changes/staged/deletions/renames
+  (`git diff HEAD`, or `git diff --cached` on a not-yet-committed repo so freshly
+  scaffolded projects still show their staged files) plus untracked,
+  **non-ignored** files (per-file `git diff --no-index`; `.gitignore`'d files are
+  never read or shown; binary files are shown as a labeled binary card without
+  their raw content; untracked files larger than 256 KiB are skipped). Not-a-repo
+  and a clean tree are normal 200 states
+  (`isRepo: false` / `empty: true`), not errors. The diff body is rendered via
+  `textContent` only, so a hostile filename/content cannot inject HTML.
+  **Note:** like the log viewer, this is auth-gated and shows whatever is in the
+  working tree — including the contents of *tracked-and-modified* secret files
+  (e.g. a committed `.env`); anyone with the shared password can see them.
 - **Directory management** — when `projectsDir` is configured, `POST
   /api/directories` creates `projectsDir/<name>` (scaffolded from
   `newProjectTemplate` + `git init`) or registers an existing one; user-added

@@ -26,6 +26,7 @@ import {
   resolveDir,
 } from "./directories.ts";
 import { streamLog } from "./sse.ts";
+import { gitDiff } from "./diff.ts";
 import { json, readJsonLimited } from "./http.ts";
 import { INDEX_HTML } from "./html.ts";
 import { isError, isValidName } from "./util.ts";
@@ -141,6 +142,17 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     } catch {
       return json({ error: "Not found" }, 404);
     }
+  }
+
+  const diff = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/diff$/);
+  if (diff && method === "GET") {
+    const s = getSession(diff[1]);
+    if (!s) return json({ error: "Not found" }, 404);
+    // The path is server-controlled (config / projectsDir), never from the request.
+    // Defense-in-depth: only diff a still-registered directory, so an unregistered/
+    // stale dir becomes a clean 409 rather than a stray git run.
+    if (!resolveDir(config, s.info.dir)) return json({ error: "Directory no longer registered" }, 409);
+    return json(await gitDiff(s.info.path)); // gitDiff never throws (catches internally)
   }
 
   return json({ error: "Not found" }, 404);

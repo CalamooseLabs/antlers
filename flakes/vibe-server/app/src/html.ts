@@ -60,6 +60,53 @@ export const INDEX_HTML = `<!DOCTYPE html>
     word-break: break-word; margin-top: 12px; }
   .muted { color: #8b949e; }
   .hidden { display: none; }
+  /* ---- diff modal ---- */
+  .backdrop { position: fixed; inset: 0; background: rgba(1,4,9,0.7);
+    display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
+  .dialog { background: #0d1117; border: 1px solid #30363d; border-radius: 10px;
+    width: 900px; max-width: 100%; height: 85vh; max-height: 85vh;
+    display: flex; flex-direction: column; overflow: hidden; }
+  .dialog-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px 16px; border-bottom: 1px solid #21262d; background: #161b22; }
+  .dialog-head h2 { font-size: 15px; margin: 0; letter-spacing: .5px; flex: 0 0 auto; }
+  .dialog-head .spacer { flex: 1 1 auto; }
+  .dialog-head .branch { color: #8b949e; font-size: 12px; }
+  .dialog-head .branch code { color: #c9d1d9; }
+  .dialog-body { flex: 1 1 auto; overflow: auto; padding: 12px 16px; }
+  .diff-banner { background: #3a2d12; color: #d29922; border: 1px solid #9e6a03;
+    border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; }
+  .diff-state { color: #8b949e; text-align: center; padding: 40px 0; }
+  .diff-state.error { color: #ff7b72; }
+  .diff-file { border: 1px solid #21262d; border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
+  .diff-file-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    background: #161b22; padding: 8px 10px; cursor: pointer; user-select: none; }
+  .diff-file-head:hover { background: #1c2230; }
+  .diff-file-head .caret { color: #8b949e; width: 12px; flex: 0 0 auto; }
+  .diff-file-head .fpath { word-break: break-all; }
+  .diff-file-head .fspacer { flex: 1 1 auto; }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 10px; flex: 0 0 auto; }
+  .badge.added { background: #133a1b; color: #56d364; }
+  .badge.modified { background: #21262d; color: #8b949e; }
+  .badge.deleted { background: #4a1d1d; color: #ff7b72; }
+  .badge.renamed { background: #1a2c4a; color: #58a6ff; }
+  .badge.binary { background: #21262d; color: #8b949e; }
+  .stat-add { color: #56d364; font-size: 12px; }
+  .stat-del { color: #ff7b72; font-size: 12px; }
+  .diff-lines { margin: 0; overflow-x: auto; background: #0d1117; }
+  .dl { display: block; white-space: pre; padding: 0 10px; min-width: 100%;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .dl.add { background: rgba(46,160,67,0.18); color: #c9d1d9; }
+  .dl.del { background: rgba(248,81,73,0.18); color: #c9d1d9; }
+  .dl.hunk { background: #161b22; color: #58a6ff; }
+  .dl.meta { color: #8b949e; }
+  .dl.ctx { color: #c9d1d9; }
+  @media (max-width: 640px) {
+    .backdrop { padding: 0; }
+    .dialog { width: 100vw; max-width: 100vw; height: 92vh; max-height: 92vh;
+      border-radius: 0; border-left: 0; border-right: 0; }
+    .dialog-head { padding: 10px 12px; }
+    .dialog-body { padding: 10px 12px; }
+  }
 </style>
 </head>
 <body>
@@ -112,6 +159,20 @@ export const INDEX_HTML = `<!DOCTYPE html>
       <div class="meta" id="logMeta"></div>
       <pre id="log"></pre>
     </div>
+
+    <div id="diffModal" class="backdrop hidden" role="dialog" aria-modal="true"
+         aria-labelledby="diffTitle" tabindex="-1" onclick="diffBackdrop(event)">
+      <div class="dialog" onclick="event.stopPropagation()">
+        <div class="dialog-head">
+          <h2 id="diffTitle">Diff</h2>
+          <span class="branch" id="diffBranch"></span>
+          <span class="spacer"></span>
+          <button onclick="loadDiff()" id="diffRefresh">Refresh</button>
+          <button onclick="closeDiff()" aria-label="Close diff">✕</button>
+        </div>
+        <div class="dialog-body" id="diffBody"></div>
+      </div>
+    </div>
   </main>
 </div>
 
@@ -134,6 +195,7 @@ async function login() {
 async function logout() {
   await api("/api/logout", { method: "POST" });
   closeLog();
+  closeDiff();
   document.getElementById("app").classList.add("hidden");
   document.getElementById("login").classList.remove("hidden");
 }
@@ -298,6 +360,11 @@ async function refresh() {
     logsBtn.textContent = "Logs";
     logsBtn.onclick = () => openLog(s);
     actions.appendChild(logsBtn);
+    const diffBtn = document.createElement("button");
+    diffBtn.textContent = "Diff";
+    diffBtn.setAttribute("aria-label", "View git diff for " + s.name);
+    diffBtn.onclick = () => openDiff(s);
+    actions.appendChild(diffBtn);
     if (s.status === "running") {
       const killBtn = document.createElement("button");
       killBtn.className = "danger";
@@ -343,12 +410,263 @@ function closeLog() {
   document.getElementById("logView").classList.add("hidden");
 }
 
+// ===== diff modal =====
+let diffSession = null;       // the session whose diff is open
+let diffLastFocus = null;     // element to restore focus to on close
+
+function openDiff(s) {
+  diffSession = s;
+  diffLastFocus = document.activeElement;
+  const modal = document.getElementById("diffModal");
+  document.getElementById("diffTitle").textContent = "Diff — " + s.name;
+  document.getElementById("diffBranch").textContent = "";
+  modal.classList.remove("hidden");
+  modal.focus();
+  loadDiff();
+}
+
+function closeDiff() {
+  const modal = document.getElementById("diffModal");
+  if (modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  diffSession = null;
+  document.getElementById("diffBody").innerHTML = "";
+  document.getElementById("diffBranch").textContent = "";
+  if (diffLastFocus && diffLastFocus.focus) diffLastFocus.focus();
+  diffLastFocus = null;
+}
+
+function diffBackdrop(ev) {
+  // Close only when the click is on the backdrop itself, not a bubbled child.
+  if (ev.target && ev.target.id === "diffModal") closeDiff();
+}
+
+function setDiffState(cls, msg) {
+  const body = document.getElementById("diffBody");
+  body.innerHTML = "";
+  const d = document.createElement("div");
+  d.className = "diff-state" + (cls ? " " + cls : "");
+  d.textContent = msg;
+  body.appendChild(d);
+}
+
+async function loadDiff() {
+  if (!diffSession) return;
+  const id = diffSession.id;
+  // A request is stale once the modal was closed or a different session opened
+  // while it was in flight; stale results must not touch the DOM or log out.
+  const stale = () => !diffSession || diffSession.id !== id;
+  const btn = document.getElementById("diffRefresh");
+  btn.disabled = true;
+  setDiffState("", "Loading diff…");
+  try {
+    const r = await api("/api/sessions/" + id + "/diff");
+    if (stale()) return;
+    if (r.status === 401) { closeDiff(); return logout(); }
+    if (!r.ok) { setDiffState("error", "Failed to load diff (HTTP " + r.status + ")"); return; }
+    const data = await r.json();
+    if (stale()) return;
+    renderDiff(data);
+  } catch (e) {
+    if (!stale()) setDiffState("error", "Network error loading diff.");
+  } finally {
+    if (!stale()) btn.disabled = false;
+  }
+}
+
+function renderDiff(data) {
+  const body = document.getElementById("diffBody");
+  body.innerHTML = "";
+
+  const branchEl = document.getElementById("diffBranch");
+  branchEl.textContent = "";
+  if (data && data.isRepo && data.branch) {
+    branchEl.appendChild(document.createTextNode("on "));
+    const code = document.createElement("code");
+    code.textContent = data.branch;
+    branchEl.appendChild(code);
+  }
+
+  if (!data || data.error) {
+    setDiffState("error", (data && data.error) ? data.error : "Unknown error.");
+    return;
+  }
+  if (!data.isRepo) { setDiffState("", "Not a git repository."); return; }
+  if (data.empty || !data.diff || !data.diff.trim()) { setDiffState("", "No changes."); return; }
+
+  if (data.truncated) {
+    const banner = document.createElement("div");
+    banner.className = "diff-banner";
+    banner.textContent = "Diff was truncated by the server (output too large). " +
+      "Showing the first portion only.";
+    body.appendChild(banner);
+  }
+
+  const files = parseDiff(data.diff);
+  if (!files.length) {
+    // No recognizable file headers — render the raw text safely via textContent.
+    const pre = document.createElement("pre");
+    pre.className = "diff-lines";
+    const line = document.createElement("code");
+    line.className = "dl ctx";
+    line.textContent = data.diff;
+    pre.appendChild(line);
+    body.appendChild(pre);
+    return;
+  }
+  for (const f of files) body.appendChild(renderFile(f));
+}
+
+// Parse unified git-diff text into files -> lines. Tracks in-hunk state so a
+// content line like a deleted SQL comment ("-- foo" -> diff line "--- foo") is
+// classified as a deletion, not mistaken for a "---" file header.
+//   file: { path, oldPath, status, binary, adds, dels, inHunk, lines }
+//   line.type in "add" | "del" | "hunk" | "ctx" | "meta"
+function parseDiff(text) {
+  const files = [];
+  let cur = null;
+  const lines = text.split("\\n");
+  const push = (type, t) => { if (cur) cur.lines.push({ type: type, text: t }); };
+
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+
+    if (ln.indexOf("diff --git ") === 0) {
+      cur = { path: "", oldPath: "", status: "modified", binary: false,
+              adds: 0, dels: 0, inHunk: false, lines: [] };
+      files.push(cur);
+      const m = ln.match(/^diff --git a\\/(.*) b\\/(.*)$/);
+      if (m) { cur.oldPath = m[1]; cur.path = m[2]; }
+      push("meta", ln);
+      continue;
+    }
+    if (!cur) continue; // preamble before the first header (shouldn't happen)
+
+    if (ln.indexOf("@@") === 0) { cur.inHunk = true; push("hunk", ln); continue; }
+
+    if (cur.inHunk) {
+      // Inside a hunk body: classify strictly by the leading marker char.
+      const c = ln.charAt(0);
+      if (c === "+") { cur.adds++; push("add", ln); }
+      else if (c === "-") { cur.dels++; push("del", ln); }
+      else if (ln.indexOf("\\\\ No newline") === 0) push("meta", ln);
+      else push("ctx", ln);
+      continue;
+    }
+
+    // Pre-hunk header lines.
+    if (ln.indexOf("new file") === 0) { cur.status = "added"; push("meta", ln); continue; }
+    if (ln.indexOf("deleted file") === 0) { cur.status = "deleted"; push("meta", ln); continue; }
+    if (ln.indexOf("rename from ") === 0) {
+      cur.status = "renamed"; cur.oldPath = ln.slice("rename from ".length); push("meta", ln); continue;
+    }
+    if (ln.indexOf("rename to ") === 0) {
+      cur.status = "renamed"; cur.path = ln.slice("rename to ".length); push("meta", ln); continue;
+    }
+    if (ln.indexOf("Binary files ") === 0) { cur.binary = true; push("meta", ln); continue; }
+    if (ln.indexOf("--- ") === 0) {
+      const p = ln.slice(4);
+      if (!cur.oldPath && p !== "/dev/null") cur.oldPath = p.replace(/^a\\//, "");
+      push("meta", ln); continue;
+    }
+    if (ln.indexOf("+++ ") === 0) {
+      const p = ln.slice(4);
+      if (!cur.path && p !== "/dev/null") cur.path = p.replace(/^b\\//, "");
+      push("meta", ln); continue;
+    }
+    // index / old mode / new mode / similarity / copy from|to / etc.
+    push("meta", ln);
+  }
+  return files;
+}
+
+function renderFile(f) {
+  const wrap = document.createElement("div");
+  wrap.className = "diff-file";
+
+  const head = document.createElement("div");
+  head.className = "diff-file-head";
+
+  const caret = document.createElement("span");
+  caret.className = "caret";
+  caret.textContent = "▾";
+  head.appendChild(caret);
+
+  const path = document.createElement("span");
+  path.className = "fpath";
+  if (f.status === "renamed" && f.oldPath && f.oldPath !== f.path) {
+    path.textContent = f.oldPath + " → " + f.path;
+  } else {
+    path.textContent = f.path || f.oldPath || "(unknown)";
+  }
+  head.appendChild(path);
+
+  const badge = document.createElement("span");
+  const st = f.binary ? "binary" : f.status;
+  badge.className = "badge " + st;
+  badge.textContent = st;
+  head.appendChild(badge);
+
+  const spacer = document.createElement("span");
+  spacer.className = "fspacer";
+  head.appendChild(spacer);
+
+  if (!f.binary) {
+    const add = document.createElement("span");
+    add.className = "stat-add";
+    add.textContent = "+" + f.adds;
+    head.appendChild(add);
+    const del = document.createElement("span");
+    del.className = "stat-del";
+    del.textContent = "-" + f.dels;
+    head.appendChild(del);
+  }
+
+  const pre = document.createElement("pre");
+  pre.className = "diff-lines";
+
+  if (f.binary) {
+    const line = document.createElement("code");
+    line.className = "dl meta";
+    line.textContent = "Binary file not shown.";
+    pre.appendChild(line);
+  } else {
+    for (const l of f.lines) {
+      const line = document.createElement("code");
+      line.className = "dl " + l.type;
+      // CRITICAL: textContent only — diff text/filenames are attacker-influenced.
+      line.textContent = l.text.length ? l.text : " ";
+      pre.appendChild(line);
+    }
+  }
+
+  head.onclick = () => {
+    const hidden = pre.classList.toggle("hidden");
+    caret.textContent = hidden ? "▸" : "▾";
+  };
+
+  wrap.appendChild(head);
+  wrap.appendChild(pre);
+  return wrap;
+}
+
 document.getElementById("pw").addEventListener("keydown", (e) => {
   if (e.key === "Enter") login();
 });
 
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !document.getElementById("diffModal").classList.contains("hidden")) {
+    closeDiff();
+  }
+});
+
 setInterval(() => {
-  if (!document.getElementById("app").classList.contains("hidden")) refresh();
+  // Don't rebuild the session table while the diff modal is open — it would
+  // detach the row's Diff button (breaking focus-restore on close) and churn
+  // the page behind the modal. The next tick after closing refreshes.
+  if (document.getElementById("app").classList.contains("hidden")) return;
+  if (!document.getElementById("diffModal").classList.contains("hidden")) return;
+  refresh();
 }, 3000);
 
 // Decide which view to show on load.
