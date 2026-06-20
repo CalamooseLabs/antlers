@@ -67,6 +67,16 @@ with lib; let
 
   stateDir = "/var/lib/vibe";
 
+  # Effective identity the unit runs under — root when runAsRoot, else user/group.
+  runUser =
+    if scfg.runAsRoot
+    then "root"
+    else scfg.user;
+  runGroup =
+    if scfg.runAsRoot
+    then "root"
+    else scfg.group;
+
   # systemd list-valued settings (ReadWritePaths, …) are split on whitespace
   # *within* a value, so a path containing spaces must be double-quoted or
   # systemd truncates it at the first space (→ "set up mount namespacing:
@@ -205,6 +215,12 @@ in {
       description = "Group the service runs as. Only the default \"vibe\" group is auto-created; if you override this, create the group yourself.";
     };
 
+    runAsRoot = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Run the service (and the sessions it spawns) as root instead of `user`/`group`. Convenient when sessions need access to directories owned by assorted users (e.g. personal project dirs under /home, or /etc/nixos) — but it forgoes the privilege separation the dedicated `vibe` user provides, so prefer a real `user`/`group` with the right permissions where you can. When true, `user`/`group` are ignored and the `vibe` user/group is not created.";
+    };
+
     environmentFile = mkOption {
       type = types.nullOr types.path;
       default = null;
@@ -274,7 +290,7 @@ in {
 
     systemd.tmpfiles.rules =
       optional (scfg.projectsDir != null)
-      "d ${quotePath scfg.projectsDir} 0750 ${scfg.user} ${scfg.group} -";
+      "d ${quotePath scfg.projectsDir} 0750 ${runUser} ${runGroup} -";
 
     warnings =
       (optional (protectHome == false)
@@ -282,7 +298,9 @@ in {
       ++ (optional (scfg.openFirewall && scfg.hostname != "127.0.0.1" && scfg.hostname != "::1" && !scfg.requireTLS)
         "services.vibe-server: exposed on a non-loopback address over plain HTTP without requireTLS — front it with a TLS reverse proxy (then set services.vibe-server.requireTLS = true) for anything beyond a trusted LAN.")
       ++ (optional (scfg.passwordFile == null && scfg.openFirewall && scfg.hostname != "127.0.0.1" && scfg.hostname != "::1")
-        "services.vibe-server: no passwordFile set — the web UI is passwordless and anyone who can reach it can spawn Claude Code sessions. Set services.vibe-server.passwordFile (or restrict the network) when exposing it beyond a trusted host.");
+        "services.vibe-server: no passwordFile set — the web UI is passwordless and anyone who can reach it can spawn Claude Code sessions. Set services.vibe-server.passwordFile (or restrict the network) when exposing it beyond a trusted host.")
+      ++ (optional scfg.runAsRoot
+        "services.vibe-server: running as root (runAsRoot = true) — the service and every Claude Code session it spawns run with full privileges. Use a dedicated user/group with the right directory permissions instead, where possible.");
 
     assertions = [
       {
@@ -307,8 +325,8 @@ in {
       serviceConfig =
         {
           Type = "exec";
-          User = scfg.user;
-          Group = scfg.group;
+          User = runUser;
+          Group = runGroup;
           ExecStart = "${scfg.package}/bin/vibe-server";
           Restart = "always";
           RestartSec = "5";
@@ -359,7 +377,7 @@ in {
         };
     };
 
-    users.users = mkIf (scfg.user == "vibe") {
+    users.users = mkIf (!scfg.runAsRoot && scfg.user == "vibe") {
       vibe = {
         isSystemUser = true;
         group = scfg.group;
@@ -367,7 +385,7 @@ in {
         description = "vibe service user";
       };
     };
-    users.groups = mkIf (scfg.group == "vibe") {vibe = {};};
+    users.groups = mkIf (!scfg.runAsRoot && scfg.group == "vibe") {vibe = {};};
 
     networking.firewall = mkMerge [
       (mkIf (scfg.openFirewall && !scfg.localNetworkOnly) {

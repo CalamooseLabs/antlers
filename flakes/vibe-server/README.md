@@ -9,11 +9,9 @@ actually *drive* a session from [claude.ai/code](https://claude.ai/code) or the
 mobile app — the browser only manages lifecycle.
 
 Exposed by the root flake as `packages.<system>.vibe-server`; its `ExecStart` is
-wired up by `nixosModules.vibe-server` (`./module.nix`). The `vibe` launcher that
-sessions are spawned with is the separate [`nixosModules.vibe`](../vibe/README.md)
-(`programs.vibe`) — import both so sessions inherit your pinned
-model/effort/permissions; imported alone, vibe-server falls back to a
-default-config launcher.
+wired up by `nixosModules.vibe-server` (`./module.nix`). Sessions are launched with
+the `vibe` command from `services.vibe-server.vibePackage` (a default launcher
+unless you override it — see the options below).
 
 ## Running it (NixOS)
 
@@ -26,13 +24,7 @@ the module renders `/etc/vibe/config.json` (`$VIBE_CONFIG`) and wires the unit:
 ```nix
 { inputs, ... }:
 {
-  # vibe-server runs the service; vibe gives it the launcher (model/effort pins).
-  imports = [
-    inputs.antlers.nixosModules.vibe-server
-    inputs.antlers.nixosModules.vibe
-  ];
-
-  programs.vibe = { model = "opus[1m]"; effort = "high"; };  # pins flow to sessions
+  imports = [ inputs.antlers.nixosModules.vibe-server ];
 
   services.vibe-server = {
     enable = true;
@@ -71,10 +63,10 @@ hand-written config and run `deno run -A src/main.ts`.
 
 The service user must be authenticated to Claude. For **subscription** plans
 (Max/Team/Pro) pre-seed `claudeConfigDir` with an OAuth `/login` (run `claude`
-once as the service user, or copy its `~/.claude`). Only use `environmentFile`
-with `ANTHROPIC_API_KEY=…` for API-key billing — and then also set
-`programs.vibe.subscriptionAuth = false`, or the launcher drops the key. See the
-[`vibe` README](../vibe/README.md#auth--billing) for the launcher's auth model.
+once as the service user, or copy its `~/.claude`). For API-key billing set
+`environmentFile` to a file containing `ANTHROPIC_API_KEY=…` — and use a
+`vibePackage` launcher configured for API-key billing (the default launcher
+favours subscription OAuth and drops a stray `ANTHROPIC_API_KEY`).
 
 The web UI's own login is separate: a shared password (`passwordFile`) gates who
 can reach the session manager. Leave `passwordFile` unset for a **passwordless**
@@ -112,7 +104,7 @@ UI's *Add directory* form then creates/registers directories under it (see
 | `hostname`                | `"0.0.0.0"`                      | bind address (use `"127.0.0.1"` behind a reverse proxy)                     |
 | `passwordFile`            | `null` (passwordless)            | file holding the shared login password (read at runtime, never in the store). Null = passwordless: anyone who can reach the UI signs in automatically — set it (or restrict the network) when exposing beyond a trusted host |
 | `directories`             | `[]`                             | quick-launch `{ name; path; }` list (see above)                            |
-| `vibePackage`             | the `programs.vibe` launcher     | the `vibe` package sessions are spawned with (carries the model/effort pins; a default-config launcher if `programs.vibe` is not imported) |
+| `vibePackage`             | a default `vibe` launcher        | the `vibe` launcher package sessions are spawned with; override to pin model/effort/permissions/auth |
 | `package`                 | `vibe-server`                    | the server package to run                                                   |
 | `sessionCommand`          | `vibe --remote-control @NAME@`   | command run per session; `@DIR@`/`@NAME@` substituted, cwd = chosen dir     |
 | `remoteControl.enable`    | `true`                           | default `sessionCommand` launches in Remote Control mode (false → set a headless `sessionCommand`) |
@@ -125,6 +117,7 @@ UI's *Add directory* form then creates/registers directories under it (see
 | `claudeConfigDir`         | `null`                           | pre-seeded OAuth login dir (recommended subscription auth → `CLAUDE_CONFIG_DIR`) |
 | `environmentFile`         | `null`                           | systemd `EnvironmentFile` (e.g. `ANTHROPIC_API_KEY=…` for API-key billing)  |
 | `user` / `group`          | `"vibe"` / `"vibe"`              | service identity (only the default `vibe` user/group is auto-created)       |
+| `runAsRoot`               | `false`                          | run the service + spawned sessions as root (ignores `user`/`group`); handy for accessing dirs owned by assorted users, at the cost of privilege separation |
 | `openFirewall`            | `false`                          | open `port` in the firewall                                                 |
 | `localNetworkOnly`        | `false`                          | when opening the firewall, restrict to LAN subnets only                     |
 | `localNetworkSubnets`     | RFC1918 (`192.168/16`, `10/8`, `172.16/12`) | IPv4 subnets allowed when `localNetworkOnly`                     |
@@ -132,27 +125,16 @@ UI's *Add directory* form then creates/registers directories under it (see
 | `protectHome`             | `null` (auto)                    | systemd `ProtectHome`; auto `false` when a configured dir is under `/home`, else `"tmpfs"` |
 | `enableNixLd`             | `true`                           | enable nix-ld so the compiled Deno binary can run                           |
 
-The `programs.vibe` knobs (`model`, `effort`, `permissions`, `subscriptionAuth`,
-`remoteControl.name`, `extraSettings`, `extraArgs`) shape the launcher that
-`vibePackage` defaults to (when that module is imported), so they apply to web
-sessions too.
-
 ### Example: production behind a TLS reverse proxy
 
 Bind to loopback, require TLS (so the app rejects any non-proxied plain-HTTP
-request), and let nginx terminate TLS. `programs.vibe` pins flow to the web
-sessions via the default `vibePackage`. `proxy_buffering off` keeps the live log
+request), and let nginx terminate TLS. `proxy_buffering off` keeps the live log
 SSE stream flowing.
 
 ```nix
 { inputs, ... }:
 {
-  imports = [
-    inputs.antlers.nixosModules.vibe-server
-    inputs.antlers.nixosModules.vibe
-  ];
-
-  programs.vibe = { model = "opus[1m]"; effort = "high"; };
+  imports = [ inputs.antlers.nixosModules.vibe-server ];
 
   services.vibe-server = {
     enable = true;
@@ -191,17 +173,13 @@ SSE stream flowing.
 ```nix
 { inputs, ... }:
 {
-  imports = [
-    inputs.antlers.nixosModules.vibe-server
-    inputs.antlers.nixosModules.vibe
-  ];
-
-  programs.vibe.subscriptionAuth = false;        # keep ANTHROPIC_API_KEY (don't drop it)
+  imports = [ inputs.antlers.nixosModules.vibe-server ];
 
   services.vibe-server = {
     enable = true;
     passwordFile = "/run/secrets/vibe-password";
     environmentFile = "/run/secrets/vibe-env";   # contains ANTHROPIC_API_KEY=…
+    # vibePackage = <a vibe launcher built for API-key billing>;
     directories = [ { name = "work"; path = "/srv/work"; } ];
   };
 }

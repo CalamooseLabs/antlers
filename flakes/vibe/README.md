@@ -5,11 +5,6 @@ against antlers-pinned settings (model, effort, permissions), leaving your real
 `~/.claude` config untouched. Exposed as `nixosModules.vibe` →
 **`programs.vibe`**.
 
-> Looking for the browser-based session manager? That's a separate module,
-> [`nixosModules.vibe-server`](../vibe-server/README.md) → `services.vibe-server`. It
-> spawns `vibe` sessions you drive from claude.ai / mobile. Import both to run
-> the service with sessions launched by your configured `vibe`.
-
 Subscription-first: vibe targets Claude Code **Max / Team / Pro** plans (OAuth
 login), not API pay-as-you-go. See [`Auth & billing`](#auth--billing).
 
@@ -98,8 +93,3 @@ Example — install the `vibe` launcher system-wide, pinned to your plan's model
 ```
 
 Use `lib.<system>.mkVibeWrapper { … }` to build a launcher outside the module.
-
-These pins also flow to the web session manager: when you import
-[`nixosModules.vibe-server`](../vibe-server/README.md) alongside this module, its
-sessions default to the `programs.vibe` launcher (so they honour the same
-model/effort/permissions).

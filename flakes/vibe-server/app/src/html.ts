@@ -59,7 +59,9 @@ export const INDEX_HTML = `<!DOCTYPE html>
     padding: 12px; height: 380px; overflow: auto; white-space: pre-wrap;
     word-break: break-word; margin-top: 12px; }
   .muted { color: #8b949e; }
-  .hidden { display: none; }
+  /* !important so this utility always wins over later class rules (e.g. .backdrop's
+     display:flex) — otherwise "backdrop hidden" would still render visible. */
+  .hidden { display: none !important; }
   /* ---- diff modal ---- */
   .backdrop { position: fixed; inset: 0; background: rgba(1,4,9,0.7);
     display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
