@@ -2,7 +2,7 @@
 #
 # Wired into the root flake as
 # `nixosModules.vibe-server = import ./flakes/vibe-server/module.nix self`.
-# This module exposes ONLY `services.vibe` — it runs `vibe-server`, the Deno web UI
+# This module exposes ONLY `services.vibe-server` — it runs `vibe-server`, the Deno web UI
 # that manages Claude Code sessions (spawned via the `vibe` launcher in Remote
 # Control mode). The launcher itself is a separate module: `nixosModules.vibe`
 # (→ `programs.vibe`). When both are imported, sessions default to the launcher
@@ -17,7 +17,7 @@ flake: {
 with lib; let
   system = pkgs.stdenv.hostPlatform.system;
 
-  scfg = config.services.vibe;
+  scfg = config.services.vibe-server;
 
   # The `vibe` launcher lives under ../vibe; build one with mkVibeWrapper.
   mkVibeWrapper = pkgs.callPackage ../vibe/package.nix {};
@@ -105,7 +105,7 @@ with lib; let
     then false
     else "tmpfs";
 in {
-  options.services.vibe = {
+  options.services.vibe-server = {
     enable = mkEnableOption "the vibe web service (browser session manager)";
 
     package = mkOption {
@@ -278,20 +278,20 @@ in {
 
     warnings =
       (optional (protectHome == false)
-        "services.vibe: ProtectHome disabled because a configured directory lives under /home; the systemd sandbox is loosened accordingly.")
+        "services.vibe-server: ProtectHome disabled because a configured directory lives under /home; the systemd sandbox is loosened accordingly.")
       ++ (optional (scfg.openFirewall && scfg.hostname != "127.0.0.1" && scfg.hostname != "::1" && !scfg.requireTLS)
-        "services.vibe: exposed on a non-loopback address over plain HTTP without requireTLS — front it with a TLS reverse proxy (then set services.vibe.requireTLS = true) for anything beyond a trusted LAN.")
+        "services.vibe-server: exposed on a non-loopback address over plain HTTP without requireTLS — front it with a TLS reverse proxy (then set services.vibe-server.requireTLS = true) for anything beyond a trusted LAN.")
       ++ (optional (scfg.passwordFile == null && scfg.openFirewall && scfg.hostname != "127.0.0.1" && scfg.hostname != "::1")
-        "services.vibe: no passwordFile set — the web UI is passwordless and anyone who can reach it can spawn Claude Code sessions. Set services.vibe.passwordFile (or restrict the network) when exposing it beyond a trusted host.");
+        "services.vibe-server: no passwordFile set — the web UI is passwordless and anyone who can reach it can spawn Claude Code sessions. Set services.vibe-server.passwordFile (or restrict the network) when exposing it beyond a trusted host.");
 
     assertions = [
       {
         assertion = all (d: hasPrefix "/" d.path) scfg.directories;
-        message = "services.vibe.directories: every path must be absolute (start with /).";
+        message = "services.vibe-server.directories: every path must be absolute (start with /).";
       }
       {
         assertion = all (d: builtins.match "[A-Za-z0-9_-]+" d.name != null) scfg.directories;
-        message = "services.vibe.directories: every name must match [A-Za-z0-9_-]+ (the web UI rejects other names).";
+        message = "services.vibe-server.directories: every name must match [A-Za-z0-9_-]+ (the web UI rejects other names).";
       }
     ];
 

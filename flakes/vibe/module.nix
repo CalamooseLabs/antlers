@@ -3,7 +3,7 @@
 # Wired into the root flake as `nixosModules.vibe = import ./flakes/vibe/module.nix self`.
 # This module exposes ONLY `programs.vibe` — it installs a configured `vibe`
 # Claude Code launcher system-wide. The web session manager is a separate module:
-# `nixosModules.vibe-server` (→ `services.vibe`); import it too to run the service.
+# `nixosModules.vibe-server` (→ `services.vibe-server`); import it too to run the service.
 flake: {
   config,
   lib,

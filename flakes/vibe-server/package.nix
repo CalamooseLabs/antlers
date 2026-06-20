@@ -1,4 +1,4 @@
-# vibe-server — the Deno web service behind `services.vibe`.
+# vibe-server — the Deno web service behind `services.vibe-server`.
 #
 # Plain `callPackage`-able builder (not a flake), per flakes/README.md. Mirrors
 # the lanserver build exactly: the Deno application in ./app is compiled with
@@ -104,7 +104,7 @@ in
     '';
 
     meta = {
-      description = "vibe web service — browser session manager for Claude Code (behind services.vibe)";
+      description = "vibe web service — browser session manager for Claude Code (behind services.vibe-server)";
       mainProgram = "vibe-server";
       platforms = ["x86_64-linux" "aarch64-linux"];
     };

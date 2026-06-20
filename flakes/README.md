@@ -16,8 +16,8 @@ there is a single source of truth and no per-package flakes to keep in sync.
 | `vibe/`        | `lib.<system>.mkVibeWrapper`        | builder: cfg → a `vibe` launcher that runs Claude Code with pinned model/effort/permissions (and optional Remote Control) |
 | `vibe/`        | `packages.<system>.vibe`            | the above with default settings (ready to run) |
 | `vibe/`        | `nixosModules.vibe`                 | NixOS module: `programs.vibe` (the launcher) |
-| `vibe-server/` | `packages.<system>.vibe-server`     | Deno web service behind `services.vibe` (source in `vibe-server/app`, compiled with `deno compile`) |
-| `vibe-server/` | `nixosModules.vibe-server`          | NixOS module: `services.vibe` (browser session manager; import with `vibe` to inherit its pins) |
+| `vibe-server/` | `packages.<system>.vibe-server`     | Deno web service behind `services.vibe-server` (source in `vibe-server/app`, compiled with `deno compile`) |
+| `vibe-server/` | `nixosModules.vibe-server`          | NixOS module: `services.vibe-server` (browser session manager; import with `vibe` to inherit its pins) |
 
 Consume from the root flake:
 

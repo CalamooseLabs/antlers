@@ -57,7 +57,7 @@ inputs.antlers.url = "github:CalamooseLabs/antlers";
 | `plex-desktop` | `#plex-desktop` | `plex-desktop` wrapped with the Hyprland/Stylix Qt + portal fixes |
 | `lanserver`    | `#lanserver`    | a Deno LAN command server (ships `nixosModules.lanserver`) |
 | `vibe`         | `#vibe`         | a Claude Code launcher with pinned model/effort/permissions + Remote Control (ships `nixosModules.vibe` → `programs.vibe`) — see [`flakes/vibe`](flakes/vibe/README.md) |
-| `vibe-server`  | `#vibe-server`  | the Deno web session-manager behind `services.vibe` (ships `nixosModules.vibe-server`) — see [`flakes/vibe-server`](flakes/vibe-server/README.md) |
+| `vibe-server`  | `#vibe-server`  | the Deno web session-manager behind `services.vibe-server` (ships `nixosModules.vibe-server`) — see [`flakes/vibe-server`](flakes/vibe-server/README.md) |
 
 ### You only pull what you name
 
@@ -82,7 +82,7 @@ A few packages ship a companion NixOS module via `inputs.antlers.nixosModules.<n
 
 - **`vibe`** — `programs.vibe`, a Claude Code launcher pinned to `opus[1m]`
   (subscription-first). See [`flakes/vibe`](flakes/vibe/README.md).
-- **`vibe-server`** — `services.vibe`, a browser session manager for `vibe`
+- **`vibe-server`** — `services.vibe-server`, a browser session manager for `vibe`
   sessions. Import alongside `vibe` so sessions inherit its pins. See
   [`flakes/vibe-server`](flakes/vibe-server/README.md).
 - **`lanserver`** — `services.lanserver`, a Deno LAN command server.
@@ -93,7 +93,7 @@ programs.vibe.enable = true;   # `vibe` on PATH
 
 # The web session manager is a separate module:
 # imports = [ inputs.antlers.nixosModules.vibe-server inputs.antlers.nixosModules.vibe ];
-# services.vibe.enable = true;
+# services.vibe-server.enable = true;
 ```
 
 ---

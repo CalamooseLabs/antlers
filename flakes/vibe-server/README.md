@@ -1,6 +1,6 @@
 # vibe-server
 
-The Deno web service behind **`services.vibe`** — a small **lifecycle manager**
+The Deno web service behind **`services.vibe-server`** — a small **lifecycle manager**
 for Claude Code sessions. An optional shared-password login (passwordless when no
 `passwordFile` is set) gates a single-page UI that lists predefined directories,
 spawns a `vibe` session in each (in Claude Code **Remote Control** mode),
@@ -20,7 +20,7 @@ default-config launcher.
 You don't run `vibe-server` directly — it's a `deno compile` binary (a generic
 ELF) that the `nixosModules.vibe-server` systemd unit launches under **nix-ld**.
 (`nix run …#vibe-server` on NixOS fails with a `stub-ld` error for that reason —
-that's expected; use the service.) Configure everything through `services.vibe`;
+that's expected; use the service.) Configure everything through `services.vibe-server`;
 the module renders `/etc/vibe/config.json` (`$VIBE_CONFIG`) and wires the unit:
 
 ```nix
@@ -34,7 +34,7 @@ the module renders `/etc/vibe/config.json` (`$VIBE_CONFIG`) and wires the unit:
 
   programs.vibe = { model = "opus[1m]"; effort = "high"; };  # pins flow to sessions
 
-  services.vibe = {
+  services.vibe-server = {
     enable = true;
     passwordFile = "/run/secrets/vibe-password";   # shared login password (omit for passwordless)
     claudeConfigDir = "/var/lib/vibe/claude";       # pre-seeded OAuth login (subscription)
@@ -90,7 +90,7 @@ gets a per-session **Diff** button (a modal showing `git diff` of that working
 tree) alongside its log.
 
 ```nix
-services.vibe.directories = [
+services.vibe-server.directories = [
   { name = "antlers"; path = "/srv/projects/antlers"; }
   { name = "infra";   path = "/srv/projects/infra"; }
   { name = "notes";   path = "/home/me/notes"; }
@@ -103,7 +103,7 @@ UI. To let users add more at runtime, leave `projectsDir` set (the default) — 
 UI's *Add directory* form then creates/registers directories under it (see
 [Directory management](#behavior-notes)).
 
-## `services.vibe` options
+## `services.vibe-server` options
 
 | Option                    | Default                          | Notes                                                                       |
 | ------------------------- | -------------------------------- | --------------------------------------------------------------------------- |
@@ -154,7 +154,7 @@ SSE stream flowing.
 
   programs.vibe = { model = "opus[1m]"; effort = "high"; };
 
-  services.vibe = {
+  services.vibe-server = {
     enable = true;
     hostname = "127.0.0.1";                      # only the proxy reaches it
     requireTLS = true;                           # reject non-TLS (X-Forwarded-Proto)
@@ -198,7 +198,7 @@ SSE stream flowing.
 
   programs.vibe.subscriptionAuth = false;        # keep ANTHROPIC_API_KEY (don't drop it)
 
-  services.vibe = {
+  services.vibe-server = {
     enable = true;
     passwordFile = "/run/secrets/vibe-password";
     environmentFile = "/run/secrets/vibe-env";   # contains ANTHROPIC_API_KEY=…

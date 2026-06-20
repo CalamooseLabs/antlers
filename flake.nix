@@ -31,7 +31,7 @@
     lanserver = pkgs.callPackage ./flakes/lanserver/package.nix {};
 
     # Vibe — configured Claude Code launcher (programs.vibe) + browser session
-    # manager (services.vibe, backed by the vibe-server Deno web service).
+    # manager (services.vibe-server, backed by the vibe-server Deno web service).
     mkVibeWrapper = pkgs.callPackage ./flakes/vibe/package.nix {};
     vibe = mkVibeWrapper {};
     vibe-server = pkgs.callPackage ./flakes/vibe-server/package.nix {};
@@ -62,7 +62,7 @@
     # ---- NixOS modules ----
     # inputs.antlers.nixosModules.{lanserver,vibe,vibe-server}
     #   vibe        → programs.vibe  (the `vibe` Claude Code launcher)
-    #   vibe-server → services.vibe  (the browser session-manager web service)
+    #   vibe-server → services.vibe-server  (the browser session-manager web service)
     # Import both to run the service with sessions launched by the configured
     # `vibe`; each is independently usable.
     nixosModules = {

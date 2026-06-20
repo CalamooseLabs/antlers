@@ -6,7 +6,7 @@ against antlers-pinned settings (model, effort, permissions), leaving your real
 **`programs.vibe`**.
 
 > Looking for the browser-based session manager? That's a separate module,
-> [`nixosModules.vibe-server`](../vibe-server/README.md) → `services.vibe`. It
+> [`nixosModules.vibe-server`](../vibe-server/README.md) → `services.vibe-server`. It
 > spawns `vibe` sessions you drive from claude.ai / mobile. Import both to run
 > the service with sessions launched by your configured `vibe`.
 
