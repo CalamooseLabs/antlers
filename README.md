@@ -55,6 +55,9 @@ inputs.antlers.url = "github:CalamooseLabs/antlers";
 | -------------- | --------------- | ---------------------------------------------------------------- |
 | `zed-editor`   | `#zed-editor`   | Zed launched against a project-pinned config merged over the user's global Zed settings |
 | `plex-desktop` | `#plex-desktop` | `plex-desktop` wrapped with the Hyprland/Stylix Qt + portal fixes |
+| `lanserver`    | `#lanserver`    | a Deno LAN command server (ships `nixosModules.lanserver`) |
+| `vibe`         | `#vibe`         | a Claude Code launcher with pinned model/effort/permissions + Remote Control (ships `nixosModules.vibe`) — see [`flakes/vibe`](flakes/vibe/README.md) |
+| `vibe-server`  | `#vibe-server`  | the Deno web session-manager behind `services.vibe` — see [`flakes/vibe-server`](flakes/vibe-server/README.md) |
 
 ### You only pull what you name
 
@@ -70,6 +73,23 @@ The one thing that adds *names* (still lazily, nothing builds) is the overlay:
 `inputs.antlers.overlays.default` defines both `antlers-zed-editor` and
 `plex-desktop-fixed` on `pkgs`. If you want strictly one, reference the package
 directly instead of adding the overlay.
+
+---
+
+## NixOS modules
+
+A few packages ship a companion NixOS module via `inputs.antlers.nixosModules.<name>`:
+
+- **`vibe`** — `programs.vibe` (a Claude Code launcher pinned to `opus[1m]`,
+  subscription-first) and `services.vibe` (a browser session manager). See
+  [`flakes/vibe`](flakes/vibe/README.md).
+- **`lanserver`** — `services.lanserver`, a Deno LAN command server.
+
+```nix
+imports = [ inputs.antlers.nixosModules.vibe ];
+programs.vibe.enable = true;   # `vibe` on PATH
+# services.vibe.enable = true; # + the browser session manager
+```
 
 ---
 

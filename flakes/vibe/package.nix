@@ -3,20 +3,31 @@
 # This file is a plain `callPackage`-able builder, NOT a flake. It returns a
 # FUNCTION of a config attrset and produces a `vibe` launcher.
 #
-# Two modes:
-#   * interactive (default): runs `claude --settings <generated>` where the
-#     generated settings.json carries the pinned model / effort / permissions /
-#     extraSettings, leaving the user's real ~/.claude config untouched.
+# Both modes deliver the pinned model / effort / permissions / extraSettings the
+# same way — via `claude --settings <generated>` — leaving the user's real
+# ~/.claude config untouched:
+#   * interactive (default): `claude --settings <generated>`.
 #   * remote control (`vibe --remote-control [name]` or VIBE_REMOTE_CONTROL=1):
-#     runs `claude remote-control --name <name>` so the session is driven from
-#     claude.ai / the mobile app.
+#     `claude --settings <generated> --remote-control <name>`, so the session is
+#     driven from claude.ai / the mobile app.
 #
-# IMPORTANT: `claude remote-control` accepts only `--name` and `--permission-mode`
-# (verified against claude-code 2.1.170) — NOT `--settings`, `--model`, or
-# `--effort`. So in remote-control mode the only pin we can deliver is the
-# permission mode (from `permissions.defaultMode`); model/effort are chosen
-# client-side from claude.ai / mobile. The model/effort/permissions pins below
-# therefore fully apply only to interactive sessions.
+# IMPORTANT: remote control uses the top-level `--remote-control [name]` FLAG on
+# the main `claude` command — NOT the `claude remote-control` SUBCOMMAND. The flag
+# starts the normal interactive command with Remote Control enabled, so every
+# main-command flag composes with it, including `--settings` (and thus the pinned
+# model / effort / permissions). The subcommand, by contrast, only accepts
+# `--name` / `--permission-mode` (verified against claude-code 2.1.170) — which is
+# why the older subcommand path could not deliver model/effort. The pins below
+# therefore apply to BOTH interactive and remote-control sessions. (Caveat: the
+# remote client at claude.ai / mobile can still switch model client-side;
+# `--settings` only sets the session default.)
+#
+# Subscription-first defaults: vibe targets Claude Code subscription plans
+# (Max/Team/Pro). `model` defaults to `opus[1m]` (latest Opus + 1M context —
+# included on Max/Team; Pro draws usage credits), and `subscriptionAuth`
+# (default true) drops a stray ANTHROPIC_API_KEY so sessions use the plan's OAuth
+# login rather than silently billing the API. Opt out for API-key billing with
+# subscriptionAuth = false (or VIBE_API_KEY_AUTH=1).
 #
 # Consumed by the root flake as `lib.<system>.mkVibeWrapper`. A ready-to-run
 # derivation (default settings) is exposed as `packages.<system>.vibe`.
@@ -28,11 +39,12 @@
   jq,
   coreutils,
 }: {
-  model ? null,
+  model ? "opus[1m]",
   effort ? null,
   remoteControl ? false,
   remoteControlName ? null,
   permissions ? {},
+  subscriptionAuth ? true,
   extraSettings ? {},
   extraArgs ? [],
 }: let
@@ -48,10 +60,6 @@
     if remoteControlName != null
     then remoteControlName
     else "vibe";
-
-  # The one pinned setting `claude remote-control` can accept as a flag.
-  rcPermissionMode = permissions.defaultMode or null;
-  rcPermissionArgs = lib.optionals (rcPermissionMode != null) ["--permission-mode" rcPermissionMode];
 in
   writeShellApplication {
     name = "vibe";
@@ -61,6 +69,32 @@ in
       # (writeShellApplication supplies the shebang + `set -euo pipefail` + shellcheck.)
 
       BAKED_SETTINGS=${settingsFile}
+
+      # Diagnostics: `vibe --help` / `vibe --show-config` (short-circuit; no claude).
+      case "''${1:-}" in
+        -h | --help)
+          printf '%s\n' \
+            'vibe — Claude Code with antlers-pinned settings (subscription-first).' \
+            'Usage:' \
+            '  vibe [claude args...]          interactive Claude Code' \
+            '  vibe --remote-control [name]   drive from claude.ai / mobile' \
+            '  vibe --show-config             print the pinned settings.json and exit' \
+            '  vibe --help                    this help' \
+            'Env overrides: VIBE_MODEL, VIBE_EFFORT, VIBE_REMOTE_CONTROL=1,' \
+            '  VIBE_NAME=<name>, VIBE_API_KEY_AUTH=1 (API billing not subscription).'
+          echo
+          echo "Pinned settings:"
+          jq . "$BAKED_SETTINGS" 2>/dev/null || cat "$BAKED_SETTINGS"
+          echo
+          echo "Auth status:"
+          claude auth status 2>&1 || echo "  (unavailable — run 'claude auth status' or /login in claude)"
+          exit 0
+          ;;
+        --show-config)
+          jq . "$BAKED_SETTINGS" 2>/dev/null || cat "$BAKED_SETTINGS"
+          exit 0
+          ;;
+      esac
 
       # Remote-control mode: `vibe --remote-control [name]` or VIBE_REMOTE_CONTROL=1.
       # The session can then be driven from claude.ai / the mobile app.
@@ -78,16 +112,22 @@ in
       [ -n "''${VIBE_REMOTE_CONTROL:-}" ] && REMOTE=true
       [ -n "''${VIBE_NAME:-}" ] && NAME="$VIBE_NAME"
 
-      if [ "$REMOTE" = true ]; then
-        # `claude remote-control` does not accept --settings/--model/--effort;
-        # only --name and --permission-mode apply (model/effort are chosen from
-        # claude.ai / mobile). VIBE_MODEL/VIBE_EFFORT have no effect here.
-        exec claude remote-control --name "$NAME" ${lib.escapeShellArgs rcPermissionArgs} ${lib.escapeShellArgs extraArgs} "$@"
+      # Subscription-first auth: vibe targets Claude Code subscription plans
+      # (Max/Team/Pro), which authenticate via the OAuth login in ~/.claude /
+      # CLAUDE_CONFIG_DIR. A stray ANTHROPIC_API_KEY would silently bill the API
+      # instead of the plan, so drop it. Opt out (genuine API-key billing) with
+      # subscriptionAuth = false or VIBE_API_KEY_AUTH=1.
+      SUBSCRIPTION_AUTH=${lib.boolToString subscriptionAuth}
+      [ -n "''${VIBE_API_KEY_AUTH:-}" ] && SUBSCRIPTION_AUTH=false
+      if [ "$SUBSCRIPTION_AUTH" = true ]; then
+        unset ANTHROPIC_API_KEY
       fi
 
-      # Interactive mode: pass the pinned settings via --settings. Layer optional
+      # Resolve the settings file. Both modes deliver the pinned model / effort /
+      # permissions identically — via `claude --settings <file>`. Layer optional
       # VIBE_MODEL / VIBE_EFFORT overrides on top of the baked settings; a real
       # file (not a process substitution) is used so Claude Code can stat/reload it.
+      SETTINGS="$BAKED_SETTINGS"
       if [ -n "''${VIBE_MODEL:-}" ] || [ -n "''${VIBE_EFFORT:-}" ]; then
         SETTINGS_DIR="$(mktemp -d)"
         trap 'rm -rf "$SETTINGS_DIR"' EXIT
@@ -98,10 +138,25 @@ in
           '. + (if $model == "" then {} else {model: $model} end)
              + (if $effort == "" then {} else {effortLevel: $effort} end)' \
           "$BAKED_SETTINGS" > "$SETTINGS"
-        # Not exec'd: the EXIT trap must still fire to clean up the temp settings.
-        claude --settings "$SETTINGS" ${lib.escapeShellArgs extraArgs} "$@"
+      fi
+
+      # Remote control uses the top-level `--remote-control [name]` FLAG, not the
+      # `claude remote-control` SUBCOMMAND. The flag runs the normal interactive
+      # command with Remote Control enabled, so `--settings` (model / effort /
+      # permissions) is fully honoured — the subcommand only accepts
+      # --name / --permission-mode. The session is then driven from claude.ai /
+      # the mobile app.
+      RC_ARGS=()
+      if [ "$REMOTE" = true ]; then
+        RC_ARGS=(--remote-control "$NAME")
+      fi
+
+      if [ "$SETTINGS" = "$BAKED_SETTINGS" ]; then
+        # No temp settings file to clean up — exec for a tighter process tree.
+        exec claude --settings "$SETTINGS" "''${RC_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
       else
-        exec claude --settings "$BAKED_SETTINGS" ${lib.escapeShellArgs extraArgs} "$@"
+        # Not exec'd: the EXIT trap must still fire to clean up the temp settings.
+        claude --settings "$SETTINGS" "''${RC_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
       fi
     '';
   }

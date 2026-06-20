@@ -6,13 +6,14 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 
 This project was scaffolded from the **`vibe-shell`** template: a Nix flake dev
 shell built for working *with* Claude Code. Enter it with `direnv allow` (or
-`nix develop`) — that puts `claude`, `git`, `gh`, `python3`, and the helper
-commands below on `PATH`.
+`nix develop`) — that puts `vibe`, `git`, `gh`, `python3`, and the helper
+commands below on `PATH`. (`vibe` is the antlers launcher: Claude Code pinned to
+opus[1m], subscription-first — run it instead of `claude`.)
 
 ```
 .
-├── flake.nix        # nixpkgs (allowUnfree); devShells.default = ./shell.nix
-├── shell.nix        # the dev shell: claude-code + git + gh + the helpers below
+├── flake.nix        # nixpkgs + antlers; devShells.default = ./shell.nix
+├── shell.nix        # the dev shell: vibe (antlers) + git + gh + the helpers below
 ├── .envrc           # `use flake` (direnv auto-loads the shell)
 ├── .gitignore       # ignores .direnv, result, GIT_COMMIT_MSG, wiki-build, …
 ├── CLAUDE.md        # this file

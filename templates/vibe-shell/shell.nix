@@ -1,4 +1,7 @@
-{pkgs}: let
+{
+  pkgs,
+  vibe,
+}: let
   # ---------------------------------------------------------------------------
   # gcommit — the signed-commit workflow.
   #
@@ -137,7 +140,7 @@
 in
   pkgs.mkShell {
     packages = [
-      pkgs.claude-code
+      vibe
       pkgs.git
       pkgs.gh
       pkgs.python3
@@ -148,9 +151,9 @@ in
 
     shellHook = ''
       echo "vibe-shell — Claude Code dev environment"
+      echo "  vibe          start Claude Code (antlers-pinned: opus[1m], subscription-first)"
       echo "  gcommit       review + sign + commit GIT_COMMIT_MSG (then optional signed tag)"
       echo "  build-wiki    preview docs/ -> ./wiki-build"
       echo "  publish-wiki  publish docs/ -> the repo's GitHub wiki"
-      echo "  claude        start Claude Code"
     '';
   }

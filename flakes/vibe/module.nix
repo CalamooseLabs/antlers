@@ -27,7 +27,7 @@ with lib; let
     then pcfg.package
     else
       mkVibeWrapper {
-        inherit (pcfg) model effort permissions extraSettings extraArgs;
+        inherit (pcfg) model effort permissions subscriptionAuth extraSettings extraArgs;
         remoteControl = pcfg.remoteControl.enable;
         remoteControlName = pcfg.remoteControl.name;
       };
@@ -64,13 +64,21 @@ with lib; let
     passwordFile = toString scfg.passwordFile;
     directories = map (d: {inherit (d) name path;}) scfg.directories;
     sessionCommand = scfg.sessionCommand;
+    extraEnv = scfg.extraEnv;
+    projectsDir = scfg.projectsDir;
+    newProjectTemplate =
+      if scfg.newProjectTemplate != null
+      then toString scfg.newProjectTemplate
+      else null;
+    inherit (scfg) requireTLS sessionNamePrefix maxLogBytes;
   });
 
   # Auto-relax ProtectHome when any project dir (or the Claude config dir) lives
   # under /home — otherwise the sandbox hides it even when listed in ReadWritePaths.
   homePaths =
     (map (d: d.path) scfg.directories)
-    ++ (optional (scfg.claudeConfigDir != null) (toString scfg.claudeConfigDir));
+    ++ (optional (scfg.claudeConfigDir != null) (toString scfg.claudeConfigDir))
+    ++ (optional (scfg.projectsDir != null) scfg.projectsDir);
   anyUnderHome = any (p: p == "/home" || hasPrefix "/home/" p) homePaths;
   protectHome =
     if scfg.protectHome != null
@@ -90,15 +98,15 @@ in {
 
     model = mkOption {
       type = types.nullOr types.str;
-      default = null;
-      example = "opus";
-      description = "Model alias or full id pinned for interactive vibe sessions (settings.json `model`). Remote Control sessions choose their model client-side from claude.ai / mobile.";
+      default = "opus[1m]";
+      example = "claude-opus-4-8[1m]";
+      description = "Model alias or full id pinned for vibe sessions (settings.json `model`). Defaults to `opus[1m]` (latest Opus + 1M context) — included on Max/Team/Enterprise plans; on Pro the 1M window draws usage credits. Use `\"opus\"` for the standard 200K window, or null to leave the model unpinned. Applies to both interactive and Remote Control sessions (delivered via `--settings`); the remote client at claude.ai / mobile may still switch model client-side.";
     };
 
     effort = mkOption {
-      type = types.nullOr (types.enum ["low" "medium" "high" "xhigh"]);
+      type = types.nullOr (types.enum ["low" "medium" "high" "xhigh" "max"]);
       default = null;
-      description = "Reasoning effort pinned for interactive vibe sessions (settings.json `effortLevel`). Not applied to Remote Control sessions (chosen client-side).";
+      description = "Reasoning effort pinned for vibe sessions (settings.json `effortLevel`). Applies to both interactive and Remote Control sessions (delivered via `--settings`).";
     };
 
     remoteControl = {
@@ -118,7 +126,13 @@ in {
       type = types.attrs;
       default = {};
       example = literalExpression ''{ defaultMode = "acceptEdits"; }'';
-      description = "Claude Code `permissions` object baked into the interactive session settings.json. In Remote Control mode only `defaultMode` is applied (passed as `--permission-mode`).";
+      description = "Claude Code `permissions` object baked into the session settings.json. Applies to both interactive and Remote Control sessions — delivered via `--settings`, so the full object is honoured, not just `defaultMode`.";
+    };
+
+    subscriptionAuth = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Target Claude Code subscription plans (Max/Team/Pro): the wrapper drops a stray ANTHROPIC_API_KEY so sessions use the plan's OAuth login (from ~/.claude / CLAUDE_CONFIG_DIR) instead of silently billing the API. Set false (or VIBE_API_KEY_AUTH=1 at runtime) for genuine API-key billing.";
     };
 
     extraSettings = mkOption {
@@ -182,6 +196,45 @@ in {
       description = "Command run to start a session. @DIR@ and @NAME@ are substituted; cwd is the chosen directory.";
     };
 
+    extraEnv = mkOption {
+      type = types.listOf types.str;
+      default = [];
+      example = ["GITHUB_TOKEN"];
+      description = "Additional environment-variable NAMES (not values) to propagate from the service into spawned sessions, on top of the built-in allowlist (PATH, HOME, CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, …). Values come from the service environment (e.g. environmentFile). Anything not listed is dropped so stray secrets don't reach Claude Code or its browser-readable logs.";
+    };
+
+    projectsDir = mkOption {
+      type = types.nullOr types.str;
+      default = "${stateDir}/projects";
+      description = "Base directory under which the web UI may create/register projects (the \"Add directory\" form). New projects are scaffolded from `newProjectTemplate` here, then `git init`-ed. Set to null to disable directory management from the UI. A non-null path is created (systemd-tmpfiles) and made writable to the service.";
+    };
+
+    newProjectTemplate = mkOption {
+      type = types.nullOr types.str;
+      default = "${flake}/templates/vibe-shell";
+      defaultText = literalExpression "the antlers vibe-shell template";
+      description = "Template directory copied into a newly-created project. Defaults to the antlers `vibe-shell` template; set to null to create empty directories instead.";
+    };
+
+    sessionNamePrefix = mkOption {
+      type = types.str;
+      default = "";
+      example = "prod";
+      description = "Prefix prepended to generated Remote Control session names (e.g. \"prod\" → `prod-antlers-a1b2`). Empty for none.";
+    };
+
+    requireTLS = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Reject plain-HTTP requests at the app (HTTP 426, except /healthz) — set when a TLS reverse proxy fronts vibe and forwards `x-forwarded-proto: https`. vibe-server itself does not terminate TLS.";
+    };
+
+    maxLogBytes = mkOption {
+      type = types.ints.unsigned;
+      default = 26214400;
+      description = "Cap each session's captured log in bytes (0 = unlimited). Past the cap, appends stop and a truncation notice is written (a size cap, not rotation — rotation would break the live SSE tail).";
+    };
+
     user = mkOption {
       type = types.str;
       default = "vibe";
@@ -198,13 +251,13 @@ in {
       type = types.nullOr types.path;
       default = null;
       example = "/run/secrets/vibe-env";
-      description = "EnvironmentFile for the service, e.g. containing ANTHROPIC_API_KEY=… (agenix/sops-friendly).";
+      description = "EnvironmentFile for the service (agenix/sops-friendly). For subscription plans prefer `claudeConfigDir` (OAuth) and leave this unset. Only set `ANTHROPIC_API_KEY=…` here for API-key billing — and then also set `programs.vibe.subscriptionAuth = false`, otherwise the wrapper drops the key.";
     };
 
     claudeConfigDir = mkOption {
       type = types.nullOr types.path;
       default = null;
-      description = "If set, exported as CLAUDE_CONFIG_DIR (and made writable) so sessions use pre-seeded Claude credentials.";
+      description = "Pre-seeded Claude config dir holding a subscription OAuth login (run `claude` `/login` once as the service user, or copy its `~/.claude`). Exported as CLAUDE_CONFIG_DIR (and made writable). This is the recommended auth path for Max/Team/Pro plans — sessions then bill the subscription, not the API.";
     };
 
     remoteControl.enable = mkOption {
@@ -237,7 +290,13 @@ in {
     localNetworkSubnets = mkOption {
       type = types.listOf types.str;
       default = ["192.168.0.0/16" "10.0.0.0/8" "172.16.0.0/12"];
-      description = "Subnets allowed when localNetworkOnly is set.";
+      description = "IPv4 subnets allowed when localNetworkOnly is set.";
+    };
+
+    localNetworkSubnets6 = mkOption {
+      type = types.listOf types.str;
+      default = ["fc00::/7" "fe80::/10"];
+      description = "IPv6 subnets allowed when localNetworkOnly is set (ULA + link-local by default).";
     };
 
     enableNixLd = mkOption {
@@ -262,9 +321,26 @@ in {
 
       environment.etc."vibe/config.json".source = configFile;
 
+      systemd.tmpfiles.rules =
+        optional (scfg.projectsDir != null)
+        "d ${scfg.projectsDir} 0750 ${scfg.user} ${scfg.group} -";
+
       warnings =
-        optional (protectHome == false)
-        "services.vibe: ProtectHome disabled because a configured directory lives under /home; the systemd sandbox is loosened accordingly.";
+        (optional (protectHome == false)
+          "services.vibe: ProtectHome disabled because a configured directory lives under /home; the systemd sandbox is loosened accordingly.")
+        ++ (optional (scfg.openFirewall && scfg.hostname != "127.0.0.1" && scfg.hostname != "::1" && !scfg.requireTLS)
+          "services.vibe: exposed on a non-loopback address over plain HTTP without requireTLS — front it with a TLS reverse proxy (then set services.vibe.requireTLS = true) for anything beyond a trusted LAN.");
+
+      assertions = [
+        {
+          assertion = all (d: hasPrefix "/" d.path) scfg.directories;
+          message = "services.vibe.directories: every path must be absolute (start with /).";
+        }
+        {
+          assertion = all (d: builtins.match "[A-Za-z0-9_-]+" d.name != null) scfg.directories;
+          message = "services.vibe.directories: every name must match [A-Za-z0-9_-]+ (the web UI rejects other names).";
+        }
+      ];
 
       systemd.services.vibe = {
         description = "vibe web service (browser session manager for Claude Code)";
@@ -302,7 +378,26 @@ in {
             ReadWritePaths =
               [stateDir]
               ++ (map (d: d.path) scfg.directories)
-              ++ (optional (scfg.claudeConfigDir != null) (toString scfg.claudeConfigDir));
+              ++ (optional (scfg.claudeConfigDir != null) (toString scfg.claudeConfigDir))
+              ++ (optional (scfg.projectsDir != null) scfg.projectsDir);
+
+            # Extra hardening, safe for a Deno/Node web service. No
+            # SystemCallFilter (and no MemoryDenyWriteExecute, above) — both
+            # break V8's JIT.
+            UMask = "0077";
+            ProtectProc = "invisible";
+            ProtectKernelTunables = true;
+            ProtectKernelModules = true;
+            ProtectKernelLogs = true;
+            ProtectControlGroups = true;
+            ProtectHostname = true;
+            RestrictRealtime = true;
+            RestrictSUIDSGID = true;
+            RestrictNamespaces = true;
+            LockPersonality = true;
+            SystemCallArchitectures = "native";
+            # claude (Node) needs INET/INET6 (API), UNIX (nss/IPC), NETLINK (iface enum).
+            RestrictAddressFamilies = ["AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK"];
           }
           // optionalAttrs (scfg.environmentFile != null) {
             EnvironmentFile = scfg.environmentFile;
@@ -325,20 +420,26 @@ in {
         })
         # Source-restricted open. Use the active firewall backend's own knob:
         # extraInputRules under nftables (extraCommands is silently ignored there),
-        # raw iptables otherwise. Default subnets are IPv4 (RFC1918).
+        # raw iptables/ip6tables otherwise. Default subnets cover RFC1918 (v4) and
+        # ULA + link-local (v6).
         (mkIf (scfg.openFirewall && scfg.localNetworkOnly) (
           if config.networking.nftables.enable
           then {
             extraInputRules = ''
               ip saddr { ${concatStringsSep ", " scfg.localNetworkSubnets} } tcp dport ${toString scfg.port} accept
+              ip6 saddr { ${concatStringsSep ", " scfg.localNetworkSubnets6} } tcp dport ${toString scfg.port} accept
             '';
           }
           else {
             extraCommands = concatStringsSep "\n" (
-              map (
-                subnet: "iptables -A nixos-fw -p tcp --source ${subnet} --dport ${toString scfg.port} -j nixos-fw-accept"
-              )
-              scfg.localNetworkSubnets
+              (map (
+                  subnet: "iptables -A nixos-fw -p tcp --source ${subnet} --dport ${toString scfg.port} -j nixos-fw-accept"
+                )
+                scfg.localNetworkSubnets)
+              ++ (map (
+                  subnet: "ip6tables -A nixos-fw -p tcp --source ${subnet} --dport ${toString scfg.port} -j nixos-fw-accept"
+                )
+                scfg.localNetworkSubnets6)
             );
           }
         ))
