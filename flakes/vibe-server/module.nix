@@ -15,7 +15,7 @@ flake: {
   ...
 }:
 with lib; let
-  system = pkgs.system;
+  system = pkgs.stdenv.hostPlatform.system;
 
   scfg = config.services.vibe;
 
@@ -66,6 +66,12 @@ with lib; let
     ++ optionals scfg.remoteControl.enable ["--remote-control" "@NAME@"];
 
   stateDir = "/var/lib/vibe";
+
+  # systemd list-valued settings (ReadWritePaths, …) are split on whitespace
+  # *within* a value, so a path containing spaces must be double-quoted or
+  # systemd truncates it at the first space (→ "set up mount namespacing:
+  # /home/hub/01: No such file or directory"). Quoting plain paths is harmless.
+  quotePath = p: ''"${p}"'';
 
   configFile = pkgs.writeText "vibe-config.json" (builtins.toJSON {
     inherit (scfg) port hostname;
@@ -268,7 +274,7 @@ in {
 
     systemd.tmpfiles.rules =
       optional (scfg.projectsDir != null)
-      "d ${scfg.projectsDir} 0750 ${scfg.user} ${scfg.group} -";
+      "d ${quotePath scfg.projectsDir} 0750 ${scfg.user} ${scfg.group} -";
 
     warnings =
       (optional (protectHome == false)
@@ -289,7 +295,7 @@ in {
       }
     ];
 
-    systemd.services.vibe = {
+    systemd.services.vibe-server = {
       description = "vibe web service (browser session manager for Claude Code)";
       after = ["network.target"];
       wantedBy = ["multi-user.target"];
@@ -322,11 +328,13 @@ in {
           PrivateTmp = true;
           ProtectSystem = "strict";
           ProtectHome = protectHome;
-          ReadWritePaths =
+          # Double-quoted so paths with spaces survive systemd's whitespace split.
+          ReadWritePaths = map quotePath (
             [stateDir]
             ++ (map (d: d.path) scfg.directories)
             ++ (optional (scfg.claudeConfigDir != null) (toString scfg.claudeConfigDir))
-            ++ (optional (scfg.projectsDir != null) scfg.projectsDir);
+            ++ (optional (scfg.projectsDir != null) scfg.projectsDir)
+          );
 
           # Extra hardening, safe for a Deno/Node web service. No
           # SystemCallFilter (and no MemoryDenyWriteExecute, above) — both

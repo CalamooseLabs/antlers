@@ -132,7 +132,7 @@ in {
             then "root"
             else "lanserver";
           # Use the compiled binary from the flake package
-          ExecStart = "${flake.packages.${pkgs.system}.lanserver}/bin/lanserver";
+          ExecStart = "${flake.packages.${pkgs.stdenv.hostPlatform.system}.lanserver}/bin/lanserver";
           Restart = "always";
           RestartSec = "10";
 
