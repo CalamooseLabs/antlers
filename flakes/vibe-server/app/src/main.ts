@@ -12,9 +12,9 @@
 // router (routes). This file just wires them together and runs the server.
 //
 // What it does: a shared-password login (signed cookie) gates a small web UI that
-// lists directories (and can browse the host filesystem under browseRoot to
-// create/register more), spawns `vibe` sessions in them, lists/kills those
-// sessions, surfaces a login link if a session needs auth, and streams each
+// lists launch presets (from programs.vibe.presets), spawns a `vibe @<preset>`
+// session per chosen preset, lists/kills those sessions, surfaces a login link if
+// a session needs auth, and streams each
 // session's captured output read-only over SSE. A `vibe` run by hand on the host
 // also self-registers (loopback-gated POST /api/register, via the discovery file
 // written below) so it shows up too. Server-spawned sessions survive a restart
@@ -24,7 +24,6 @@ import { loadConfig, type ServerConfig } from "./config.ts";
 import { getSecret, initKey } from "./auth.ts";
 import { seedClaudeConfig } from "./claude.ts";
 import { recoverSessions, saveSnapshot, setRegToken, startReaper } from "./sessions.ts";
-import { loadUserDirs } from "./directories.ts";
 import { handler } from "./router.ts";
 import { b64url, isError, log } from "./util.ts";
 
@@ -58,7 +57,6 @@ async function main(): Promise<void> {
   // workspace-trust dialog (no-op when seedClaudeOnboarding is false).
   await seedClaudeConfig(config);
 
-  await loadUserDirs(config.stateDir);
   const recovered = await recoverSessions(config.stateDir);
   startReaper(config.stateDir);
 
@@ -83,7 +81,7 @@ async function main(): Promise<void> {
   log("info", "vibe-server listening", {
     hostname: config.hostname,
     port: config.port,
-    directories: config.directories.map((d) => d.name),
+    presets: config.presets.map((p) => p.name),
     recovered,
   });
 

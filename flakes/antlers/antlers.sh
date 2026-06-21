@@ -4,6 +4,15 @@
 REF="${ANTLERS_REF:-__DEFAULT_REF__}"
 SYSTEM="x86_64-linux"
 
+# Bare, newline-separated names — used by `list` and by the shell-completion
+# helper below. Both query the flake directly so they auto-discover.
+templates_list() {
+  nix eval --json "$REF#templates" --apply 'builtins.attrNames' | jq -r '.[]'
+}
+packages_list() {
+  nix eval --json "$REF#packages.$SYSTEM" --apply 'builtins.attrNames' | jq -r '.[]'
+}
+
 usage() {
   cat <<EOF
 antlers — shorthand for the antlers flake (ref: $REF)
@@ -38,8 +47,16 @@ case "$cmd" in
       | column -t -s '|'
     echo
     echo "Packages   (antlers build|run <name>):"
-    nix eval --json "$REF#packages.$SYSTEM" --apply 'builtins.attrNames' \
-      | jq -r '.[] | "  " + .'
+    packages_list | while IFS= read -r p; do printf '  %s\n' "$p"; done
+    ;;
+  completions)
+    # Hidden helper for shell completion: emit bare candidate names.
+    case "${1:-}" in
+      templates) templates_list ;;
+      packages) packages_list ;;
+      commands) printf '%s\n' list new init build run shell help ;;
+      *) exit 1 ;;
+    esac
     ;;
   new)
     tmpl="${1:-}"

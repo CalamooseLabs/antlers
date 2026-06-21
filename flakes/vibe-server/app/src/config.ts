@@ -2,9 +2,35 @@
 
 import { isError, log } from "./util.ts";
 
-export interface DirConfig {
+// A launch preset (sourced from programs.vibe.presets via the NixOS module — they
+// SUPERSEDE the old `directories`). The FIRST directory is the session's working
+// dir; the rest are reachable via the launcher's `claude --add-dir`. The launcher
+// (`vibe @<name>`) applies the model/effort/etc. pins; the fields below are what
+// vibe-server itself needs — directory wiring + the per-preset Commit & Push
+// settings (a `*RequiresTouch` declares the card needs a physical touch for that
+// op, which a browser can't supply, so the action is withheld).
+export interface PresetConfig {
   name: string;
-  path: string;
+  directories: string[];
+  branch: string; // "" = use whatever branch the dir is currently on (don't switch)
+  pushRemote: string; // "" = the branch's configured upstream / origin
+  commitRequiresTouch: boolean;
+  pushRequiresTouch: boolean;
+}
+
+// Global wiring for the "Commit & Push" feature (off by default). The per-preset
+// branch / pushRemote / touch flags live on each PresetConfig; these are the
+// service-wide bits: the master switch + the signing subprocess's env.
+export interface CommitPushConfig {
+  enable: boolean;
+  // Absolute path to the gpg wrapper that injects loopback pinentry + the staged
+  // PIN file (built by the NixOS module). "" = feature off / no PIN feeding.
+  gpgProgram: string;
+  // HOME for the commit/push subprocess (the signing user's home) so git reads
+  // their ~/.gitconfig identity/signingkey and gpg their ~/.gnupg. "" = inherit.
+  home: string;
+  // GNUPGHOME for the signing subprocess (the card's config dir). "" = inherit.
+  gnupgHome: string;
 }
 
 export interface ServerConfig {
@@ -13,23 +39,13 @@ export interface ServerConfig {
   stateDir: string;
   // Path to the shared-password file. Empty = passwordless login.
   passwordFile: string;
-  directories: DirConfig[];
+  // Launch presets (from programs.vibe.presets). The UI lists these; starting one
+  // spawns `vibe @<name>` in its first directory.
+  presets: PresetConfig[];
   sessionCommand: string[];
   // Extra environment-variable NAMES to propagate into spawned sessions, on top
   // of the built-in allowlist (see sessions.ts). Everything else is dropped.
   extraEnv: string[];
-  // Base dir under which the web UI may create/register projects (null disables).
-  // Legacy: the scaffold destination is now the directory chosen in the file
-  // browser (bounded by browseRoot), not this. Kept for back-compat / as a
-  // writable scratch area.
-  projectsDir: string | null;
-  // Root the web UI's "Add directory" file browser may navigate, and under which
-  // it creates/registers projects. Also added to the systemd ReadWritePaths so
-  // sessions in browsed dirs can write. null disables browsing / directory
-  // management from the UI. (See module.nix.)
-  browseRoot: string | null;
-  // Template dir copied into a newly-created project (null = create an empty dir).
-  newProjectTemplate: string | null;
   // Reject plain-HTTP requests (all but /healthz) — set when a TLS reverse proxy
   // fronts the service (it forwards x-forwarded-proto: https).
   requireTLS: boolean;
@@ -49,6 +65,8 @@ export interface ServerConfig {
   // doesn't prompt to pick one. One of Claude Code's theme names, e.g. "dark",
   // "light", "dark-daltonized", "light-daltonized", "dark-ansi", "light-ansi".
   claudeTheme: string;
+  // YubiKey-signed "Commit & Push" feature (off by default). See above.
+  commitPush: CommitPushConfig;
 }
 
 export const DEFAULTS: ServerConfig = {
@@ -56,18 +74,21 @@ export const DEFAULTS: ServerConfig = {
   hostname: "0.0.0.0",
   stateDir: "/var/lib/vibe",
   passwordFile: "",
-  directories: [],
-  sessionCommand: ["vibe", "--remote-control", "@NAME@"],
+  presets: [],
+  sessionCommand: ["vibe", "@PRESET@", "--remote-control", "@NAME@"],
   extraEnv: [],
-  projectsDir: null,
-  browseRoot: null,
-  newProjectTemplate: null,
   requireTLS: false,
   sessionNamePrefix: "",
   maxLogBytes: 26214400, // 25 MiB
   pty: true,
   seedClaudeOnboarding: true,
   claudeTheme: "dark",
+  commitPush: {
+    enable: false,
+    gpgProgram: "",
+    home: "",
+    gnupgHome: "",
+  },
 };
 
 export async function loadConfig(): Promise<ServerConfig> {

@@ -154,15 +154,10 @@ export const INDEX_HTML = `<!DOCTYPE html>
   <main>
     <div id="authBanner" class="hidden"></div>
     <div class="row">
-      <select id="dir"></select>
+      <select id="preset"></select>
       <button class="primary" onclick="startSession()">Start session</button>
       <span class="muted" id="startErr"></span>
     </div>
-    <div class="row" id="addrow" style="margin-top:10px">
-      <button onclick="openAddDir()">Add directory</button>
-      <span class="muted" id="dirErr"></span>
-    </div>
-    <div class="row" id="dirchips" style="margin-top:6px"></div>
 
     <table>
       <thead>
@@ -206,24 +201,30 @@ export const INDEX_HTML = `<!DOCTYPE html>
       </div>
     </div>
 
-    <div id="addModal" class="backdrop hidden" role="dialog" aria-modal="true"
-         aria-labelledby="addTitle" tabindex="-1" onclick="addBackdrop(event)">
+    <div id="commitModal" class="backdrop hidden" role="dialog" aria-modal="true"
+         aria-labelledby="commitTitle" tabindex="-1" onclick="commitBackdrop(event)">
       <div class="dialog" onclick="event.stopPropagation()">
         <div class="dialog-head">
-          <h2 id="addTitle">Add directory</h2>
+          <h2 id="commitTitle">Commit &amp; Push</h2>
           <span class="spacer"></span>
-          <button onclick="closeAddDir()" aria-label="Close">✕</button>
+          <button onclick="closeCommit()" aria-label="Close">✕</button>
         </div>
         <div class="dialog-body">
-          <div class="meta" id="addPath"></div>
-          <div id="addList" class="fs-list"></div>
-          <div class="authstep" style="margin-top:14px">
-            <h3>Name a new project to create here, or leave blank to register this folder</h3>
-            <div class="row">
-              <input id="addName" placeholder="new project name (a-z0-9-_) — blank to register this folder" autocomplete="off" />
-              <button class="primary" id="addSubmit" onclick="submitAddDir()">Create / Register</button>
+          <div class="authstep">
+            <div class="meta" id="commitBranchNote" style="margin-bottom:8px"></div>
+            <h3>Commit message</h3>
+            <textarea id="commitMsg" rows="4" placeholder="Subject line&#10;&#10;Optional body"
+                      autocomplete="off" style="width:100%;box-sizing:border-box;resize:vertical"></textarea>
+            <h3 style="margin-top:12px">YubiKey PIN</h3>
+            <input id="commitPin" type="password" placeholder="OpenPGP card PIN"
+                   autocomplete="off" style="width:100%;box-sizing:border-box" />
+            <label id="commitPushRow" class="row" style="margin-top:10px">
+              <input id="commitPush" type="checkbox" /> <span class="muted">Push after committing</span>
+            </label>
+            <div class="row" style="margin-top:12px">
+              <button class="primary" id="commitSubmit" onclick="submitCommit()">Commit &amp; Push</button>
             </div>
-            <div class="authstatus err" id="addErr"></div>
+            <div class="authstatus" id="commitState"></div>
           </div>
         </div>
       </div>
@@ -252,7 +253,7 @@ async function logout() {
   await api("/api/logout", { method: "POST" });
   closeLog();
   closeDiff();
-  closeAddDir();
+  closeCommit();
   document.getElementById("app").classList.add("hidden");
   // Passwordless mode has nothing to sign out to — re-run the boot decision,
   // which signs back in automatically. (The Sign out button is hidden there.)
@@ -265,137 +266,38 @@ function show() {
   document.getElementById("app").classList.remove("hidden");
   // No password means there's nothing meaningful to sign out from.
   document.getElementById("signout").style.display = pwRequired ? "" : "none";
-  loadDirs();
+  loadPresets();
   refresh();
   checkAuth();
 }
 
-async function loadDirs() {
-  const r = await api("/api/directories");
+async function loadPresets() {
+  const r = await api("/api/presets");
   if (!r.ok) return;
-  const { directories, canManage } = await r.json();
-  const sel = document.getElementById("dir");
+  const { presets } = await r.json();
+  const sel = document.getElementById("preset");
   sel.innerHTML = "";
-  if (!directories.length) {
+  if (!presets || !presets.length) {
     const o = document.createElement("option");
-    o.textContent = "(no directories configured)";
+    o.textContent = "(no presets — set programs.vibe.presets)";
     o.disabled = true;
     sel.appendChild(o);
-  } else {
-    for (const d of directories) {
-      const o = document.createElement("option");
-      o.value = d.name;
-      o.textContent = d.name + "  —  " + d.path;
-      sel.appendChild(o);
-    }
+    return;
   }
-  document.getElementById("addrow").style.display = canManage ? "" : "none";
-  const chips = document.getElementById("dirchips");
-  chips.innerHTML = "";
-  for (const d of directories) {
-    if (!d.removable) continue;
-    const chip = document.createElement("span");
-    chip.className = "chip";
-    chip.appendChild(document.createTextNode(d.name));
-    const x = document.createElement("button");
-    x.textContent = "✕";
-    x.title = "Unregister " + d.name + " (files are kept on disk)";
-    x.onclick = () => removeDir(d.name);
-    chip.appendChild(x);
-    chips.appendChild(chip);
+  for (const p of presets) {
+    const o = document.createElement("option");
+    o.value = p.name;
+    const dirs = p.directories || [];
+    const extra = dirs.length > 1 ? "  (+" + (dirs.length - 1) + " dir" + (dirs.length > 2 ? "s" : "") + ")" : "";
+    o.textContent = p.name + "  —  " + (dirs[0] || "?") + extra + (p.branch ? "  [" + p.branch + "]" : "");
+    sel.appendChild(o);
   }
-}
-
-// ===== add-directory file browser =====
-let addCurrent = null; // the directory currently shown in the browser
-
-function openAddDir() {
-  const modal = document.getElementById("addModal");
-  modal.classList.remove("hidden");
-  modal.focus();
-  document.getElementById("addName").value = "";
-  setAddErr("");
-  browseTo(null);
-}
-
-function closeAddDir() {
-  const modal = document.getElementById("addModal");
-  if (modal.classList.contains("hidden")) return;
-  modal.classList.add("hidden");
-  document.getElementById("addList").innerHTML = "";
-  addCurrent = null;
-}
-
-function addBackdrop(ev) { if (ev.target && ev.target.id === "addModal") closeAddDir(); }
-
-function setAddErr(msg) { document.getElementById("addErr").textContent = msg || ""; }
-
-async function browseTo(path) {
-  setAddErr("");
-  const r = await api("/api/browse" + (path ? "?path=" + encodeURIComponent(path) : ""));
-  if (r.status === 401) { closeAddDir(); return logout(); }
-  if (!r.ok) { setAddErr("Cannot browse there."); return; }
-  renderBrowse(await r.json());
-}
-
-function fsEntry(label, onclick, tag) {
-  const row = document.createElement("div");
-  row.className = onclick ? "fs-entry nav" : "fs-entry muted";
-  const ic = document.createElement("span"); ic.className = "ico"; ic.textContent = "📁";
-  row.appendChild(ic);
-  const nm = document.createElement("span"); nm.textContent = label; row.appendChild(nm);
-  if (tag) { const t = document.createElement("span"); t.className = "tag"; t.textContent = tag; row.appendChild(t); }
-  if (onclick) row.onclick = onclick;
-  return row;
-}
-
-function renderBrowse(d) {
-  addCurrent = d.path;
-  document.getElementById("addPath").textContent = "Location: " + d.path;
-  const list = document.getElementById("addList");
-  list.innerHTML = "";
-  if (d.parent) list.appendChild(fsEntry(".. (up)", () => browseTo(d.parent), null));
-  if (!d.entries || !d.entries.length) {
-    const empty = document.createElement("div");
-    empty.className = "fs-entry muted";
-    empty.textContent = d.error ? d.error : "(no subfolders here)";
-    list.appendChild(empty);
-  }
-  for (const e of (d.entries || [])) {
-    list.appendChild(fsEntry(e.name, () => browseTo(e.path), e.registered ? "registered" : null));
-  }
-}
-
-async function submitAddDir() {
-  if (!addCurrent) return;
-  const name = document.getElementById("addName").value.trim();
-  const btn = document.getElementById("addSubmit");
-  btn.disabled = true;
-  setAddErr("");
-  try {
-    const body = { path: addCurrent };
-    if (name) body.name = name;
-    const r = await api("/api/directories", { method: "POST", body: JSON.stringify(body) });
-    if (r.status === 401) { closeAddDir(); return logout(); }
-    const d = await r.json().catch(() => ({}));
-    if (r.ok) { closeAddDir(); loadDirs(); }
-    else { setAddErr(d.error || "Failed to add directory."); }
-  } catch (e) {
-    setAddErr("Network error.");
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function removeDir(name) {
-  await api("/api/directories/" + name, { method: "DELETE" });
-  loadDirs();
 }
 
 async function startSession() {
-  const dir = document.getElementById("dir").value;
-  if (!dir) return;
-  const r = await api("/api/sessions", { method: "POST", body: JSON.stringify({ dir }) });
+  const preset = document.getElementById("preset").value;
+  if (!preset) return;
+  const r = await api("/api/sessions", { method: "POST", body: JSON.stringify({ preset }) });
   const err = document.getElementById("startErr");
   if (!r.ok) { const b = await r.json().catch(() => ({})); err.textContent = b.error || "Failed to start"; }
   else { err.textContent = ""; refresh(); }
@@ -453,7 +355,9 @@ async function refresh() {
   const r = await api("/api/sessions");
   if (r.status === 401) { return logout(); }
   if (!r.ok) return;
-  const { sessions } = await r.json();
+  const data = await r.json();
+  const sessions = data.sessions || [];
+  // Each session carries its own canCommit/canPush/commitBranch (per its preset).
   const tb = document.getElementById("sessions");
   tb.innerHTML = "";
   if (!sessions.length) {
@@ -511,6 +415,16 @@ async function refresh() {
     diffBtn.setAttribute("aria-label", "View git diff for " + s.name);
     diffBtn.onclick = () => openDiff(s);
     actions.appendChild(diffBtn);
+    // Commit & Push — only on running, server-owned sessions, only when the
+    // feature is enabled and commit isn't touch-gated (server re-checks anyway).
+    if (s.canCommit && s.status === "running" && !s.external) {
+      const cpBtn = document.createElement("button");
+      cpBtn.className = "primary";
+      cpBtn.textContent = s.canPush ? "Commit & Push" : "Commit";
+      cpBtn.setAttribute("aria-label", "Commit" + (s.canPush ? " and push" : "") + " " + s.name);
+      cpBtn.onclick = () => openCommit(s);
+      actions.appendChild(cpBtn);
+    }
     if (s.status === "running" && !s.external) {
       const killBtn = document.createElement("button");
       killBtn.className = "danger";
@@ -971,14 +885,112 @@ function renderFile(f) {
   return wrap;
 }
 
+// ===== commit & push modal =====
+let commitSession = null;   // the session whose commit modal is open
+let commitLastFocus = null; // element to restore focus to on close
+
+function openCommit(s) {
+  commitSession = s;
+  commitLastFocus = document.activeElement;
+  const canPush = !!s.canPush; // per-preset (carried on the session)
+  const modal = document.getElementById("commitModal");
+  document.getElementById("commitTitle").textContent = (canPush ? "Commit & Push" : "Commit") + " — " + s.name;
+  const note = document.getElementById("commitBranchNote");
+  if (s.commitBranch) {
+    // textContent — commitBranch is server config, but render it safely anyway.
+    note.textContent = "Commits go to branch \"" + s.commitBranch + "\" (created if it doesn't exist).";
+    note.style.display = "";
+  } else {
+    note.textContent = "";
+    note.style.display = "none";
+  }
+  document.getElementById("commitMsg").value = "";
+  document.getElementById("commitPin").value = "";
+  const pushRow = document.getElementById("commitPushRow");
+  pushRow.style.display = canPush ? "" : "none";
+  document.getElementById("commitPush").checked = canPush;
+  const submit = document.getElementById("commitSubmit");
+  submit.textContent = canPush ? "Commit & Push" : "Commit";
+  // Re-arm in case a previous submit left it disabled after a stale response.
+  submit.disabled = false;
+  setCommitStatusMsg("", "");
+  modal.classList.remove("hidden");
+  modal.focus();
+  document.getElementById("commitMsg").focus();
+}
+
+function closeCommit() {
+  const modal = document.getElementById("commitModal");
+  if (modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  commitSession = null;
+  // Never leave the typed PIN sitting in the DOM after the modal closes.
+  document.getElementById("commitPin").value = "";
+  document.getElementById("commitMsg").value = "";
+  if (commitLastFocus && commitLastFocus.focus) commitLastFocus.focus();
+  commitLastFocus = null;
+}
+
+function commitBackdrop(ev) { if (ev.target && ev.target.id === "commitModal") closeCommit(); }
+
+function setCommitStatusMsg(cls, msg) {
+  const el = document.getElementById("commitState");
+  el.className = "authstatus" + (cls ? " " + cls : "");
+  el.textContent = msg || "";
+}
+
+async function submitCommit() {
+  if (!commitSession) return;
+  const id = commitSession.id;
+  // A late response must not touch the DOM / log out if the modal was closed or
+  // a different session opened while the request was in flight.
+  const stale = () => !commitSession || commitSession.id !== id;
+  const msg = document.getElementById("commitMsg").value;
+  if (!msg.trim()) { setCommitStatusMsg("err", "Enter a commit message."); return; }
+  const pin = document.getElementById("commitPin").value;
+  if (!pin) { setCommitStatusMsg("err", "Enter your card PIN."); return; }
+  const push = !!commitSession.canPush && document.getElementById("commitPush").checked;
+  const btn = document.getElementById("commitSubmit");
+  btn.disabled = true;
+  setCommitStatusMsg("", push ? "Committing & pushing… (touch your key if it blinks)" : "Committing…");
+  try {
+    const r = await api("/api/sessions/" + id + "/commit-push", {
+      method: "POST",
+      body: JSON.stringify({ message: msg, pin: pin, push: push })
+    });
+    if (stale()) return;
+    if (r.status === 401) { closeCommit(); return logout(); }
+    const d = await r.json().catch(() => ({}));
+    if (stale()) return;
+    if (r.ok && d.ok) {
+      document.getElementById("commitPin").value = ""; // clear the PIN on success
+      let m = "Committed";
+      if (d.sha) m += " " + d.sha;
+      if (d.pushed) m += " and pushed";
+      setCommitStatusMsg("ok", m + ".");
+      setTimeout(() => { closeCommit(); refresh(); }, 1400);
+    } else if (d.committed) {
+      // The commit landed but a later push failed — keep the modal open with detail.
+      document.getElementById("commitPin").value = "";
+      setCommitStatusMsg("err", d.error || "Committed, but the push failed.");
+    } else {
+      setCommitStatusMsg("err", d.error || ("Commit failed (HTTP " + r.status + ")."));
+    }
+  } catch (e) {
+    if (!stale()) setCommitStatusMsg("err", "Network error.");
+  } finally {
+    if (!stale()) btn.disabled = false;
+  }
+}
+
 document.getElementById("pw").addEventListener("keydown", (e) => {
   if (e.key === "Enter") login();
 });
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (!document.getElementById("addModal").classList.contains("hidden")) { closeAddDir(); return; }
   if (!document.getElementById("authModal").classList.contains("hidden")) { closeAuth(); return; }
+  if (!document.getElementById("commitModal").classList.contains("hidden")) { closeCommit(); return; }
   if (!document.getElementById("diffModal").classList.contains("hidden")) closeDiff();
 });
 
@@ -989,6 +1001,7 @@ setInterval(() => {
   if (document.getElementById("app").classList.contains("hidden")) return;
   if (!document.getElementById("diffModal").classList.contains("hidden")) return;
   if (!document.getElementById("authModal").classList.contains("hidden")) return;
+  if (!document.getElementById("commitModal").classList.contains("hidden")) return;
   refresh();
 }, 3000);
 

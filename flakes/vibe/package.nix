@@ -59,8 +59,19 @@
   subscriptionAuth ? true,
   extraSettings ? {},
   extraArgs ? [],
+  # Named presets: attrset name -> { directories, branch, model, effort, ultracode,
+  # permissionMode, permissions, ... }. `vibe @<name>` applies one: cd to its first
+  # directory, `--add-dir` the rest, use its (resolved) settings/permission-mode,
+  # optionally check out its branch. Pins here are assumed already resolved against
+  # the top-level defaults by the caller (the programs.vibe module).
+  presets ? {},
 }: let
-  settings =
+  mkSettings = {
+    model,
+    effort,
+    ultracode,
+    permissions,
+  }:
     (lib.optionalAttrs (model != null) {inherit model;})
     // (lib.optionalAttrs (effort != null) {effortLevel = effort;})
     # ultracode is a Claude Code settings.json toggle (xhigh effort + dynamic
@@ -69,7 +80,22 @@
     // (lib.optionalAttrs (permissions != {}) {inherit permissions;})
     // extraSettings;
 
+  settings = mkSettings {inherit model effort ultracode permissions;};
+
   settingsFile = writeText "vibe-settings.json" (builtins.toJSON settings);
+
+  # One settings file per preset + a runtime manifest (name -> primary dir,
+  # add-dirs, branch, settings path, permission mode), baked in and read by jq.
+  presetEntry = name: p: {
+    dir = builtins.head p.directories;
+    addDirs = builtins.tail p.directories;
+    branch = p.branch;
+    permissionMode = p.permissionMode or "";
+    settings = "${writeText "vibe-preset-${name}.json" (builtins.toJSON (mkSettings {
+      inherit (p) model effort ultracode permissions;
+    }))}";
+  };
+  presetsFile = writeText "vibe-presets.json" (builtins.toJSON (lib.mapAttrs presetEntry presets));
 
   # An explicitly configured name; empty string means "auto-generate at runtime".
   configuredName =
@@ -93,6 +119,7 @@ in
             'vibe — Claude Code with antlers-pinned settings (subscription-first).' \
             'Usage:' \
             '  vibe [claude args...]          interactive Claude Code' \
+            '  vibe @<preset> [args...]       start a configured preset (dirs + branch + pins)' \
             '  vibe --remote-control [name]   drive from claude.ai / mobile' \
             '  vibe --show-config             print the pinned settings.json and exit' \
             '  vibe --help                    this help' \
@@ -115,6 +142,55 @@ in
         --show-config)
           jq . "$BAKED_SETTINGS" 2>/dev/null || cat "$BAKED_SETTINGS"
           exit 0
+          ;;
+      esac
+
+      # Presets: `vibe @<name>` applies a configured preset (programs.vibe.presets)
+      # — cd to its primary directory, `--add-dir` the rest so the session can reach
+      # them all, use its pinned settings + permission mode, optionally check out its
+      # branch, and seed the session name. Must come before --remote-control parsing
+      # so `vibe @proj --remote-control` works.
+      PRESETS_FILE=${presetsFile}
+      ADD_DIR_ARGS=()
+      PRESET_PERM=""
+      PRESET_NAME=""
+      case "''${1:-}" in
+        @?*)
+          PRESET_NAME="''${1#@}"
+          shift
+          if ! jq -e --arg n "$PRESET_NAME" 'has($n)' "$PRESETS_FILE" >/dev/null 2>&1; then
+            echo "vibe: unknown preset '@$PRESET_NAME'" >&2
+            echo "available presets: $(jq -r 'keys | join(", ") | if . == "" then "(none configured)" else . end' "$PRESETS_FILE" 2>/dev/null)" >&2
+            exit 1
+          fi
+          P_DIR="$(jq -r --arg n "$PRESET_NAME" '.[$n].dir // empty' "$PRESETS_FILE")"
+          P_BRANCH="$(jq -r --arg n "$PRESET_NAME" '.[$n].branch // empty' "$PRESETS_FILE")"
+          P_SETTINGS="$(jq -r --arg n "$PRESET_NAME" '.[$n].settings // empty' "$PRESETS_FILE")"
+          PRESET_PERM="$(jq -r --arg n "$PRESET_NAME" '.[$n].permissionMode // empty' "$PRESETS_FILE")"
+          # Each remaining directory becomes a `--add-dir` so Claude can access it.
+          while IFS= read -r d; do
+            [ -n "$d" ] && ADD_DIR_ARGS+=(--add-dir "$d")
+          done < <(jq -r --arg n "$PRESET_NAME" '.[$n].addDirs[]?' "$PRESETS_FILE")
+          if [ -n "$P_DIR" ]; then
+            cd "$P_DIR" || {
+              echo "vibe: preset '@$PRESET_NAME' working dir not accessible: $P_DIR" >&2
+              exit 1
+            }
+          fi
+          [ -n "$P_SETTINGS" ] && BAKED_SETTINGS="$P_SETTINGS"
+          # Work on the preset's branch, creating it from the current HEAD if it
+          # doesn't exist. Best-effort: a dirty tree / lock warns but never blocks
+          # the session (you can still commit via vibe-server's signed flow).
+          if [ -n "$P_BRANCH" ]; then
+            CUR_BR="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+            if [ "$CUR_BR" != "$P_BRANCH" ]; then
+              if git rev-parse --verify --quiet "refs/heads/$P_BRANCH" >/dev/null 2>&1; then
+                git checkout "$P_BRANCH" 2>/dev/null || echo "vibe: warning: could not switch to branch '$P_BRANCH'" >&2
+              else
+                git checkout -b "$P_BRANCH" 2>/dev/null || echo "vibe: warning: could not create branch '$P_BRANCH'" >&2
+              fi
+            fi
+          fi
           ;;
       esac
 
@@ -144,6 +220,7 @@ in
       # (a repo can't self-grant auto) — the CLI flag is the reliable launch-time
       # override. An ineligible model/version makes claude fall back silently.
       PERMISSION_MODE=${lib.escapeShellArg permissionMode}
+      [ -n "$PRESET_PERM" ] && PERMISSION_MODE="$PRESET_PERM"
       [ -n "''${VIBE_PERMISSION_MODE:-}" ] && PERMISSION_MODE="$VIBE_PERMISSION_MODE"
       PERM_ARGS=()
       [ -n "$PERMISSION_MODE" ] && PERM_ARGS=(--permission-mode "$PERMISSION_MODE")
@@ -187,6 +264,9 @@ in
       if [ -z "$NAME" ]; then
         if [ -n "$CONFIGURED_NAME" ]; then
           NAME="$CONFIGURED_NAME"
+        elif [ -n "$PRESET_NAME" ]; then
+          # A preset seeds the session name (overridable by an explicit name / VIBE_NAME).
+          NAME="$PRESET_NAME"
         else
           REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
           # Restrict the repo segment to a safe session-name charset.
@@ -270,9 +350,9 @@ in
       # Launch. `exec` only when there is nothing for the EXIT trap to do (no temp
       # settings, not registered); otherwise run claude as a child so cleanup() fires.
       if [ "$SETTINGS" = "$BAKED_SETTINGS" ] && [ -z "$REG_ID" ]; then
-        exec claude --settings "$SETTINGS" "''${RC_ARGS[@]}" "''${PERM_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
+        exec claude --settings "$SETTINGS" "''${ADD_DIR_ARGS[@]}" "''${RC_ARGS[@]}" "''${PERM_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
       else
-        claude --settings "$SETTINGS" "''${RC_ARGS[@]}" "''${PERM_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
+        claude --settings "$SETTINGS" "''${ADD_DIR_ARGS[@]}" "''${RC_ARGS[@]}" "''${PERM_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
       fi
     '';
   }

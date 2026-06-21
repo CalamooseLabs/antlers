@@ -28,6 +28,22 @@ with lib; let
   # service has no dependency on programs.vibe being present.
   hasPrograms = config.programs ? vibe;
   pcfg = optionalAttrs hasPrograms config.programs.vibe;
+
+  # Launch presets are defined on programs.vibe and SUPERSEDE the old `directories`.
+  # `vibePresets` is the raw attrset (for the dirs + per-preset commit settings the
+  # server needs); `resolvedPresets` has each preset's null pins inherited from the
+  # globals, for baking into the launcher this service spawns. Empty when the vibe
+  # module isn't imported (then there's nothing to launch — a warning fires).
+  vibePresets =
+    if hasPrograms
+    then pcfg.presets
+    else {};
+  resolvedPresets =
+    if hasPrograms
+    then import ../vibe/presets.nix lib config.programs.vibe
+    else {};
+  allPresetDirs = concatMap (p: p.directories) (attrValues vibePresets);
+
   vibeWrapper =
     if hasPrograms && pcfg.package != null
     then pcfg.package
@@ -38,31 +54,18 @@ with lib; let
         remoteControl = pcfg.remoteControl.enable;
         remoteControlName = pcfg.remoteControl.name;
         namePrefix = pcfg.remoteControl.prefix;
+        presets = resolvedPresets;
       }
     else mkVibeWrapper {remoteControl = true;};
 
   serverPkg = flake.packages.${system}.vibe-server;
 
-  dirType = types.submodule {
-    options = {
-      name = mkOption {
-        type = types.str;
-        example = "antlers";
-        description = "Short label shown in the web UI.";
-      };
-      path = mkOption {
-        type = types.str;
-        example = "/srv/projects/antlers";
-        description = "Absolute path of the directory a vibe session runs in.";
-      };
-    };
-  };
-
-  # Default per-session command: the vibe launcher in remote-control mode, named
-  # after the session. @DIR@/@NAME@ are substituted by the server at spawn time
-  # (cwd is set to the chosen directory). Fully overridable via sessionCommand.
+  # Default per-session command: `vibe @<preset> --remote-control <name>`. @PRESET@
+  # is substituted by the server with `@<presetname>` (the launcher then cd's to the
+  # preset's first dir, --add-dir's the rest, checks out its branch, applies pins);
+  # @DIR@/@NAME@ are also available. Fully overridable via sessionCommand.
   defaultSessionCommand =
-    ["${scfg.vibePackage}/bin/vibe"]
+    ["${scfg.vibePackage}/bin/vibe" "@PRESET@"]
     ++ optionals scfg.remoteControl.enable ["--remote-control" "@NAME@"];
 
   stateDir = "/var/lib/vibe";
@@ -77,6 +80,33 @@ with lib; let
     then "root"
     else scfg.group;
 
+  # ---- Commit & Push (YubiKey-signed commits from the web UI) ----
+  cp = scfg.commitPush;
+  # The user the unit runs as IS the signer: git reads its ~/.gitconfig (identity,
+  # signingkey, commit.gpgsign) and gpg its ~/.gnupg (the card) for this feature.
+  signingUserHome =
+    if cp.home != ""
+    then cp.home
+    else config.users.users.${runUser}.home or "/home/${runUser}";
+  gnupgHomePath =
+    if cp.gnupgHome != null
+    then cp.gnupgHome
+    else "${signingUserHome}/.gnupg";
+  # gpg wrapper: when the server stages the web-entered PIN to a 0600 tmpfs file
+  # and points VIBE_PIN_FILE at it, feed that PIN to the card via loopback
+  # pinentry for one signing op; otherwise plain gpg. Needs `allow-loopback-pinentry`
+  # in the signing user's gpg-agent.conf (see the module README / warning below).
+  pinWrapper = pkgs.writeShellApplication {
+    name = "vibe-gpg";
+    runtimeInputs = [pkgs.gnupg];
+    text = ''
+      if [ -n "''${VIBE_PIN_FILE:-}" ]; then
+        exec gpg --pinentry-mode loopback --passphrase-file "''${VIBE_PIN_FILE}" --batch --no-tty "$@"
+      fi
+      exec gpg "$@"
+    '';
+  };
+
   # systemd list-valued settings (ReadWritePaths, …) are split on whitespace
   # *within* a value, so a path containing spaces must be double-quoted or
   # systemd truncates it at the first space (→ "set up mount namespacing:
@@ -90,16 +120,38 @@ with lib; let
       if scfg.passwordFile != null
       then toString scfg.passwordFile
       else "";
-    directories = map (d: {inherit (d) name path;}) scfg.directories;
+    # Presets (from programs.vibe.presets) — the server needs each one's dirs +
+    # per-preset commit settings; the launcher pins are baked into the launcher.
+    presets =
+      mapAttrsToList (name: p: {
+        inherit name;
+        inherit (p) directories pushRemote commitRequiresTouch pushRequiresTouch;
+        branch =
+          if p.branch != null
+          then p.branch
+          else "";
+      })
+      vibePresets;
     sessionCommand = scfg.sessionCommand;
     extraEnv = scfg.extraEnv;
-    projectsDir = scfg.projectsDir;
-    browseRoot = scfg.browseRoot;
-    newProjectTemplate =
-      if scfg.newProjectTemplate != null
-      then toString scfg.newProjectTemplate
-      else null;
     inherit (scfg) requireTLS sessionNamePrefix maxLogBytes pty seedClaudeOnboarding claudeTheme;
+    # Global Commit & Push wiring; the per-preset branch/pushRemote/touch live on
+    # each preset above.
+    commitPush = {
+      inherit (cp) enable;
+      gpgProgram =
+        if cp.enable
+        then "${pinWrapper}/bin/vibe-gpg"
+        else "";
+      home =
+        if cp.enable
+        then signingUserHome
+        else "";
+      gnupgHome =
+        if cp.enable
+        then gnupgHomePath
+        else "";
+    };
   });
 
   # Where Claude stores its config (onboarding/theme/trust in .claude.json, the
@@ -113,14 +165,21 @@ with lib; let
   # Auto-relax ProtectHome when any project dir (or the Claude config dir) lives
   # under /home — otherwise the sandbox hides it even when listed in ReadWritePaths.
   homePaths =
-    (map (d: d.path) scfg.directories)
+    allPresetDirs
     ++ (optional (scfg.claudeConfigDir != null) (toString scfg.claudeConfigDir))
-    ++ (optional (scfg.projectsDir != null) scfg.projectsDir)
-    ++ (optional (scfg.browseRoot != null) scfg.browseRoot);
+    # The signing user's ~/.gnupg must be visible for Commit & Push, so count it
+    # toward the /home check (its agent socket lives in /run/user, handled by the
+    # commitPush ProtectHome relaxation below).
+    ++ (optional cp.enable gnupgHomePath);
   anyUnderHome = any (p: p == "/home" || hasPrefix "/home/" p) homePaths;
   protectHome =
     if scfg.protectHome != null
     then scfg.protectHome
+    # commitPush signs via gpg-agent, whose socket lives under /run/user/<uid> —
+    # ProtectHome=tmpfs|true would blank that (and /root), so signing would
+    # silently fail. Relaxing is required, not just a /home convenience.
+    else if cp.enable
+    then false
     else if anyUnderHome
     then false
     else "tmpfs";
@@ -161,17 +220,16 @@ in {
       description = "File whose contents are the shared login password (read at runtime, never copied to the store). When null (the default), the web UI is passwordless — anyone who can reach it signs in automatically. Set this (and front the service with TLS / restrict the network) for anything beyond a trusted host.";
     };
 
-    directories = mkOption {
-      type = types.listOf dirType;
-      default = [];
-      description = "Predefined directories users may start vibe sessions in.";
-    };
+    # Launch targets are the presets defined on programs.vibe.presets (which
+    # supersede the old per-server `directories`). Import the vibe module and set
+    # programs.vibe.presets.<name> = { directories = [...]; branch = ...; ... };
+    # the web UI lists them and each preset's directories are made writable below.
 
     sessionCommand = mkOption {
       type = types.listOf types.str;
       default = defaultSessionCommand;
-      defaultText = literalExpression ''["''${vibePackage}/bin/vibe" "--remote-control" "@NAME@"]'';
-      description = "Command run to start a session. @DIR@ and @NAME@ are substituted; cwd is the chosen directory.";
+      defaultText = literalExpression ''["''${vibePackage}/bin/vibe" "@PRESET@" "--remote-control" "@NAME@"]'';
+      description = "Command run to start a session. @PRESET@ (→ `@<presetname>`), @DIR@ (preset's first dir), and @NAME@ are substituted; cwd is the preset's first directory.";
     };
 
     extraEnv = mkOption {
@@ -179,26 +237,6 @@ in {
       default = [];
       example = ["GITHUB_TOKEN"];
       description = "Additional environment-variable NAMES (not values) to propagate from the service into spawned sessions, on top of the built-in allowlist (PATH, HOME, CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, …). Values come from the service environment (e.g. environmentFile). Anything not listed is dropped so stray secrets don't reach Claude Code or its browser-readable logs.";
-    };
-
-    projectsDir = mkOption {
-      type = types.nullOr types.str;
-      default = "${stateDir}/projects";
-      description = "Writable scratch directory created (systemd-tmpfiles) and made writable to the service. Legacy: the \"Add directory\" form now scaffolds into the directory chosen in the file browser (bounded by `browseRoot`), not here; this remains as a writable working area. Set to null to skip creating it.";
-    };
-
-    browseRoot = mkOption {
-      type = types.nullOr types.str;
-      default = "/home";
-      example = "/srv/projects";
-      description = "Root directory the web UI's \"Add directory\" file browser may navigate, and under which it creates new projects / registers existing folders. It is ALSO added to the systemd `ReadWritePaths`, so sessions started in any browsed or registered directory can actually write (paths outside the service's writable set are read-only under `ProtectSystem = strict`). Set to null to disable filesystem browsing / directory management from the UI entirely. Widen (e.g. \"/\") or narrow as needed — note a broad root makes a large part of the host writable to sessions, and combined with a passwordless, firewall-opened UI is flagged by a warning.";
-    };
-
-    newProjectTemplate = mkOption {
-      type = types.nullOr types.str;
-      default = "${flake}/templates/vibe-shell";
-      defaultText = literalExpression "the antlers vibe-shell template";
-      description = "Template directory copied into a newly-created project. Defaults to the antlers `vibe-shell` template; set to null to create empty directories instead.";
     };
 
     sessionNamePrefix = mkOption {
@@ -314,6 +352,46 @@ in {
       example = "light";
       description = "Theme written into the seeded `.claude.json` so Claude Code doesn't prompt to pick one (only used when seedClaudeOnboarding is true). One of Claude Code's theme names: \"dark\", \"light\", \"dark-daltonized\", \"light-daltonized\", \"dark-ansi\", \"light-ansi\".";
     };
+
+    commitPush = {
+      enable = mkEnableOption ''
+        the web "Commit & Push" button. When on, each running server-spawned session
+        gets a button that stages its working tree, makes a YubiKey-signed commit
+        (the OpenPGP card PIN is entered in the browser and fed to gpg via loopback
+        pinentry), and optionally pushes — a remote analogue of the `gcommit` flow.
+        This is the only feature that lets vibe-server MUTATE a repo, so it is off by
+        default. It requires the service to run (services.vibe-server.user) as the
+        login user that owns the YubiKey/gpg-agent, with `allow-loopback-pinentry` in
+        that user's gpg-agent.conf and the card reachable. The PER-PRESET branch /
+        pushRemote / commitRequiresTouch / pushRequiresTouch (on programs.vibe.presets)
+        control which branch a preset commits to and whether a touch gates it. See the
+        README.
+      '';
+
+      gnupgHome = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "/home/alice/.gnupg";
+        description = ''
+          GNUPGHOME for the signing subprocess (where the card's config and the
+          gpg-agent socket live). null (default) derives `<signing user home>/.gnupg`.
+          When commitPush is enabled this path is added to ReadWritePaths so gpg-agent
+          can write its sockets there.
+        '';
+      };
+
+      home = mkOption {
+        type = types.str;
+        default = "";
+        example = "/home/alice";
+        description = ''
+          HOME for the commit/push subprocess so git reads that user's ~/.gitconfig
+          (user.name/email, signingkey, commit.gpgsign). Empty (default) derives it from
+          the service user (services.vibe-server.user). Override only if that user's home
+          can't be auto-resolved.
+        '';
+      };
+    };
   };
 
   config = mkIf scfg.enable {
@@ -324,14 +402,17 @@ in {
 
     environment.etc."vibe/config.json".source = configFile;
 
-    systemd.tmpfiles.rules =
-      optional (scfg.projectsDir != null)
-      "d ${quotePath scfg.projectsDir} 0750 ${runUser} ${runGroup} -";
-
     warnings =
+      # The service has nothing to launch without presets (they come from the vibe
+      # module). Point the user at where to define them.
+      (optional (vibePresets == {})
+        "services.vibe-server: no presets defined — the web UI has nothing to launch. Import the vibe module (nixosModules.vibe) and set programs.vibe.presets.<name> = { directories = [ \"/path\" ]; ... }.")
+      ++
       # Only when auto-derived to false — an explicit `protectHome` is a deliberate
       # choice and stays silent.
-      (optional (scfg.protectHome == null && anyUnderHome)
+      (optional (scfg.protectHome == null && cp.enable && !anyUnderHome)
+        "services.vibe-server: ProtectHome auto-disabled because commitPush.enable is on — gpg-agent's socket lives under /run/user/<uid>, which ProtectHome=tmpfs would hide (signing would fail). Set services.vibe-server.protectHome explicitly to override.")
+      ++ (optional (scfg.protectHome == null && anyUnderHome)
         "services.vibe-server: ProtectHome auto-disabled because a configured directory lives under /home; the systemd sandbox is loosened accordingly. Set services.vibe-server.protectHome explicitly to silence this.")
       # Silenced by localNetworkOnly (restricting to LAN subnets is the "trusted
       # LAN" acknowledgement this warns about) or by terminating TLS.
@@ -350,23 +431,23 @@ in {
       "services.vibe-server: claudeConfigDir (${claudeConfigDirPath}) is outside ${stateDir}, so seedClaudeOnboarding cannot write its .claude.json there (the server's write scope is fixed at build time) and sessions may block on Claude Code's first-run theme/trust prompts. Pre-seed that dir (it must hold the login anyway) or keep claudeConfigDir under ${stateDir}.")
       ++ (optional scfg.runAsRoot
         "services.vibe-server: running as root (runAsRoot = true) — the service and every Claude Code session it spawns run with full privileges. Use a dedicated user/group with the right directory permissions instead, where possible.")
-      # The file browser + ReadWritePaths inclusion makes browseRoot navigable and
-      # writable to sessions; with a passwordless, exposed UI that's a wide surface.
-      ++ (optional (scfg.browseRoot != null && scfg.passwordFile == null && scfg.openFirewall && scfg.hostname != "127.0.0.1" && scfg.hostname != "::1")
-        "services.vibe-server: browseRoot (${scfg.browseRoot}) lets anyone using the web UI browse the host filesystem and register directories there (which then become writable to spawned sessions) — but the UI is passwordless and the port is firewall-opened. Set services.vibe-server.passwordFile, restrict the network (localNetworkOnly), or set browseRoot = null.");
+      # commitPush runs as the unit's user; the YubiKey, ~/.gnupg, and ~/.gitconfig
+      # belong to a login user, so the default `vibe`/root user can't sign.
+      ++ (optional (cp.enable && (scfg.runAsRoot || runUser == "vibe"))
+        "services.vibe-server: commitPush.enable is on but the service runs as ${runUser}, which almost certainly cannot reach your YubiKey/gpg-agent (the card, ~/.gnupg, and ~/.gitconfig belong to your login user). Set services.vibe-server.user to that login user (with runAsRoot = false), or Commit & Push will fail to sign.")
+      # Surface the host prerequisites once when the feature is on.
+      ++ (optional cp.enable
+        "services.vibe-server: commitPush.enable is on — a deliberate shift to letting the web UI MUTATE repos. For it to work: the signing user's gpg-agent must allow non-interactive PIN entry (`allow-loopback-pinentry` in ~/.gnupg/gpg-agent.conf, then reload), pcscd must be running, and the gpg-agent/card must be reachable by the service (e.g. `loginctl enable-linger ${runUser}`). The PIN typed in the browser transits the server in memory (a 0600 tmpfs file, one signing attempt, then deleted). A wrong PIN counts toward the card's lockout. See the module README.");
 
     assertions = [
       {
-        assertion = all (d: hasPrefix "/" d.path) scfg.directories;
-        message = "services.vibe-server.directories: every path must be absolute (start with /).";
+        # Preset names reach the web UI / a `vibe @<name>` arg — keep them simple.
+        assertion = all (n: builtins.match "[A-Za-z0-9_-]+" n != null) (attrNames vibePresets);
+        message = "services.vibe-server: every programs.vibe.presets name must match [A-Za-z0-9_-]+ (it is used as a session name and a `vibe @<name>` argument).";
       }
       {
-        assertion = all (d: builtins.match "[A-Za-z0-9_-]+" d.name != null) scfg.directories;
-        message = "services.vibe-server.directories: every name must match [A-Za-z0-9_-]+ (the web UI rejects other names).";
-      }
-      {
-        assertion = scfg.browseRoot == null || hasPrefix "/" scfg.browseRoot;
-        message = "services.vibe-server.browseRoot must be an absolute path (start with /), or null.";
+        assertion = all (p: all (d: hasPrefix "/" d) p.directories) (attrValues vibePresets);
+        message = "services.vibe-server: every programs.vibe.presets directory must be an absolute path (start with /).";
       }
     ];
 
@@ -377,7 +458,9 @@ in {
 
       # setsid (util-linux) is invoked by name to start each session in its own
       # process group; bash/coreutils/git/nix back claude's tool execution.
-      path = with pkgs; [bash coreutils util-linux git nix scfg.vibePackage claude-code];
+      # gnupg is on PATH so the commit/push flow's gpg-agent can launch scdaemon
+      # (the YubiKey-signed Commit & Push feature); harmless when it's disabled.
+      path = with pkgs; [bash coreutils util-linux git nix gnupg scfg.vibePackage claude-code];
 
       serviceConfig =
         {
@@ -407,10 +490,11 @@ in {
           # Double-quoted so paths with spaces survive systemd's whitespace split.
           ReadWritePaths = map quotePath (
             [stateDir]
-            ++ (map (d: d.path) scfg.directories)
+            # Every preset directory (primary + --add-dir targets) must be writable.
+            ++ allPresetDirs
             ++ (optional (scfg.claudeConfigDir != null) (toString scfg.claudeConfigDir))
-            ++ (optional (scfg.projectsDir != null) scfg.projectsDir)
-            ++ (optional (scfg.browseRoot != null) scfg.browseRoot)
+            # gpg-agent writes its random_seed under GNUPGHOME.
+            ++ (optional cp.enable gnupgHomePath)
           );
 
           # Extra hardening, safe for a Deno/Node web service. No

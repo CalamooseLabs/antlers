@@ -23,14 +23,7 @@ import {
   sessionCount,
   spawnSession,
 } from "./sessions.ts";
-import {
-  addDirectory,
-  browse,
-  canManageDirectories,
-  listDirectories,
-  removeDirectory,
-  resolveDir,
-} from "./directories.ts";
+import { listPresets, resolvePreset } from "./presets.ts";
 import {
   cancelClaudeLogin,
   claudeAuthStatus,
@@ -40,9 +33,10 @@ import {
 } from "./claude.ts";
 import { streamLog } from "./sse.ts";
 import { gitDiff } from "./diff.ts";
+import { canCommit, canPush, cleanMessage, cleanPin, commitAndPush } from "./commit.ts";
 import { json, readJsonLimited } from "./http.ts";
 import { INDEX_HTML } from "./html.ts";
-import { isError, isLoopbackIp, isValidName } from "./util.ts";
+import { isLoopbackIp, isValidName } from "./util.ts";
 
 // `peerIp` is the RAW socket peer (not x-forwarded-for) — used to confine the
 // local self-registration endpoints to loopback.
@@ -166,52 +160,35 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     return json(res, res.ok ? 200 : 400);
   }
 
-  if (path === "/api/directories" && method === "GET") {
-    return json({ directories: listDirectories(config), canManage: canManageDirectories(config) });
-  }
-
-  // Browse the server's filesystem (subdirectories only), bounded to browseRoot,
-  // so the UI can pick where to create/register a project.
-  if (path === "/api/browse" && method === "GET") {
-    if (!canManageDirectories(config)) return json({ error: "Browsing disabled" }, 403);
-    return json(await browse(config, url.searchParams.get("path") ?? undefined));
-  }
-
-  // Create a new project (`{path, name}` → scaffold `<path>/<name>`) or register
-  // an existing folder (`{path}` → register it as-is). `path` is the folder the
-  // user browsed to; addDirectory bounds it to browseRoot.
-  if (path === "/api/directories" && method === "POST") {
-    if (!canManageDirectories(config)) return json({ error: "Directory management disabled" }, 403);
-    const body: Record<string, unknown> = await readJsonLimited(req).catch(() => ({}));
-    const dirPath = body.path;
-    if (typeof dirPath !== "string" || !dirPath.startsWith("/")) return json({ error: "Invalid path" }, 400);
-    const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
-    if (name !== undefined && !isValidName(name)) return json({ error: "Invalid name" }, 400);
-    try {
-      return json({ directory: await addDirectory(config, { path: dirPath, name }) }, 201);
-    } catch (e) {
-      return json({ error: isError(e) ? e.message : "Could not add directory" }, 400);
-    }
-  }
-
-  const dirDel = path.match(/^\/api\/directories\/([A-Za-z0-9_-]+)$/);
-  if (dirDel && method === "DELETE") {
-    const ok = await removeDirectory(config, dirDel[1]); // unregisters only; files are kept
-    return json({ ok }, ok ? 200 : 404);
+  // The launch presets (from programs.vibe.presets). The UI lists them; each is a
+  // name + its directories (first = working dir) + the per-preset commit settings.
+  if (path === "/api/presets" && method === "GET") {
+    return json({ presets: listPresets(config) });
   }
 
   if (path === "/api/sessions" && method === "GET") {
-    return json({ sessions: listSessions() });
+    // Enrich each session with its per-preset Commit & Push capabilities so the UI
+    // can show/hide the button and name the branch. The server re-checks below.
+    const sessions = listSessions().map((s) => {
+      const p = s.preset ? resolvePreset(config, s.preset) : undefined;
+      return {
+        ...s,
+        canCommit: p ? canCommit(config, p) : false,
+        canPush: p ? canPush(config, p) : false,
+        commitBranch: p ? p.branch : "",
+      };
+    });
+    return json({ sessions });
   }
 
   if (path === "/api/sessions" && method === "POST") {
     const body: Record<string, unknown> = await readJsonLimited(req).catch(() => ({}));
-    const dirName = body.dir;
-    if (typeof dirName !== "string" || !isValidName(dirName)) return json({ error: "Invalid directory" }, 400);
-    const dir = resolveDir(config, dirName);
-    if (!dir) return json({ error: "Unknown directory" }, 400);
+    const presetName = body.preset;
+    if (typeof presetName !== "string" || !isValidName(presetName)) return json({ error: "Invalid preset" }, 400);
+    const preset = resolvePreset(config, presetName);
+    if (!preset) return json({ error: "Unknown preset" }, 400);
     try {
-      return json({ session: await spawnSession(config, dir) }, 201);
+      return json({ session: await spawnSession(config, preset) }, 201);
     } catch {
       return json({ error: "Could not start session" }, 400);
     }
@@ -258,15 +235,41 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
   if (diff && method === "GET") {
     const s = getSession(diff[1]);
     if (!s) return json({ error: "Not found" }, 404);
-    // For server-spawned sessions the path is server-controlled (config /
-    // browseRoot); defense-in-depth: only diff a still-registered directory, so a
-    // stale/unregistered dir is a clean 409 rather than a stray git run. External
-    // sessions aren't in the registry — their path came from a token-authenticated
-    // loopback registration; git runs read-only + scrubbed, so diff it directly.
-    if (!s.info.external && !resolveDir(config, s.info.dir)) {
-      return json({ error: "Directory no longer registered" }, 409);
+    // For server-spawned sessions the path is server-controlled (the preset);
+    // defense-in-depth: only diff a still-defined preset, so a stale one is a clean
+    // 409 rather than a stray git run. External sessions aren't preset-backed —
+    // their path came from a token-authenticated loopback registration; git runs
+    // read-only + scrubbed, so diff it directly.
+    if (!s.info.external && !resolvePreset(config, s.info.preset ?? "")) {
+      return json({ error: "Preset no longer defined" }, 409);
     }
     return json(await gitDiff(s.info.path)); // gitDiff never throws (catches internally)
+  }
+
+  // Stage + YubiKey-signed commit (+ optional push) of a session's working tree.
+  // The ONE mutating git route — guarded hard: the session must be server-owned
+  // (external → 409, like Kill — never mutate a tree managed from someone's own
+  // terminal) and still preset-backed; the feature must be enabled and the preset
+  // not commit-touch-gated (403). The UI gate is cosmetic; this is the gate.
+  const cmt = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/commit-push$/);
+  if (cmt && method === "POST") {
+    const s = getSession(cmt[1]);
+    if (!s) return json({ error: "Not found" }, 404);
+    if (s.info.external) return json({ error: "External sessions are managed from their own terminal" }, 409);
+    const preset = resolvePreset(config, s.info.preset ?? "");
+    if (!preset) return json({ error: "Preset no longer defined" }, 409);
+    if (!canCommit(config, preset)) return json({ error: "Commit & Push is disabled for this preset" }, 403);
+    const body: Record<string, unknown> = await readJsonLimited(req).catch(() => ({}));
+    const message = cleanMessage(body.message);
+    if (!message) return json({ error: "A commit message is required" }, 400);
+    const pin = cleanPin(body.pin);
+    if (!pin) return json({ error: "A valid card PIN is required" }, 400);
+    // Push only when the client asked AND the preset permits it (push touch-gate).
+    const doPush = body.push === true && canPush(config, preset);
+    const result = await commitAndPush(config, preset, s.info.path, message, pin, doPush);
+    // 200 once a commit landed (even if a later push failed — the result carries
+    // the details); 400 only when nothing was committed.
+    return json(result, result.committed ? 200 : 400);
   }
 
   return json({ error: "Not found" }, 404);

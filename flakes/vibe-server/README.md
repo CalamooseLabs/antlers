@@ -2,12 +2,11 @@
 
 The Deno web service behind **`services.vibe-server`** — a small **lifecycle manager**
 for Claude Code sessions. An optional shared-password login (passwordless when no
-`passwordFile` is set) gates a single-page UI that lists directories (and can
-**browse the server's filesystem** to create or register more — see
-[Add directory](#add-directory)), spawns a `vibe` session in each, lists/kills
-sessions, and streams each session's captured output read-only. A `vibe` you run
-**by hand** on the server self-registers and shows up here too (see
-[Manual sessions](#manual-sessions)). You actually *drive* a session from
+`passwordFile` is set) gates a single-page UI that lists **presets** (defined on
+`programs.vibe.presets`; see [Presets](#presets)), spawns a `vibe @<preset>` session
+per chosen preset, lists/kills sessions, and streams each session's captured output
+read-only. A `vibe` you run **by hand** on the server self-registers and shows up
+here too (see [Manual sessions](#manual-sessions)). You actually *drive* a session from
 [claude.ai/code](https://claude.ai/code) or the mobile app — the browser only
 manages lifecycle.
 
@@ -27,15 +26,22 @@ the module renders `/etc/vibe/config.json` (`$VIBE_CONFIG`) and wires the unit:
 ```nix
 { inputs, ... }:
 {
-  imports = [ inputs.antlers.nixosModules.vibe-server ];
+  imports = [
+    inputs.antlers.nixosModules.vibe         # programs.vibe — defines the presets
+    inputs.antlers.nixosModules.vibe-server
+  ];
+
+  # Launch targets are presets defined on the launcher (they supersede the old
+  # `services.vibe-server.directories`); vibe-server reads them.
+  programs.vibe.enable = true;
+  programs.vibe.presets.antlers = {
+    directories = [ "/srv/projects/antlers" ];     # first = cwd; more → claude --add-dir
+  };
 
   services.vibe-server = {
     enable = true;
     passwordFile = "/run/secrets/vibe-password";   # shared login password (omit for passwordless)
     claudeConfigDir = "/var/lib/vibe/claude";       # pre-seeded OAuth login (subscription)
-    directories = [
-      { name = "antlers"; path = "/srv/projects/antlers"; }
-    ];
     openFirewall = true;
     localNetworkOnly = true;                         # restrict to LAN subnets
   };
@@ -50,10 +56,8 @@ the module renders `/etc/vibe/config.json` (`$VIBE_CONFIG`) and wires the unit:
   "hostname": "0.0.0.0",
   "stateDir": "/var/lib/vibe",
   "passwordFile": "/run/secrets/vibe-password",
-  "directories": [ { "name": "antlers", "path": "/srv/projects/antlers" } ],
-  "sessionCommand": [ "/nix/store/…-vibe/bin/vibe", "--remote-control", "@NAME@" ],
-  "projectsDir": "/var/lib/vibe/projects",
-  "browseRoot": "/home",
+  "presets": [ { "name": "antlers", "directories": [ "/srv/projects/antlers" ], "branch": "", "pushRemote": "", "commitRequiresTouch": false, "pushRequiresTouch": false } ],
+  "sessionCommand": [ "/nix/store/…-vibe/bin/vibe", "@PRESET@", "--remote-control", "@NAME@" ],
   "requireTLS": false,
   "sessionNamePrefix": "",
   "maxLogBytes": 26214400,
@@ -100,51 +104,35 @@ UI (trusted host / loopback only) — see [Behavior notes](#behavior-notes). Not
 the Claude-login flow is behind that gate, so anyone who can reach the UI can
 authenticate the service user — keep the network restricted accordingly.
 
-## Quick-launch directories
+## Presets
 
-`directories` is the heart of day-to-day use: a list of `{ name; path; }` entries
-that the web UI turns into a **quick-launch list**. Each one is pre-registered —
-pick it from the dropdown and click *Start session* to spin up a `vibe` session
-(in Remote Control mode) in that directory, no typing required. Each session also
-gets a per-session **Diff** button (a modal showing `git diff` of that working
-tree) alongside its log.
+Launch targets are **presets**, defined on the launcher (`programs.vibe.presets`)
+and **shared** with vibe-server — they supersede the old per-server `directories`
+(import `nixosModules.vibe` alongside `nixosModules.vibe-server`). Each preset is a
+named bundle of one-or-more directories plus optional branch / launcher pins /
+Commit & Push settings; the UI turns them into a quick-launch dropdown — pick one,
+click *Start session*, and vibe-server spawns `vibe @<preset>` (Remote Control) in
+the preset's **first** directory, with the rest added via `claude --add-dir`. Each
+session gets a per-session **Diff** button (a `git diff` modal) alongside its log.
 
 ```nix
-services.vibe-server.directories = [
-  { name = "antlers"; path = "/srv/projects/antlers"; }
-  { name = "infra";   path = "/srv/projects/infra"; }
-  { name = "notes";   path = "/home/me/notes"; }
-];
+programs.vibe.presets = {
+  antlers = {
+    directories = [ "/srv/projects/antlers" "/srv/projects/shared-lib" ]; # cwd, then --add-dir
+    branch = "vibe";            # commits/pushes land here (see Commit & Push)
+    effort = "xhigh";           # per-preset launcher pin (null fields inherit programs.vibe.*)
+  };
+  notes = { directories = [ "/home/me/notes" ]; };
+};
 ```
 
-`name` must match `[A-Za-z0-9_-]+` and `path` must be absolute (both enforced by
-module assertions). These config-defined directories are **immutable** from the
-UI. To let users add more at runtime, see [Add directory](#add-directory).
-
-## Add directory
-
-The UI's **Add directory** button opens a file browser rooted at
-`services.vibe-server.browseRoot` (default `/home`; `null` disables management).
-Navigate into subfolders, then either:
-
-- **Create a new project** — type a name and click *Create / Register*: the server
-  scaffolds `<browsed dir>/<name>` from `newProjectTemplate` (the `vibe-shell`
-  template) and `git init`s it, then registers it.
-- **Register an existing folder** — leave the name blank and click *Create /
-  Register*: the browsed folder is registered as-is (label = its sanitized
-  basename), for pre-existing repos.
-
-`browseRoot` is also added to the systemd `ReadWritePaths`, so a session started
-in any browsed/registered directory can actually write there (a path outside the
-service's writable set is read-only under `ProtectSystem = strict`). User-added
-directories persist to `stateDir/directories.json` and merge with the immutable
-config `directories`; the ✕ chip *unregisters* one (files are kept on disk).
-Browsing is symlink-safe (resolved and re-bounded to `browseRoot`) and read-only.
-
-> A broad `browseRoot` (e.g. `/`) makes a large part of the host browsable and
-> writable to sessions; combined with a passwordless, firewall-opened UI the
-> module emits a warning. Set `passwordFile` / `localNetworkOnly`, or narrow
-> `browseRoot`, when exposing the service.
+vibe-server reads `config.programs.vibe.presets` and makes **every** preset
+directory writable (added to the systemd `ReadWritePaths`; otherwise
+`ProtectSystem = strict` would make them read-only). Preset names must match
+`[A-Za-z0-9_-]+` and directories must be absolute (module assertions). Presets are
+**config-defined** — there is no runtime "add directory" browser (it was removed
+when presets superseded `directories`); add a preset and rebuild. `vibe @<preset>`
+also works directly in a terminal — see the [vibe README](../vibe#presets).
 
 ## Manual sessions
 
@@ -160,6 +148,82 @@ opt out per-run with `VIBE_NO_REGISTER=1`. Manual sessions are *not* persisted
 across a vibe-server restart (they keep running; they just re-register on rerun),
 and the reaper retires them ~90s after their heartbeats stop.
 
+## Commit & Push
+
+> **Off by default** (`commitPush.enable = false`). This is the **only** feature
+> that lets vibe-server *mutate* a repo — everything else (the diff view) is
+> strictly read-only. Turning it on is a deliberate security trade-off; read this
+> whole section first.
+
+When enabled, each running **server-spawned** session grows a **Commit & Push**
+button. It opens a modal with a commit-message box and a **YubiKey PIN** field;
+on submit the server (in the session's working dir) runs `git add -A`, then
+`git commit -S` (a real OpenPGP signature by *your* key — no AI/“Co-Authored-By”
+trailer), then optionally `git push`. It's a remote analogue of the `gcommit`
+flow: the human still authorizes each commit by entering the card PIN.
+
+**How the PIN reaches the card.** The PIN you type is written to a `0600` file on
+**tmpfs** (`/run/vibe`, never persistent disk), and git is run with
+`-c gpg.program=<vibe-gpg>` + `VIBE_PIN_FILE=<that file>`; the bundled `vibe-gpg`
+wrapper feeds it to gpg via `--pinentry-mode loopback --passphrase-file` for **one
+signing attempt** (never retried — a wrong PIN counts toward the card's 3-strike
+lockout), and the file is deleted immediately after. The PIN never touches argv,
+the captured log, or disk.
+
+**Target branch (per preset).** Each preset's `branch` (default `null`) decides where
+its commits land: `null` commits on whatever branch the session is on — never
+switches. Set `programs.vibe.presets.<name>.branch = "vibe"` and every web commit
+for that preset is made on `vibe`: it's checked out before committing (created from
+the current HEAD if it doesn't exist), and the push targets it explicitly with
+tracking (remote = the preset's `pushRemote`, defaulting to `origin`). Note this
+checks out the branch in the session's **live** working dir, so the running Claude
+session sees the switch.
+
+**Touch is the hard gate (per preset).** A physical touch can't be supplied from a
+browser, so if your card's policy requires one, declare it on the preset and the
+feature withholds that action: `commitRequiresTouch = true` hides the button
+entirely; `pushRequiresTouch = true` keeps commit but drops the push step. The UI
+gate is cosmetic — the server re-checks both (403) against the session's preset and
+refuses external (hand-run) sessions and sessions whose preset is gone. (The global
+`commitPush.enable` is the master switch; branch/push/touch are per-preset.)
+
+**Host prerequisites** (the feature signs *server-side*, so the card must be
+reachable by the service):
+
+1. **Run as your login user.** The YubiKey, `~/.gnupg`, and `~/.gitconfig`
+   (identity + `user.signingkey` + `commit.gpgsign`) belong to a login user, not
+   the default `vibe` service user. Set `services.vibe-server.user = "you"` (keep
+   `runAsRoot = false`). The module auto-derives `commitPush.home`/`gnupgHome` from
+   that user, adds `~/.gnupg` to `ReadWritePaths`, and **relaxes `ProtectHome`** when
+   `commitPush` is enabled — gpg-agent's socket lives under `/run/user/<uid>` (modern
+   GnuPG), which `ProtectHome=tmpfs` would otherwise blank, so signing would fail.
+2. **Allow non-interactive PIN entry.** Add `allow-loopback-pinentry` to that
+   user's `~/.gnupg/gpg-agent.conf` and reload (`gpgconf --reload gpg-agent`).
+3. **Keep the agent/card reachable** from a system service: `pcscd` running, and
+   typically `loginctl enable-linger <user>` so the gpg-agent/card stay available.
+4. **Push credentials must be non-interactive** (a stored token / credential
+   helper, or pre-unlocked key) — a missing one fails fast (`GIT_TERMINAL_PROMPT=0`)
+   rather than hanging the service. If push needs a YubiKey touch (e.g. an SSH key
+   with a touch policy), set `pushRequiresTouch = true`.
+
+```nix
+programs.vibe.enable = true;
+programs.vibe.presets.antlers = {
+  directories = [ "/home/alice/antlers" ];
+  branch = "vibe";                       # web commits land on this branch
+  # pushRequiresTouch = true;            # if this preset's push key needs a touch
+};
+services.vibe-server = {
+  enable = true;
+  user = "alice";                        # the login user that owns the YubiKey
+  commitPush.enable = true;              # master switch (per-preset branch/push/touch above)
+};
+```
+
+> `git add -A` stages **all** non-ignored changes in the working tree (it won't add
+> `.gitignore`'d files, but it stages more than the diff modal's capped preview
+> shows). Review with the **Diff** button first.
+
 ## `services.vibe-server` options
 
 | Option                    | Default                          | Notes                                                                       |
@@ -168,15 +232,12 @@ and the reaper retires them ~90s after their heartbeats stop.
 | `port`                    | `8420`                           | port the web UI listens on                                                  |
 | `hostname`                | `"0.0.0.0"`                      | bind address (use `"127.0.0.1"` behind a reverse proxy)                     |
 | `passwordFile`            | `null` (passwordless)            | file holding the shared login password (read at runtime, never in the store). Null = passwordless: anyone who can reach the UI signs in automatically — set it (or restrict the network) when exposing beyond a trusted host |
-| `directories`             | `[]`                             | quick-launch `{ name; path; }` list (see above)                            |
-| `vibePackage`             | a default `vibe` launcher        | the `vibe` launcher package sessions are spawned with; override to pin model/effort/permissions/auth |
+| (launch targets)          | `programs.vibe.presets`          | **presets supersede `directories`** — define them on the vibe module (see [Presets](#presets)); vibe-server lists them + makes their dirs writable |
+| `vibePackage`             | a default `vibe` launcher        | the `vibe` launcher package sessions are spawned with (preset-aware); override to pin model/effort/permissions/auth |
 | `package`                 | `vibe-server`                    | the server package to run                                                   |
-| `sessionCommand`          | `vibe --remote-control @NAME@`   | command run per session; `@DIR@`/`@NAME@` substituted, cwd = chosen dir     |
+| `sessionCommand`          | `vibe @PRESET@ --remote-control @NAME@` | command run per session; `@PRESET@` (→ `@<name>`) / `@DIR@` / `@NAME@` substituted, cwd = the preset's first dir |
 | `remoteControl.enable`    | `true`                           | default `sessionCommand` launches in Remote Control mode (false → set a headless `sessionCommand`) |
 | `extraEnv`                | `[]`                             | extra env-var **names** to propagate into sessions (values from the service env); everything else is dropped |
-| `browseRoot`              | `"/home"`                        | root the UI's *Add directory* file browser may navigate + create/register under; also added to `ReadWritePaths` so sessions there can write; `null` disables UI directory management |
-| `projectsDir`             | `"/var/lib/vibe/projects"`       | legacy writable scratch dir (created + made writable); the *Add directory* form now scaffolds into the browsed dir, not here; `null` skips creating it |
-| `newProjectTemplate`      | the `vibe-shell` template        | template copied into a newly-created project (`null` → empty dir)           |
 | `sessionNamePrefix`       | `""`                             | prefix for generated Remote Control session names (e.g. `"prod"`)          |
 | `maxLogBytes`             | `26214400` (25 MiB)              | per-session captured-log size cap (`0` = unlimited; a cap, not rotation)    |
 | `requireTLS`              | `false`                          | reject plain-HTTP requests (HTTP 426, except `/healthz`); set behind a TLS proxy |
@@ -193,6 +254,9 @@ and the reaper retires them ~90s after their heartbeats stop.
 | `protectHome`             | `null` (auto)                    | systemd `ProtectHome`; auto `false` when a configured dir is under `/home`, else `"tmpfs"` |
 | `enableNixLd`             | `true`                           | enable nix-ld so the compiled Deno binary can run                           |
 | `pty`                     | `true`                           | allocate a PTY per session (via `script`) so interactive `claude --remote-control` doesn't fall into headless `--print` mode; disable only for a non-interactive `sessionCommand` |
+| `commitPush.enable`       | `false`                          | master switch for the web **Commit & Push** button (see [Commit & Push](#commit--push)). Off by default; the one feature that lets the UI *mutate* repos. The per-preset `branch` / `pushRemote` / `commitRequiresTouch` / `pushRequiresTouch` live on `programs.vibe.presets.<name>` |
+| `commitPush.gnupgHome`    | `null` → `<signing home>/.gnupg` | `GNUPGHOME` for the signing subprocess (card config); added to `ReadWritePaths` when enabled |
+| `commitPush.home`         | `""` → derived from `user`       | `HOME` for the commit subprocess so git reads that user's `~/.gitconfig` (identity, signingkey) |
 
 ### Example: production behind a TLS reverse proxy
 
@@ -203,7 +267,16 @@ SSE stream flowing.
 ```nix
 { inputs, ... }:
 {
-  imports = [ inputs.antlers.nixosModules.vibe-server ];
+  imports = [
+    inputs.antlers.nixosModules.vibe
+    inputs.antlers.nixosModules.vibe-server
+  ];
+
+  programs.vibe.enable = true;
+  programs.vibe.presets = {
+    antlers = { directories = [ "/srv/projects/antlers" ]; };
+    infra = { directories = [ "/srv/projects/infra" ]; };
+  };
 
   services.vibe-server = {
     enable = true;
@@ -213,10 +286,6 @@ SSE stream flowing.
     claudeConfigDir = "/var/lib/vibe/claude";
     sessionNamePrefix = "prod";                  # → session names like prod-antlers-a1b2
     extraEnv = [ "GITHUB_TOKEN" ];               # propagate this var into sessions
-    directories = [
-      { name = "antlers"; path = "/srv/projects/antlers"; }
-      { name = "infra";   path = "/srv/projects/infra"; }
-    ];
   };
 
   services.nginx = {
@@ -242,14 +311,16 @@ SSE stream flowing.
 ```nix
 { inputs, ... }:
 {
-  imports = [ inputs.antlers.nixosModules.vibe-server ];
+  imports = [ inputs.antlers.nixosModules.vibe inputs.antlers.nixosModules.vibe-server ];
+
+  programs.vibe.enable = true;
+  programs.vibe.presets.work = { directories = [ "/srv/work" ]; };
 
   services.vibe-server = {
     enable = true;
     passwordFile = "/run/secrets/vibe-password";
     environmentFile = "/run/secrets/vibe-env";   # contains ANTHROPIC_API_KEY=…
     # vibePackage = <a vibe launcher built for API-key billing>;
-    directories = [ { name = "work"; path = "/srv/work"; } ];
   };
 }
 ```
@@ -278,8 +349,9 @@ SSE stream flowing.
 | `auth.ts`     | HMAC-signed cookie, constant-time password check, per-IP login throttle |
 | `claude.ts`   | the `claude` CLI + config dir: spawn-env allowlist, `.claude.json` onboarding/theme/trust seeding, `auth status`, the interactive `auth login` flow |
 | `sessions.ts` | spawn, kill, snapshot/recover, login-URL scan, reaper; external (manually-run `vibe`) session register/heartbeat/deregister + the discovery token |
-| `directories.ts` | runtime project dirs: filesystem `browse` (bounded to `browseRoot`), create-from-template / register existing / unregister + persist |
+| `presets.ts`  | the launch presets (from programs.vibe.presets): `listPresets` + `resolvePreset` (config-defined; no runtime add/remove) |
 | `diff.ts`     | read-only git working-tree diff (tracked + untracked) for the Diff modal |
+| `commit.ts`   | the **only** mutating git path: stage + YubiKey-signed commit (+ push), capability predicates, PIN-via-tmpfs loopback signing (off unless `commitPush.enable`) |
 | `sse.ts`      | read-only SSE tail of a session log                                  |
 | `http.ts`     | JSON responses + size-capped JSON body reader                        |
 | `html.ts`     | the inlined single-page UI                                           |
@@ -300,6 +372,7 @@ Offline `deno test` units + integration, wired into `nix flake check` as
 | `sessions_test.ts`| `shQuote` (shell-injection safety), `substitute` (`@DIR@`/`@NAME@`)    |
 | `paths_test.ts`   | `normalizeAbs`/`withinRoot` (browse-root bounding, no `..` escape), `sanitizeName`, `uniqueName`, `basenameOf`, `isLoopbackIp` |
 | `diff_test.ts`    | `gitDiff` against a temp repo: not-a-repo / clean / tracked change / untracked file / `.gitignore` exclusion |
+| `commit_test.ts`  | `cleanMessage`/`cleanPin` validation, `commitArgs`/`pushArgs` (no injection), `canCommit`/`canPush` per-operation touch gating |
 
 Run locally: `cd app && deno test --allow-read --allow-write --allow-run --allow-env --no-lock test/`.
 Tests **must stay import-free** (use `./assert.ts`, never `jsr:`/`npm:`/`@std`) so
@@ -308,15 +381,14 @@ they run offline and don't perturb the build's empty deno-cache FOD.
 ## Configuration
 
 Read from `$VIBE_CONFIG` (default `/etc/vibe/config.json`), written by the NixOS
-module: `port`, `hostname`, `stateDir`, `passwordFile`, `directories`
-(`{name,path}` — `name` must match `[A-Za-z0-9_-]+`), `sessionCommand` (`@DIR@` /
-`@NAME@` substituted), `extraEnv` (extra env-var names to propagate),
-`browseRoot` (file-browser root + writable path for UI directory management, null
-disables), `projectsDir` (legacy writable scratch dir, null skips), and
-`newProjectTemplate` (template scaffolded into new projects), `requireTLS`
+module: `port`, `hostname`, `stateDir`, `passwordFile`, `presets` (from
+`programs.vibe.presets` — each `{name, directories, branch, pushRemote,
+commitRequiresTouch, pushRequiresTouch}`), `sessionCommand` (`@PRESET@` / `@DIR@` /
+`@NAME@` substituted), `extraEnv` (extra env-var names to propagate), `requireTLS`
 (reject non-TLS), `sessionNamePrefix`, `maxLogBytes` (per-session log cap),
-`seedClaudeOnboarding` (seed `.claude.json` onboarding/trust), and `claudeTheme`
-(the seeded theme). The Claude config dir itself is selected by the module via
+`seedClaudeOnboarding` (seed `.claude.json` onboarding/trust), `claudeTheme`
+(the seeded theme), and `commitPush` (global `{enable, gpgProgram, home,
+gnupgHome}`). The Claude config dir itself is selected by the module via
 `CLAUDE_CONFIG_DIR` (default `<stateDir>/.claude`), not this file.
 
 ## HTTP endpoints
@@ -335,12 +407,10 @@ disables), `projectsDir` (legacy writable scratch dir, null skips), and
 | `POST /api/claude-auth/login`         | yes  | start (or rejoin) `claude auth login`; returns the OAuth URL |
 | `DELETE /api/claude-auth/login`       | yes  | abort an in-flight login                  |
 | `POST /api/claude-auth/code`          | yes  | submit the pasted authorization code (`{code}`) |
-| `GET /api/directories`                | yes  | list directories (config + user-added) + `canManage` |
-| `GET /api/browse`                     | yes  | list subdirectories of `?path=` (bounded to `browseRoot`) |
-| `POST /api/directories`               | yes  | create (`{path,name}` → scaffold `<path>/<name>`) or register existing (`{path}`) |
-| `DELETE /api/directories/:name`       | yes  | unregister a user-added directory (files kept) |
-| `GET /api/sessions`                   | yes  | list sessions                             |
-| `POST /api/sessions`                  | yes  | spawn a session (`{dir}`)                 |
+| `GET /api/presets`                    | yes  | the launch presets (from programs.vibe.presets) |
+| `GET /api/sessions`                   | yes  | list sessions, each enriched with per-preset `canCommit` / `canPush` / `commitBranch` |
+| `POST /api/sessions`                  | yes  | spawn a session for a preset (`{preset}`) |
+| `POST /api/sessions/:id/commit-push`  | yes  | stage + YubiKey-signed commit (+ optional push) of the session's tree (`{message,pin,push}`); 403 if disabled/touch-gated, 409 for external / preset-gone (see [Commit & Push](#commit--push)) |
 | `DELETE /api/sessions/:id`            | yes  | kill a session                            |
 | `GET /api/sessions/:id/logs`          | yes  | SSE stream of the captured log            |
 | `GET /api/sessions/:id/logs/download` | yes  | download the captured log (attachment)    |
@@ -404,15 +474,11 @@ disables), `projectsDir` (legacy writable scratch dir, null skips), and
   **Note:** like the log viewer, this is auth-gated and shows whatever is in the
   working tree — including the contents of *tracked-and-modified* secret files
   (e.g. a committed `.env`); anyone with the shared password can see them.
-- **Directory management** — when `browseRoot` is set, `GET /api/browse` lists the
-  subdirectories of a path (bounded to `browseRoot`, symlink-resolved and
-  re-bounded, read-only) so the UI can pick a location, and `POST /api/directories`
-  either creates `<path>/<name>` (scaffolded from `newProjectTemplate` + `git
-  init`) when a `name` is given, or registers the browsed folder as-is when it
-  isn't. Both bound `path` to `browseRoot` (string + realpath check, so `..` and
-  symlinks can't escape); created names are validated `[A-Za-z0-9_-]+`. User-added
-  dirs persist to `stateDir/directories.json` and merge with the immutable config
-  `directories`. `DELETE` only unregisters (files are kept).
+- **Presets** — launch targets are config-defined presets (`programs.vibe.presets`,
+  shared with the launcher); `GET /api/presets` lists them and `POST /api/sessions
+  {preset}` spawns `vibe @<preset>` in the preset's first directory. There is no
+  runtime directory browser / project creation (presets replaced the old
+  `directories` + file browser); add a preset and rebuild.
 - **Manual (external) sessions** — a `vibe` run by hand on the host self-registers
   via `POST /api/register` (gated by the loopback peer + the discovery-file token
   at `/run/vibe/endpoint.json`) and heartbeats; the server lists it with diff but

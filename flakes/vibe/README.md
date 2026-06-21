@@ -20,6 +20,7 @@ login), not API pay-as-you-go. See [`Auth & billing`](#auth--billing).
 
 ```sh
 vibe                       # interactive Claude Code with the pinned settings
+vibe @<preset> [args...]   # start a configured preset (see Presets below)
 vibe --remote-control [name]   # same, with Remote Control enabled (drive from claude.ai / mobile)
 vibe --help                # usage + the pinned settings + `claude auth status`
 vibe --show-config         # print the pinned settings.json and exit
@@ -51,6 +52,35 @@ Runtime env overrides (no rebuild):
 | `VIBE_API_KEY_AUTH`   | keep a stray `ANTHROPIC_API_KEY` (opt out of subscription auth)   |
 | `VIBE_NO_REGISTER`    | `1` — don't self-register with a local vibe-server (see below)    |
 | `VIBE_SERVER_ENDPOINT`| path to the vibe-server discovery file (default `/run/vibe/endpoint.json`) |
+
+## Presets
+
+A **preset** is a named launch configuration. `vibe @<name>` starts it:
+
+- **Multiple directories** — the preset's first directory becomes the session's
+  working dir (cwd); the rest are passed as `claude --add-dir`, so one session can
+  read/edit several directories at once.
+- **A branch** — optional; checked out before the session starts (created from the
+  current HEAD if it doesn't exist). `null` leaves the dir on its current branch.
+- **Pinned settings** — per-preset `model` / `effort` / `ultracode` /
+  `permissionMode` / `permissions`; any field left `null` inherits the top-level
+  `programs.vibe.*` default.
+
+```nix
+programs.vibe.presets = {
+  antlers = {
+    directories = [ "/home/me/antlers" "/home/me/notes" ];  # cwd, then --add-dir
+    branch = "vibe";
+    effort = "xhigh";
+  };
+};
+```
+
+Then `vibe @antlers` opens Claude Code in `/home/me/antlers` with `/home/me/notes`
+added, on branch `vibe`, at xhigh effort. The preset name also seeds the session
+name. The `branch` / `pushRemote` / `commitRequiresTouch` / `pushRequiresTouch`
+preset fields are additionally consumed by
+[`vibe-server`](../vibe-server)'s Commit & Push.
 
 ### Showing up in vibe-server
 

@@ -15,6 +15,10 @@ with lib; let
 
   mkVibeWrapper = pkgs.callPackage ./package.nix {};
 
+  # Resolve each preset's null pin overrides against the top-level programs.vibe.*
+  # defaults (shared with the vibe-server module so both bake identical presets).
+  resolvedPresets = import ./presets.nix lib pcfg;
+
   # The launcher built from programs.vibe options.
   vibeWrapper =
     if pcfg.package != null
@@ -25,6 +29,7 @@ with lib; let
         remoteControl = pcfg.remoteControl.enable;
         remoteControlName = pcfg.remoteControl.name;
         namePrefix = pcfg.remoteControl.prefix;
+        presets = resolvedPresets;
       };
 in {
   options.programs.vibe = {
@@ -104,9 +109,102 @@ in {
       default = [];
       description = "Extra arguments appended to every `claude` invocation.";
     };
+
+    presets = mkOption {
+      default = {};
+      example = literalExpression ''
+        {
+          antlers = {
+            directories = [ "/home/me/antlers" "/home/me/notes" ];
+            branch = "vibe";
+            effort = "xhigh";
+          };
+        }
+      '';
+      description = ''
+        Named launch presets. `vibe @<name>` starts one: it `cd`s into the preset's
+        first directory, passes the rest as `claude --add-dir` (so one session can
+        access several directories), applies the preset's pinned settings + permission
+        mode, optionally checks out its `branch` (creating it from the current HEAD if
+        absent), and seeds the session name. `services.vibe-server` also surfaces these
+        presets (when the vibe module is imported). Pin fields left null inherit the
+        top-level `programs.vibe.*` default; the `pushRemote`/`*RequiresTouch`/`branch`
+        fields are consumed by vibe-server's Commit & Push.
+      '';
+      type = types.attrsOf (types.submodule {
+        options = {
+          directories = mkOption {
+            type = types.listOf types.str;
+            example = ["/srv/projects/app" "/srv/projects/shared-lib"];
+            description = "Directories for this preset. The FIRST is the session's working dir (cwd); the rest are passed as `claude --add-dir`. At least one is required.";
+          };
+          branch = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "vibe";
+            description = "Branch this preset works on: `vibe @<name>` checks it out (creating it from HEAD if absent), and vibe-server's Commit & Push targets it. null = use whatever branch the dir is currently on.";
+          };
+          model = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = "Model override for this preset (null = inherit programs.vibe.model).";
+          };
+          effort = mkOption {
+            type = types.nullOr (types.enum ["low" "medium" "high" "xhigh" "max"]);
+            default = null;
+            description = "Effort override for this preset (null = inherit programs.vibe.effort).";
+          };
+          ultracode = mkOption {
+            type = types.nullOr types.bool;
+            default = null;
+            description = "ultracode override for this preset (null = inherit programs.vibe.ultracode).";
+          };
+          permissionMode = mkOption {
+            type = types.nullOr (types.enum ["" "default" "acceptEdits" "plan" "auto" "dontAsk" "bypassPermissions"]);
+            default = null;
+            description = "Permission-mode override for this preset (null = inherit programs.vibe.permissionMode).";
+          };
+          permissions = mkOption {
+            type = types.nullOr types.attrs;
+            default = null;
+            description = "Claude Code `permissions` object override for this preset (null = inherit programs.vibe.permissions).";
+          };
+          pushRemote = mkOption {
+            type = types.str;
+            default = "";
+            description = "vibe-server Commit & Push remote for this preset ('' = the branch's upstream / origin).";
+          };
+          commitRequiresTouch = mkOption {
+            type = types.bool;
+            default = false;
+            description = "vibe-server: this preset's signing key needs a touch → its Commit & Push button is withheld.";
+          };
+          pushRequiresTouch = mkOption {
+            type = types.bool;
+            default = false;
+            description = "vibe-server: pushing this preset needs a touch → commit is offered but push is disabled.";
+          };
+        };
+      });
+    };
   };
 
   config = mkIf pcfg.enable {
     environment.systemPackages = [vibeWrapper];
+
+    assertions = [
+      {
+        assertion = all (p: p.directories != []) (attrValues pcfg.presets);
+        message = "programs.vibe.presets: every preset needs at least one directory (the first is the session's working dir).";
+      }
+      {
+        assertion = all (p: all (d: hasPrefix "/" d) p.directories) (attrValues pcfg.presets);
+        message = "programs.vibe.presets: every preset directory must be an absolute path (start with /).";
+      }
+      {
+        assertion = all (p: p.branch == null || builtins.match "[A-Za-z0-9_][A-Za-z0-9._/-]*" p.branch != null) (attrValues pcfg.presets);
+        message = "programs.vibe.presets: each branch must be a valid branch name (start with a letter/digit/underscore; no spaces or leading '-'), or null.";
+      }
+    ];
   };
 }

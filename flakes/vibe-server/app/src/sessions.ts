@@ -1,15 +1,17 @@
 // Session lifecycle: spawn (env-allowlisted), track, kill, snapshot/recover
 // across restarts, and a periodic reaper. ZERO external imports.
 
-import { b64url, basenameOf, isError, log, sanitizeName } from "./util.ts";
+import { b64url, isError, log } from "./util.ts";
 import { buildEnv, seedTrust } from "./claude.ts";
-import type { DirConfig, ServerConfig } from "./config.ts";
+import type { PresetConfig, ServerConfig } from "./config.ts";
 
 export type Status = "running" | "terminating" | "exited" | "failed";
 
 export interface SessionInfo {
   id: string;
-  dir: string;
+  // The preset this session was started from (server-spawned only; undefined for
+  // an external, self-registered `vibe`). Used to re-resolve its commit settings.
+  preset?: string;
   path: string;
   name: string;
   pid: number;
@@ -104,22 +106,26 @@ async function pruneSessions(): Promise<void> {
   }
 }
 
-export async function spawnSession(config: ServerConfig, dir: DirConfig): Promise<SessionInfo> {
+export async function spawnSession(config: ServerConfig, preset: PresetConfig): Promise<SessionInfo> {
   await pruneSessions();
 
-  // Mark this directory trusted (+ onboarding complete) so the session doesn't
-  // block on the workspace-trust dialog / first-run theme picker. Idempotent.
-  await seedTrust(config, dir.path);
+  // The first preset directory is the session's working dir; the rest are added
+  // via the launcher's `claude --add-dir`. Trust every one (+ mark onboarding
+  // complete) so none blocks on the workspace-trust dialog / theme picker. Idempotent.
+  const cwd = preset.directories[0];
+  for (const d of preset.directories) await seedTrust(config, d);
 
   const id = b64url(crypto.getRandomValues(new Uint8Array(9)));
   const prefix = config.sessionNamePrefix ? `${config.sessionNamePrefix}-` : "";
-  const name = `${prefix}${dir.name}-${id.slice(0, 4)}`;
+  const name = `${prefix}${preset.name}-${id.slice(0, 4)}`;
   const logDir = `${config.stateDir}/logs`;
   await Deno.mkdir(logDir, { recursive: true });
   const logPath = `${logDir}/${id}.log`;
   const logFile = await Deno.open(logPath, { create: true, write: true, append: true });
 
-  const resolved = substitute(config.sessionCommand, { DIR: dir.path, NAME: name });
+  // @PRESET@ -> `@<name>` so the launcher applies the preset (its dirs/branch/pins);
+  // @DIR@/@NAME@ keep working for a custom sessionCommand.
+  const resolved = substitute(config.sessionCommand, { DIR: cwd, NAME: name, PRESET: `@${preset.name}` });
 
   // setsid so the session leads its own process group (kill(-pid) reaps the
   // tree). Credentials reach claude via the allowlisted env, never as CLI args,
@@ -138,7 +144,7 @@ export async function spawnSession(config: ServerConfig, dir: DirConfig): Promis
 
   const cmd = new Deno.Command(setsidBin, {
     args: setsidArgs,
-    cwd: dir.path,
+    cwd,
     // TERM gives the PTY a sane terminal type; an allowlisted TERM overrides it.
     // VIBE_MANAGED tells the `vibe` launcher this session is already tracked by
     // the server, so it skips self-registration (POST /api/register).
@@ -160,8 +166,8 @@ export async function spawnSession(config: ServerConfig, dir: DirConfig): Promis
 
   const info: SessionInfo = {
     id,
-    dir: dir.name,
-    path: dir.path,
+    preset: preset.name,
+    path: cwd,
     name,
     pid: child.pid,
     status: "running",
@@ -171,7 +177,7 @@ export async function spawnSession(config: ServerConfig, dir: DirConfig): Promis
 
   const enc = new TextEncoder();
   await logFile.write(
-    enc.encode(`# vibe session ${name}\n# dir: ${dir.path}\n# cmd: ${resolved.join(" ")}\n\n`),
+    enc.encode(`# vibe session ${name}\n# dir: ${cwd}\n# cmd: ${resolved.join(" ")}\n\n`),
   );
 
   // Scan the start of the output for a login URL so the UI can surface it.
@@ -297,7 +303,7 @@ export async function registerExternal(
   const deregToken = b64url(crypto.getRandomValues(new Uint8Array(18)));
   const info: SessionInfo = {
     id,
-    dir: sanitizeName(basenameOf(fields.dir)) || "external",
+    // External sessions have no preset (managed from the user's own terminal).
     path: fields.dir,
     name: fields.name,
     pid: fields.pid,

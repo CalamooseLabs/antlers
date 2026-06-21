@@ -122,7 +122,7 @@ function seed(config: ServerConfig, dirs: string[]): Promise<void> {
 // Seed onboarding-complete + theme + trust for every configured directory. Called
 // once at startup so the auth/login UI and the first session work without prompts.
 export function seedClaudeConfig(config: ServerConfig): Promise<void> {
-  return seed(config, config.directories.map((d) => d.path));
+  return seed(config, config.presets.flatMap((p) => p.directories));
 }
 
 // Mark one directory trusted (idempotent). Called before spawning a session so

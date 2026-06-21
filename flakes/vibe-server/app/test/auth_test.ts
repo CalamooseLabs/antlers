@@ -30,8 +30,14 @@ Deno.test("session cookie signs and verifies (HMAC round-trip)", async () => {
 Deno.test("a tampered cookie is rejected", async () => {
   await initKey(SECRET);
   const cookie = cookiePair(await newSessionCookie(false));
-  // flip the final char of the token (signature byte) — must fail verification
-  const tampered = cookie.slice(0, -1) + (cookie.endsWith("A") ? "B" : "A");
+  // Flip the FIRST char of the signature segment (right after the "."). Flipping
+  // the *last* char is unreliable: a 32-byte HMAC ends on a 4-bit boundary, so the
+  // final base64url char carries 2 don't-care low bits and an A↔B flip can decode
+  // to the same signature (~1/16 of tokens) — a false pass. The first signature
+  // char's bits are all significant, so this always changes the decoded signature.
+  const dot = cookie.indexOf(".");
+  const repl = cookie[dot + 1] === "A" ? "B" : "A";
+  const tampered = cookie.slice(0, dot + 1) + repl + cookie.slice(dot + 2);
   assert(!(await isAuthed(reqWithCookie(tampered))), "tampered cookie must not authenticate");
 });
 
