@@ -24,10 +24,10 @@
 #
 # Remote Control session name: when none is given explicitly (no positional name
 # after --remote-control, no VIBE_NAME, no configured remoteControlName), vibe
-# auto-generates `[<namePrefix>-]<repo>-<YYMMDD>` where <repo> is the basename of
-# the working directory's git toplevel (falling back to the cwd) and <YYMMDD> is
+# auto-generates `[<namePrefix>-]<repo>-<YYYYMMDD>` where <repo> is the basename of
+# the working directory's git toplevel (falling back to the cwd) and <YYYYMMDD> is
 # today's date. So a session in /srv/projects/antlers on 2026-06-20 with
-# namePrefix = "work" is named `work-antlers-260620`.
+# namePrefix = "work" is named `work-antlers-20260620`.
 #
 # Subscription-first defaults: vibe targets Claude Code subscription plans
 # (Max/Team/Pro). `model` defaults to `opus[1m]` (latest Opus + 1M context —
@@ -49,6 +49,8 @@
 }: {
   model ? "opus[1m]",
   effort ? null,
+  ultracode ? false,
+  permissionMode ? "auto",
   remoteControl ? false,
   remoteControlName ? null,
   namePrefix ? "",
@@ -60,6 +62,9 @@
   settings =
     (lib.optionalAttrs (model != null) {inherit model;})
     // (lib.optionalAttrs (effort != null) {effortLevel = effort;})
+    # ultracode is a Claude Code settings.json toggle (xhigh effort + dynamic
+    # workflow orchestration), orthogonal to effortLevel — delivered via --settings.
+    // (lib.optionalAttrs ultracode {ultracode = true;})
     // (lib.optionalAttrs (permissions != {}) {inherit permissions;})
     // extraSettings;
 
@@ -90,10 +95,11 @@ in
             '  vibe --remote-control [name]   drive from claude.ai / mobile' \
             '  vibe --show-config             print the pinned settings.json and exit' \
             '  vibe --help                    this help' \
-            'Remote Control name defaults to [<prefix>-]<repo>-<YYMMDD>' \
+            'Remote Control name defaults to [<prefix>-]<repo>-<YYYYMMDD>' \
             '  (<repo> = basename of the working dir git toplevel); [name] overrides it.' \
-            'Env overrides: VIBE_MODEL, VIBE_EFFORT, VIBE_REMOTE_CONTROL=1,' \
-            '  VIBE_NAME=<name>, VIBE_NAME_PREFIX=<prefix>, VIBE_API_KEY_AUTH=1 (API billing).'
+            'Env overrides: VIBE_MODEL, VIBE_EFFORT, VIBE_ULTRACODE=1,' \
+            '  VIBE_PERMISSION_MODE=<mode>, VIBE_REMOTE_CONTROL=1, VIBE_NAME=<name>,' \
+            '  VIBE_NAME_PREFIX=<prefix>, VIBE_API_KEY_AUTH=1 (API billing).'
           echo
           echo "Pinned settings:"
           jq . "$BAKED_SETTINGS" 2>/dev/null || cat "$BAKED_SETTINGS"
@@ -128,6 +134,16 @@ in
       [ -n "''${VIBE_NAME:-}" ] && NAME="$VIBE_NAME"
       [ -n "''${VIBE_NAME_PREFIX:-}" ] && NAME_PREFIX="$VIBE_NAME_PREFIX"
 
+      # Permission mode is delivered via the top-level `--permission-mode` FLAG, not
+      # settings.json: `defaultMode` from a --settings file is treated as a
+      # project/local setting, and `auto` from those is deliberately ignored
+      # (a repo can't self-grant auto) — the CLI flag is the reliable launch-time
+      # override. An ineligible model/version makes claude fall back silently.
+      PERMISSION_MODE=${lib.escapeShellArg permissionMode}
+      [ -n "''${VIBE_PERMISSION_MODE:-}" ] && PERMISSION_MODE="$VIBE_PERMISSION_MODE"
+      PERM_ARGS=()
+      [ -n "$PERMISSION_MODE" ] && PERM_ARGS=(--permission-mode "$PERMISSION_MODE")
+
       # Subscription-first auth: vibe targets Claude Code subscription plans
       # (Max/Team/Pro), which authenticate via the OAuth login in ~/.claude /
       # CLAUDE_CONFIG_DIR. A stray ANTHROPIC_API_KEY would silently bill the API
@@ -140,19 +156,22 @@ in
       fi
 
       # Resolve the settings file. Both modes deliver the pinned model / effort /
-      # permissions identically — via `claude --settings <file>`. Layer optional
-      # VIBE_MODEL / VIBE_EFFORT overrides on top of the baked settings; a real
-      # file (not a process substitution) is used so Claude Code can stat/reload it.
+      # ultracode / permissions identically — via `claude --settings <file>`. Layer
+      # optional VIBE_MODEL / VIBE_EFFORT / VIBE_ULTRACODE overrides on top of the
+      # baked settings; a real file (not a process substitution) is used so Claude
+      # Code can stat/reload it.
       SETTINGS="$BAKED_SETTINGS"
-      if [ -n "''${VIBE_MODEL:-}" ] || [ -n "''${VIBE_EFFORT:-}" ]; then
+      if [ -n "''${VIBE_MODEL:-}" ] || [ -n "''${VIBE_EFFORT:-}" ] || [ -n "''${VIBE_ULTRACODE:-}" ]; then
         SETTINGS_DIR="$(mktemp -d)"
         trap 'rm -rf "$SETTINGS_DIR"' EXIT
         SETTINGS="$SETTINGS_DIR/settings.json"
         jq \
           --arg model "''${VIBE_MODEL:-}" \
           --arg effort "''${VIBE_EFFORT:-}" \
+          --arg ultracode "''${VIBE_ULTRACODE:-}" \
           '. + (if $model == "" then {} else {model: $model} end)
-             + (if $effort == "" then {} else {effortLevel: $effort} end)' \
+             + (if $effort == "" then {} else {effortLevel: $effort} end)
+             + (if $ultracode == "" then {} else {ultracode: ($ultracode == "1" or $ultracode == "true")} end)' \
           "$BAKED_SETTINGS" > "$SETTINGS"
       fi
 
@@ -166,7 +185,7 @@ in
       if [ "$REMOTE" = true ]; then
         # Resolve the Remote Control session name. Precedence: an explicit
         # --remote-control <name> / VIBE_NAME (already in $NAME), then a configured
-        # remoteControlName, then auto-generated [<prefix>-]<repo>-<YYMMDD> from the
+        # remoteControlName, then auto-generated [<prefix>-]<repo>-<YYYYMMDD> from the
         # working directory's git toplevel (cwd fallback).
         if [ -z "$NAME" ]; then
           if [ -n "$CONFIGURED_NAME" ]; then
@@ -175,7 +194,7 @@ in
             REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
             # Restrict the repo segment to a safe session-name charset.
             REPO="$(printf '%s' "$REPO" | tr -c 'A-Za-z0-9_-' '-')"
-            DATE="$(date +%y%m%d)"
+            DATE="$(date +%Y%m%d)"
             if [ -n "$NAME_PREFIX" ]; then
               NAME="$NAME_PREFIX-$REPO-$DATE"
             else
@@ -188,10 +207,10 @@ in
 
       if [ "$SETTINGS" = "$BAKED_SETTINGS" ]; then
         # No temp settings file to clean up — exec for a tighter process tree.
-        exec claude --settings "$SETTINGS" "''${RC_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
+        exec claude --settings "$SETTINGS" "''${RC_ARGS[@]}" "''${PERM_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
       else
         # Not exec'd: the EXIT trap must still fire to clean up the temp settings.
-        claude --settings "$SETTINGS" "''${RC_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
+        claude --settings "$SETTINGS" "''${RC_ARGS[@]}" "''${PERM_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
       fi
     '';
   }

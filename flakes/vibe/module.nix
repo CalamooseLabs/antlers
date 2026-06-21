@@ -21,7 +21,7 @@ with lib; let
     then pcfg.package
     else
       mkVibeWrapper {
-        inherit (pcfg) model effort permissions subscriptionAuth extraSettings extraArgs;
+        inherit (pcfg) model effort ultracode permissionMode permissions subscriptionAuth extraSettings extraArgs;
         remoteControl = pcfg.remoteControl.enable;
         remoteControlName = pcfg.remoteControl.name;
         namePrefix = pcfg.remoteControl.prefix;
@@ -49,6 +49,18 @@ in {
       description = "Reasoning effort pinned for vibe sessions (settings.json `effortLevel`). Applies to both interactive and Remote Control sessions (delivered via `--settings`).";
     };
 
+    ultracode = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Enable Claude Code ultracode for vibe sessions (settings.json `ultracode = true`): sends xhigh effort to the model and has Claude orchestrate dynamic multi-agent workflows for substantive tasks. A separate toggle, orthogonal to `effort`/`effortLevel`. Delivered via `--settings`, so it applies to both interactive and Remote Control sessions. Override per-run with `VIBE_ULTRACODE=1`.";
+    };
+
+    permissionMode = mkOption {
+      type = types.enum ["" "default" "acceptEdits" "plan" "auto" "dontAsk" "bypassPermissions"];
+      default = "auto";
+      description = "Permission mode for vibe sessions, passed as the top-level `claude --permission-mode <mode>` FLAG — the reliable launch-time override (settings.json `defaultMode` is treated as project/local, and `auto` from there is deliberately ignored). Defaults to `auto` (auto-execute except classifier-blocked actions). `auto` needs claude-code ≥ 2.1.83 and an eligible model (e.g. Opus/Sonnet 4.6+); if ineligible, Claude Code silently falls back to `default`. Other values: `default` (prompt), `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions` (containers/VMs only). Empty string leaves it unset. Applies to interactive and Remote Control sessions. Override per-run with `VIBE_PERMISSION_MODE`.";
+    };
+
     remoteControl = {
       enable = mkOption {
         type = types.bool;
@@ -58,13 +70,13 @@ in {
       name = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "Explicit Remote Control session name. When null (the default), vibe auto-generates `[<prefix>-]<repo>-<YYMMDD>` from the working directory (see `prefix`). A positional name after `--remote-control` or `VIBE_NAME` overrides this at runtime.";
+        description = "Explicit Remote Control session name. When null (the default), vibe auto-generates `[<prefix>-]<repo>-<YYYYMMDD>` from the working directory (see `prefix`). A positional name after `--remote-control` or `VIBE_NAME` overrides this at runtime.";
       };
       prefix = mkOption {
         type = types.str;
         default = "";
         example = "work";
-        description = "Prefix for the auto-generated Remote Control session name. With no explicit name, vibe names the session `<prefix>-<repo>-<YYMMDD>` (`<repo>` = the working directory's git-toplevel basename, cwd fallback; `<YYMMDD>` = today). Empty → `<repo>-<YYMMDD>`. Ignored when an explicit name is set. Override at runtime with `VIBE_NAME_PREFIX`.";
+        description = "Prefix for the auto-generated Remote Control session name. With no explicit name, vibe names the session `<prefix>-<repo>-<YYYYMMDD>` (`<repo>` = the working directory's git-toplevel basename, cwd fallback; `<YYYYMMDD>` = today). Empty → `<repo>-<YYYYMMDD>`. Ignored when an explicit name is set. Override at runtime with `VIBE_NAME_PREFIX`.";
       };
     };
 

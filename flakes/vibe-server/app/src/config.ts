@@ -29,6 +29,10 @@ export interface ServerConfig {
   sessionNamePrefix: string;
   // Cap each session's captured log in bytes; 0 = unlimited. Appends stop past it.
   maxLogBytes: number;
+  // Allocate a PTY for each session (via `script`) so interactive `claude
+  // --remote-control` doesn't fall into headless `--print` mode. Disable only for
+  // a genuinely non-interactive sessionCommand.
+  pty: boolean;
 }
 
 export const DEFAULTS: ServerConfig = {
@@ -44,6 +48,7 @@ export const DEFAULTS: ServerConfig = {
   requireTLS: false,
   sessionNamePrefix: "",
   maxLogBytes: 26214400, // 25 MiB
+  pty: true,
 };
 
 export async function loadConfig(): Promise<ServerConfig> {

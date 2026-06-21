@@ -74,12 +74,19 @@ export function sessionCount(): number {
   return sessions.size;
 }
 
-function substitute(cmd: string[], vars: Record<string, string>): string[] {
+export function substitute(cmd: string[], vars: Record<string, string>): string[] {
   return cmd.map((part) => {
     let r = part;
     for (const [k, v] of Object.entries(vars)) r = r.replaceAll(`@${k}@`, v);
     return r;
   });
+}
+
+// POSIX single-quote escaping, for building the `script -c <string>` argument
+// (the only way util-linux `script` accepts a command). Safe for paths/args with
+// spaces or shell metacharacters.
+export function shQuote(s: string): string {
+  return `'${s.replaceAll("'", "'\\''")}'`;
 }
 
 function buildEnv(config: ServerConfig): Record<string, string> {
@@ -129,15 +136,27 @@ export async function spawnSession(config: ServerConfig, dir: DirConfig): Promis
   const logFile = await Deno.open(logPath, { create: true, write: true, append: true });
 
   const resolved = substitute(config.sessionCommand, { DIR: dir.path, NAME: name });
-  const [bin, ...args] = resolved;
 
   // setsid so the session leads its own process group (kill(-pid) reaps the
   // tree). Credentials reach claude via the allowlisted env, never as CLI args,
   // so they don't land in /proc/<pid>/cmdline or the captured log.
-  const cmd = new Deno.Command("setsid", {
-    args: [bin, ...args],
+  //
+  // PTY: Claude Code auto-detects a non-TTY stdin/stdout and drops into `--print`
+  // (headless) mode, which needs a prompt — so `claude --remote-control` spawned
+  // with piped stdio dies with "Input must be provided … when using --print". We
+  // allocate a pseudo-terminal with util-linux `script` so it runs interactively;
+  // `script` mirrors the child's output to its stdout (our pipe) and keeps the PTY
+  // master open, so the session's stdin doesn't hit EOF. Disable via `pty = false`
+  // for a genuinely headless `sessionCommand` (e.g. `claude -p …`).
+  const [setsidBin, ...setsidArgs] = config.pty
+    ? ["setsid", "script", "-q", "-f", "-e", "-c", resolved.map(shQuote).join(" "), "/dev/null"]
+    : ["setsid", ...resolved];
+
+  const cmd = new Deno.Command(setsidBin, {
+    args: setsidArgs,
     cwd: dir.path,
-    env: buildEnv(config),
+    // TERM gives the PTY a sane terminal type; an allowlisted TERM overrides it.
+    env: { TERM: "xterm-256color", ...buildEnv(config) },
     stdin: "null",
     stdout: "piped",
     stderr: "piped",

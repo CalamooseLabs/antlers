@@ -42,6 +42,24 @@
       default = zed-editor;
     };
 
+    # ---- Checks: `nix flake check` runs these alongside building every output ----
+    # Offline Deno unit/integration tests for vibe-server. The app has ZERO
+    # external imports, so the tests need no network and run in the build sandbox;
+    # git backs the gitDiff integration tests. (No `deno fmt` — the TS is
+    # hand-formatted; type-checking happens here via `deno test` and at compile.)
+    checks.${system}.vibe-server-unit =
+      pkgs.runCommand "vibe-server-unit" {
+        nativeBuildInputs = [pkgs.deno pkgs.git];
+      } ''
+        cp -r ${./flakes/vibe-server/app} app
+        chmod -R u+w app
+        export DENO_DIR="$TMPDIR/deno" HOME="$TMPDIR/home"
+        mkdir -p "$DENO_DIR" "$HOME"
+        cd app
+        deno test --allow-read --allow-write --allow-run --allow-env --no-lock test/
+        touch $out
+      '';
+
     # ---- Parameterized builders for downstream flakes that need custom config ----
     # e.g. inputs.antlers.lib.x86_64-linux.mkZedWrapper { ...zed settings... }
     #      inputs.antlers.lib.x86_64-linux.mkVibeWrapper { model = "opus"; ... }

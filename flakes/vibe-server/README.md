@@ -124,6 +124,7 @@ UI's *Add directory* form then creates/registers directories under it (see
 | `localNetworkSubnets6`    | ULA + link-local (`fc00::/7`, `fe80::/10`) | IPv6 subnets allowed when `localNetworkOnly`                      |
 | `protectHome`             | `null` (auto)                    | systemd `ProtectHome`; auto `false` when a configured dir is under `/home`, else `"tmpfs"` |
 | `enableNixLd`             | `true`                           | enable nix-ld so the compiled Deno binary can run                           |
+| `pty`                     | `true`                           | allocate a PTY per session (via `script`) so interactive `claude --remote-control` doesn't fall into headless `--print` mode; disable only for a non-interactive `sessionCommand` |
 
 ### Example: production behind a TLS reverse proxy
 
@@ -215,6 +216,23 @@ SSE stream flowing.
 | `html.ts`     | the inlined single-page UI                                           |
 | `router.ts`   | route table (public login/health, then cookie-gated)                |
 | `util.ts`     | base64url, `BufferSource` cast, structured `log`                     |
+
+## Tests (`app/test/`)
+
+Offline `deno test` units + integration, wired into `nix flake check` as
+`checks.<system>.vibe-server-unit` (no network — git backs the diff tests):
+
+| File              | Covers                                                                 |
+| ----------------- | ---------------------------------------------------------------------- |
+| `assert.ts`       | tiny zero-import assert helpers (keep tests import-free, see below)     |
+| `util_test.ts`    | `b64url` round-trip, `isValidName`, `isError`                          |
+| `auth_test.ts`    | cookie HMAC sign/verify + tamper/key-rotation, `passwordRequired`, `checkPassword`, login rate-limit |
+| `sessions_test.ts`| `shQuote` (shell-injection safety), `substitute` (`@DIR@`/`@NAME@`)    |
+| `diff_test.ts`    | `gitDiff` against a temp repo: not-a-repo / clean / tracked change / untracked file / `.gitignore` exclusion |
+
+Run locally: `cd app && deno test --allow-read --allow-write --allow-run --allow-env --no-lock test/`.
+Tests **must stay import-free** (use `./assert.ts`, never `jsr:`/`npm:`/`@std`) so
+they run offline and don't perturb the build's empty deno-cache FOD.
 
 ## Configuration
 

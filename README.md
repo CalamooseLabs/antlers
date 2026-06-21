@@ -87,13 +87,32 @@ A few packages ship a companion NixOS module via `inputs.antlers.nixosModules.<n
   [`flakes/vibe-server`](flakes/vibe-server/README.md).
 - **`lanserver`** — `services.lanserver`, a Deno LAN command server.
 
+Just the launcher on your `PATH`:
+
 ```nix
 imports = [ inputs.antlers.nixosModules.vibe ];
 programs.vibe.enable = true;   # `vibe` on PATH
+```
 
-# The web session manager is a separate module:
-# imports = [ inputs.antlers.nixosModules.vibe-server inputs.antlers.nixosModules.vibe ];
-# services.vibe-server.enable = true;
+The web session manager too — import both so its sessions inherit the
+`programs.vibe` pins (model / effort / permission mode). `permissionMode` defaults
+to `auto`, applied via `claude --permission-mode` (works in Remote Control too):
+
+```nix
+imports = [
+  inputs.antlers.nixosModules.vibe-server
+  inputs.antlers.nixosModules.vibe
+];
+
+programs.vibe = {
+  model = "opus[1m]";
+  # permissionMode = "auto";   # the default; set "acceptEdits"/"plan"/… to change
+};
+
+services.vibe-server = {
+  enable = true;
+  directories = [ { name = "antlers"; path = "/srv/projects/antlers"; } ];
+};
 ```
 
 ---

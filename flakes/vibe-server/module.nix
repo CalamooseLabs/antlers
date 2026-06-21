@@ -34,7 +34,7 @@ with lib; let
     else if hasPrograms
     then
       mkVibeWrapper {
-        inherit (pcfg) model effort permissions subscriptionAuth extraSettings extraArgs;
+        inherit (pcfg) model effort ultracode permissionMode permissions subscriptionAuth extraSettings extraArgs;
         remoteControl = pcfg.remoteControl.enable;
         remoteControlName = pcfg.remoteControl.name;
         namePrefix = pcfg.remoteControl.prefix;
@@ -98,7 +98,7 @@ with lib; let
       if scfg.newProjectTemplate != null
       then toString scfg.newProjectTemplate
       else null;
-    inherit (scfg) requireTLS sessionNamePrefix maxLogBytes;
+    inherit (scfg) requireTLS sessionNamePrefix maxLogBytes pty;
   });
 
   # Auto-relax ProtectHome when any project dir (or the Claude config dir) lives
@@ -277,6 +277,12 @@ in {
       type = types.bool;
       default = true;
       description = "Enable nix-ld so the compiled Deno binary can run.";
+    };
+
+    pty = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Allocate a pseudo-terminal (via util-linux `script`) for each spawned session. Required for interactive `claude --remote-control`: without a TTY, Claude Code falls into headless `--print` mode and exits with \"Input must be provided … when using --print\". Set false only for a genuinely non-interactive `sessionCommand` (e.g. `claude -p …`).";
     };
   };
 
