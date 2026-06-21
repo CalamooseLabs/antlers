@@ -320,10 +320,14 @@ in {
       "d ${quotePath scfg.projectsDir} 0750 ${runUser} ${runGroup} -";
 
     warnings =
-      (optional (protectHome == false)
-        "services.vibe-server: ProtectHome disabled because a configured directory lives under /home; the systemd sandbox is loosened accordingly.")
-      ++ (optional (scfg.openFirewall && scfg.hostname != "127.0.0.1" && scfg.hostname != "::1" && !scfg.requireTLS)
-        "services.vibe-server: exposed on a non-loopback address over plain HTTP without requireTLS — front it with a TLS reverse proxy (then set services.vibe-server.requireTLS = true) for anything beyond a trusted LAN.")
+      # Only when auto-derived to false — an explicit `protectHome` is a deliberate
+      # choice and stays silent.
+      (optional (scfg.protectHome == null && anyUnderHome)
+        "services.vibe-server: ProtectHome auto-disabled because a configured directory lives under /home; the systemd sandbox is loosened accordingly. Set services.vibe-server.protectHome explicitly to silence this.")
+      # Silenced by localNetworkOnly (restricting to LAN subnets is the "trusted
+      # LAN" acknowledgement this warns about) or by terminating TLS.
+      ++ (optional (scfg.openFirewall && scfg.hostname != "127.0.0.1" && scfg.hostname != "::1" && !scfg.requireTLS && !scfg.localNetworkOnly)
+        "services.vibe-server: exposed on a non-loopback address over plain HTTP without requireTLS — front it with a TLS reverse proxy (then set services.vibe-server.requireTLS = true), or set services.vibe-server.localNetworkOnly = true to restrict it to trusted LAN subnets.")
       ++ (optional (scfg.passwordFile == null && scfg.openFirewall && scfg.hostname != "127.0.0.1" && scfg.hostname != "::1")
         "services.vibe-server: no passwordFile set — the web UI is passwordless and anyone who can reach it can spawn Claude Code sessions. Set services.vibe-server.passwordFile (or restrict the network) when exposing it beyond a trusted host.")
       # The compiled server's Deno --allow-write is fixed at build time to the
