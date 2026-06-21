@@ -103,6 +103,11 @@ export const INDEX_HTML = `<!DOCTYPE html>
     border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; }
   .diff-state { color: #8b949e; text-align: center; padding: 40px 0; }
   .diff-state.error { color: #ff7b72; }
+  .diff-dir { margin-bottom: 18px; }
+  .diff-dir-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    margin: 4px 0 10px; padding-bottom: 6px; border-bottom: 1px solid #21262d; }
+  .diff-dir-path { color: #d2a8ff; font-weight: 600; word-break: break-all; }
+  .diff-dir-head .branch { font-size: 12px; }
   .diff-file { border: 1px solid #21262d; border-radius: 6px; margin-bottom: 12px; overflow: hidden; }
   .diff-file-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     background: #161b22; padding: 8px 10px; cursor: pointer; user-select: none; }
@@ -726,19 +731,20 @@ function renderDiff(data) {
 
   const branchEl = document.getElementById("diffBranch");
   branchEl.textContent = "";
-  if (data && data.isRepo && data.branch) {
+
+  const dirs = (data && Array.isArray(data.dirs)) ? data.dirs : [];
+  // A hard server error with no per-directory results at all.
+  if (data && data.error && !dirs.length) { setDiffState("error", data.error); return; }
+  if (!dirs.length) { setDiffState("", "No changes."); return; }
+
+  // One directory on a branch → show the branch in the modal header (the common
+  // case). With several dirs, each section carries its own path + branch label.
+  if (dirs.length === 1 && dirs[0].isRepo && dirs[0].branch) {
     branchEl.appendChild(document.createTextNode("on "));
     const code = document.createElement("code");
-    code.textContent = data.branch;
+    code.textContent = dirs[0].branch;
     branchEl.appendChild(code);
   }
-
-  if (!data || data.error) {
-    setDiffState("error", (data && data.error) ? data.error : "Unknown error.");
-    return;
-  }
-  if (!data.isRepo) { setDiffState("", "Not a git repository."); return; }
-  if (data.empty || !data.diff || !data.diff.trim()) { setDiffState("", "No changes."); return; }
 
   if (data.truncated) {
     const banner = document.createElement("div");
@@ -748,19 +754,61 @@ function renderDiff(data) {
     body.appendChild(banner);
   }
 
-  const files = parseDiff(data.diff);
+  // Label each directory only when the session spans more than one.
+  const multi = dirs.length > 1;
+  for (const d of dirs) body.appendChild(renderDiffDir(d, multi));
+}
+
+// Render one directory's diff as a section: an optional path header (+ its branch),
+// then either its file cards or a single state line (no-changes / not-a-repo / error).
+function renderDiffDir(d, withHeader) {
+  const section = document.createElement("div");
+  section.className = "diff-dir";
+
+  if (withHeader) {
+    const head = document.createElement("div");
+    head.className = "diff-dir-head";
+    const p = document.createElement("code");
+    p.className = "diff-dir-path";
+    p.textContent = d.path;             // textContent: path is config-derived but never trusted as HTML
+    head.appendChild(p);
+    if (d.isRepo && d.branch) {
+      const b = document.createElement("span");
+      b.className = "branch";
+      b.appendChild(document.createTextNode("on "));
+      const code = document.createElement("code");
+      code.textContent = d.branch;
+      b.appendChild(code);
+      head.appendChild(b);
+    }
+    section.appendChild(head);
+  }
+
+  const stateLine = (cls, msg) => {
+    const el = document.createElement("div");
+    el.className = "diff-state" + (cls ? " " + cls : "");
+    el.textContent = msg;
+    section.appendChild(el);
+  };
+
+  if (d.error) { stateLine("error", d.error); return section; }
+  if (!d.isRepo) { stateLine("", "Not a git repository."); return section; }
+  if (d.empty || !d.diff || !d.diff.trim()) { stateLine("", "No changes."); return section; }
+
+  const files = parseDiff(d.diff);
   if (!files.length) {
     // No recognizable file headers — render the raw text safely via textContent.
     const pre = document.createElement("pre");
     pre.className = "diff-lines";
     const line = document.createElement("code");
     line.className = "dl ctx";
-    line.textContent = data.diff;
+    line.textContent = d.diff;
     pre.appendChild(line);
-    body.appendChild(pre);
-    return;
+    section.appendChild(pre);
+    return section;
   }
-  for (const f of files) body.appendChild(renderFile(f));
+  for (const f of files) section.appendChild(renderFile(f));
+  return section;
 }
 
 // Parse unified git-diff text into files -> lines. Tracks in-hunk state so a

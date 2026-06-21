@@ -117,6 +117,60 @@ services.vibe-server = {
 
 ---
 
+## Scripts — `rebuild-config`, `edit-config`, `*-restore`, …
+
+A collection of standalone shell commands (the bodies live in [`scripts/`](scripts/);
+each is a `writeShellApplication` with a build-time shellcheck gate). Every command
+is exposed as its own package + `nix run` target, and bundled into the
+`programs.antlers-scripts` NixOS / home-manager module.
+
+Run one ad-hoc — every host-specific value is an env var that defaults to the
+original value, so overriding is optional:
+
+```sh
+nix run   github:CalamooseLabs/antlers#rebuild-config
+CONFIG_PATH=/srv/cfg nix run github:CalamooseLabs/antlers#rebuild-config
+antlers run edit-config            # if the antlers CLI is installed
+```
+
+Or **install them with your overrides baked in**, then just type the name:
+
+```nix
+imports = [ inputs.antlers.nixosModules.antlers-scripts ];   # or .homeManagerModules.antlers-scripts
+programs.antlers-scripts = {
+  enable = true;
+  rebuild-config.enable = true;                       # configPath defaults to /etc/nixos
+  edit-config.enable = true;
+  ssh-key-import = { enable = true; keyName = "id_ed25519_sk"; };
+  github-repo-puller = { enable = true; repos = { "github:CalamooseLabs/OpenReturn" = "/home/hub/nkc"; }; };
+  remote-kvm = { enable = true; targets.homelab = { dns = "http://kvm.lan/"; ip = "http://10.0.0.5/"; }; };
+  arr-restore.instances.sonarr = { port = 8989; dataDir = "/var/lib/sonarr/.config/NzbDrone"; backupDir = "/mnt/backups/sonarr"; };
+  plex = { backup.enable = true; restore.enable = true; };
+};
+```
+
+The module wraps each binary with `makeWrapper --set-default`, so a configured value
+is the default while a runtime env var (`CONFIG_PATH=… rebuild-config`) still wins.
+
+| Command | What it does |
+| ------- | ------------ |
+| `rebuild-config` | lazygit (when the tree is dirty) → `nh os switch` |
+| `edit-config` | open the config dir in `zeditor` via `direnv exec` |
+| `restore-config` | `nix-store --verify --repair` → `nh os switch` → restart NetworkManager |
+| `ssh-key-import` | pull the Yubikey FIDO2 resident SSH key into `~/.ssh` + agent |
+| `gpg-key-import` | idempotently import a (Yubikey) GPG public key into your keyring |
+| `github-repo-puller` | clone / fast-forward a configured set of GitHub repos |
+| `chromium-ephemeral` | ungoogled-chromium with a throwaway, deleted-on-exit profile |
+| `bridge-internet` | share the host's internet over an ethernet NIC (dnsmasq + nftables NAT) |
+| `flash-iso` | build a flake's ISO and `dd` it to a chosen USB drive |
+| `install-cala-m-os` | the Cala-M-OS installer (disko → clone → install → passwords) |
+| `pi-imager` | Raspberry Pi Imager with the Wayland/fusion Qt env |
+| `remote-kvm` | open a KVM-over-IP web UI in a chromium `--app` window (DNS/IP fallback) |
+| `arr-restore` | restore a Servarr app (Sonarr/Radarr/Prowlarr) from its NAS backup |
+| `plex-backup` / `plex-restore` | snapshot / rebuild Plex identity + databases |
+
+---
+
 ## Grab a single template
 
 ```sh

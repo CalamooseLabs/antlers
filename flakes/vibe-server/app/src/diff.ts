@@ -235,3 +235,24 @@ function finalize(res: DiffResult, out: string): DiffResult {
   res.empty = res.isRepo && !res.error && out.trim().length === 0;
   return res;
 }
+
+// A session can span several directories (a preset's `directories`: the first is
+// the working dir, the rest are `claude --add-dir`'d). The Diff button shows ALL
+// of them — one DiffResult per directory, in order, with exact-duplicate paths
+// collapsed. Each runs through the same read-only/scrubbed gitDiff, so the
+// hardening and caps apply per directory.
+export interface MultiDiffResult {
+  dirs: Array<{ path: string } & DiffResult>;
+  truncated: boolean; // true if ANY directory's diff was truncated
+}
+
+export async function gitDiffMulti(paths: string[]): Promise<MultiDiffResult> {
+  const seen = new Set<string>();
+  const dirs: Array<{ path: string } & DiffResult> = [];
+  for (const path of paths) {
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    dirs.push({ path, ...(await gitDiff(path)) });
+  }
+  return { dirs, truncated: dirs.some((d) => d.truncated) };
+}

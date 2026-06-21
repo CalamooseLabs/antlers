@@ -1,4 +1,4 @@
-import { gitDiff } from "../src/diff.ts";
+import { gitDiff, gitDiffMulti } from "../src/diff.ts";
 import { assert, assertEquals } from "./assert.ts";
 
 // Run a git setup command in `dir`. Identity is forced via -c so commits work
@@ -91,5 +91,52 @@ Deno.test("gitDiff: .gitignore'd file content never appears", async () => {
     assert(!r.diff.includes("TOKEN=supersecret"), "the ignored secret's content must never leak into the diff");
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("gitDiffMulti: diffs every directory, in order, each labeled by path", async () => {
+  const a = await repo();
+  const b = await repo();
+  try {
+    await Deno.writeTextFile(`${a}/a.txt`, "alpha\n");
+    await Deno.writeTextFile(`${b}/b.txt`, "beta\n");
+    const r = await gitDiffMulti([a, b]);
+    assertEquals(r.dirs.length, 2);
+    assertEquals(r.dirs[0].path, a);
+    assertEquals(r.dirs[1].path, b);
+    assert(r.dirs[0].diff.includes("a.txt"), "first dir's change is present");
+    assert(r.dirs[1].diff.includes("b.txt"), "second dir's change is present");
+    assert(!r.dirs[0].diff.includes("b.txt"), "dirs are not cross-contaminated");
+  } finally {
+    await Deno.remove(a, { recursive: true });
+    await Deno.remove(b, { recursive: true });
+  }
+});
+
+Deno.test("gitDiffMulti: collapses duplicate and empty paths", async () => {
+  const a = await repo();
+  try {
+    const r = await gitDiffMulti([a, a, ""]);
+    assertEquals(r.dirs.length, 1);
+    assertEquals(r.dirs[0].path, a);
+  } finally {
+    await Deno.remove(a, { recursive: true });
+  }
+});
+
+Deno.test("gitDiffMulti: a non-repo dir among repos is reported per-dir, never fatal", async () => {
+  const a = await repo();
+  const nonrepo = await Deno.makeTempDir({ prefix: "vibe-nonrepo-" });
+  try {
+    await Deno.writeTextFile(`${a}/a.txt`, "alpha\n");
+    const r = await gitDiffMulti([nonrepo, a]);
+    assertEquals(r.dirs.length, 2);
+    assertEquals(r.dirs[0].isRepo, false);
+    assert(!r.dirs[0].error, "a non-repo is a normal state, not an error");
+    assertEquals(r.dirs[1].isRepo, true);
+    assert(r.dirs[1].diff.includes("a.txt"));
+  } finally {
+    await Deno.remove(a, { recursive: true });
+    await Deno.remove(nonrepo, { recursive: true });
   }
 });

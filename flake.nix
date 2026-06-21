@@ -35,12 +35,24 @@
     mkVibeWrapper = pkgs.callPackage ./flakes/vibe/package.nix {};
     vibe = mkVibeWrapper {};
     vibe-server = pkgs.callPackage ./flakes/vibe-server/package.nix {};
+
+    # Reusable shell-script collection (rebuild-config, edit-config, *-restore,
+    # …). package.nix returns an attrset of writeShellApplication derivations,
+    # one per command in ./scripts; see flakes/scripts. The companion
+    # programs.antlers-scripts module bakes per-host overrides into them.
+    # callPackages (not callPackage): the file returns a SET of derivations.
+    scripts = pkgs.callPackages ./flakes/scripts/package.nix {};
+
+    # Fade In screenwriting app (vendored, unfree), relocated from cala-m-os.
+    fadein = pkgs.callPackage ./flakes/fadein/package.nix {};
   in {
     # ---- Buildable packages: `nix build .#zed-editor`, `nix run .#zed-editor` ----
-    packages.${system} = {
-      inherit zed-editor plex-desktop antlers lanserver vibe vibe-server;
-      default = zed-editor;
-    };
+    packages.${system} =
+      {
+        inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein;
+        default = zed-editor;
+      }
+      // scripts;
 
     # ---- Checks: `nix flake check` runs these alongside building every output ----
     # Offline Deno unit/integration tests for vibe-server. The app has ZERO
@@ -64,18 +76,21 @@
     # e.g. inputs.antlers.lib.x86_64-linux.mkZedWrapper { ...zed settings... }
     #      inputs.antlers.lib.x86_64-linux.mkVibeWrapper { model = "opus"; ... }
     lib.${system} = {
-      inherit mkZedWrapper mkVibeWrapper;
+      inherit mkZedWrapper mkVibeWrapper scripts;
     };
 
     # ---- Overlay so NixOS / home-manager configs can consume directly ----
-    overlays.default = final: _prev: {
-      antlers = final.callPackage ./flakes/antlers/package.nix {};
-      antlers-zed-editor = (final.callPackage ./flakes/zed-editor/package.nix {}) {};
-      plex-desktop-fixed = final.callPackage ./flakes/plex-desktop/package.nix {};
-      lanserver = final.callPackage ./flakes/lanserver/package.nix {};
-      vibe = (final.callPackage ./flakes/vibe/package.nix {}) {};
-      vibe-server = final.callPackage ./flakes/vibe-server/package.nix {};
-    };
+    overlays.default = final: _prev:
+      {
+        antlers = final.callPackage ./flakes/antlers/package.nix {};
+        antlers-zed-editor = (final.callPackage ./flakes/zed-editor/package.nix {}) {};
+        plex-desktop-fixed = final.callPackage ./flakes/plex-desktop/package.nix {};
+        lanserver = final.callPackage ./flakes/lanserver/package.nix {};
+        vibe = (final.callPackage ./flakes/vibe/package.nix {}) {};
+        vibe-server = final.callPackage ./flakes/vibe-server/package.nix {};
+        fadein = final.callPackage ./flakes/fadein/package.nix {};
+      }
+      // (final.callPackages ./flakes/scripts/package.nix {});
 
     # ---- NixOS modules ----
     # inputs.antlers.nixosModules.{lanserver,vibe,vibe-server}
@@ -87,24 +102,35 @@
       lanserver = import ./flakes/lanserver/module.nix self;
       vibe = import ./flakes/vibe/module.nix self;
       vibe-server = import ./flakes/vibe-server/module.nix self;
+      antlers-scripts = import ./flakes/scripts/module.nix "system";
     };
 
+    # home-manager variant of programs.antlers-scripts (installs into home.packages).
+    homeManagerModules.antlers-scripts = import ./flakes/scripts/module.nix "home";
+
     # ---- Explicit `nix run` targets ----
-    apps.${system} = {
-      zed-editor = {
-        type = "app";
-        program = "${zed-editor}/bin/zeditor";
-      };
-      antlers = {
-        type = "app";
-        program = "${antlers}/bin/antlers";
-      };
-      vibe = {
-        type = "app";
-        program = "${vibe}/bin/vibe";
-      };
-      default = self.apps.${system}.zed-editor;
-    };
+    apps.${system} =
+      {
+        zed-editor = {
+          type = "app";
+          program = "${zed-editor}/bin/zeditor";
+        };
+        antlers = {
+          type = "app";
+          program = "${antlers}/bin/antlers";
+        };
+        vibe = {
+          type = "app";
+          program = "${vibe}/bin/vibe";
+        };
+        default = self.apps.${system}.zed-editor;
+      }
+      # one `nix run .#<name>` / `antlers run <name>` target per script
+      // (pkgs.lib.mapAttrs (name: pkg: {
+          type = "app";
+          program = "${pkg}/bin/${name}";
+        })
+        scripts);
 
     # ---- Template registry: `nix flake init -t .#<name>` ----
     templates = import ./templates/templates.nix;

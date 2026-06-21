@@ -33,7 +33,7 @@ import {
 } from "./claude.ts";
 import { streamLog } from "./sse.ts";
 import { renderLog } from "./term.ts";
-import { gitDiff } from "./diff.ts";
+import { gitDiffMulti } from "./diff.ts";
 import { canCommit, canPush, cleanMessage, cleanPin, commitAndPush } from "./commit.ts";
 import { json, readJsonLimited } from "./http.ts";
 import { INDEX_HTML } from "./html.ts";
@@ -276,15 +276,20 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
   if (diff && method === "GET") {
     const s = getSession(diff[1]);
     if (!s) return json({ error: "Not found" }, 404);
-    // For server-spawned sessions the path is server-controlled (the preset);
+    // For server-spawned sessions the paths are server-controlled (the preset);
     // defense-in-depth: only diff a still-defined preset, so a stale one is a clean
     // 409 rather than a stray git run. External sessions aren't preset-backed —
-    // their path came from a token-authenticated loopback registration; git runs
-    // read-only + scrubbed, so diff it directly.
-    if (!s.info.external && !resolvePreset(config, s.info.preset ?? "")) {
+    // their single path came from a token-authenticated loopback registration; git
+    // runs read-only + scrubbed, so diff it directly.
+    const preset = s.info.external ? undefined : resolvePreset(config, s.info.preset ?? "");
+    if (!s.info.external && !preset) {
       return json({ error: "Preset no longer defined" }, 409);
     }
-    return json(await gitDiff(s.info.path)); // gitDiff never throws (catches internally)
+    // Diff EVERY directory the session spans: a preset's full `directories` list
+    // (first = working dir, rest = --add-dir'd), or the one registered dir for an
+    // external session. gitDiffMulti never throws (gitDiff catches internally).
+    const dirs = preset && preset.directories.length ? preset.directories : [s.info.path];
+    return json(await gitDiffMulti(dirs));
   }
 
   // Stage + YubiKey-signed commit (+ optional push) of a session's working tree.
