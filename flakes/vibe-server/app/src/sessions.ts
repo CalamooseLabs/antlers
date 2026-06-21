@@ -2,6 +2,7 @@
 // across restarts, and a periodic reaper. ZERO external imports.
 
 import { b64url, isError, log } from "./util.ts";
+import { buildEnv, seedTrust } from "./claude.ts";
 import type { DirConfig, ServerConfig } from "./config.ts";
 
 export type Status = "running" | "terminating" | "exited" | "failed";
@@ -35,32 +36,12 @@ const MAX_SESSIONS = 100;
 // see size < MAX and all skip pruning.
 const PRUNE_TARGET = MAX_SESSIONS - 10;
 
-// Only these env-var names are propagated into spawned sessions; everything else
-// the daemon holds (stray tokens, DB URLs, …) is dropped so it can't reach
-// Claude Code or its browser-readable logs. config.extraEnv extends this list.
-const ENV_ALLOWLIST = [
-  "PATH",
-  "HOME",
-  "USER",
-  "LOGNAME",
-  "SHELL",
-  "TERM",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "TZ",
-  "XDG_RUNTIME_DIR",
-  "XDG_CONFIG_HOME",
-  "XDG_DATA_HOME",
-  "XDG_CACHE_HOME",
-  "CLAUDE_CONFIG_DIR",
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-];
-
 // First Claude/Anthropic auth URL a not-logged-in session prints to its output.
-const AUTH_URL_RE =
-  /(https?:\/\/(?:claude\.ai|console\.anthropic\.com|auth\.anthropic\.com|login\.anthropic\.com)\/[^\s"'<>]+)/;
+// (claude.com is the host of the `claude auth login` /cai/oauth/ flow.) The stop
+// class excludes control chars so a URL wrapped in OSC-8 terminal escapes is
+// captured cleanly (mirrors claude.ts LOGIN_URL_RE).
+// deno-lint-ignore no-control-regex -- the \x00-\x1f stop class is intentional (terminal escapes).
+const AUTH_URL_RE = /(https?:\/\/(?:claude\.com|claude\.ai|console\.anthropic\.com|auth\.anthropic\.com|login\.anthropic\.com)\/[^\s\x00-\x1f"'<>\\]+)/;
 
 export function listSessions(): SessionInfo[] {
   return [...sessions.values()].map((s) => s.info);
@@ -87,16 +68,6 @@ export function substitute(cmd: string[], vars: Record<string, string>): string[
 // spaces or shell metacharacters.
 export function shQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
-}
-
-function buildEnv(config: ServerConfig): Record<string, string> {
-  const allow = new Set([...ENV_ALLOWLIST, ...(config.extraEnv ?? [])]);
-  const env: Record<string, string> = {};
-  for (const k of allow) {
-    const v = Deno.env.get(k);
-    if (v !== undefined) env[k] = v;
-  }
-  return env;
 }
 
 function pidAlive(pid: number): boolean {
@@ -126,6 +97,10 @@ async function pruneSessions(): Promise<void> {
 
 export async function spawnSession(config: ServerConfig, dir: DirConfig): Promise<SessionInfo> {
   await pruneSessions();
+
+  // Mark this directory trusted (+ onboarding complete) so the session doesn't
+  // block on the workspace-trust dialog / first-run theme picker. Idempotent.
+  await seedTrust(config, dir.path);
 
   const id = b64url(crypto.getRandomValues(new Uint8Array(9)));
   const prefix = config.sessionNamePrefix ? `${config.sessionNamePrefix}-` : "";

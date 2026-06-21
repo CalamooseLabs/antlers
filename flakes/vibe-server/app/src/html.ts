@@ -51,6 +51,20 @@ export const INDEX_HTML = `<!DOCTYPE html>
   }
   .howto { color: #8b949e; margin: 8px 0 0; }
   .howto a { color: #58a6ff; }
+  /* ---- claude account auth banner + login modal ---- */
+  #authBanner { margin: 0 0 12px; }
+  #authBanner.warn { background: #3a2d12; color: #d29922; border: 1px solid #9e6a03;
+    border-radius: 6px; padding: 10px 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  #authBanner.ok { color: #8b949e; font-size: 12px; padding: 2px 0; }
+  #authBanner .spacer { flex: 1 1 auto; }
+  .authstep { margin: 0 0 18px; }
+  .authstep h3 { font-size: 13px; margin: 0 0 8px; color: #8b949e; font-weight: 600; }
+  .authstep .row { gap: 8px; }
+  .authstep input { flex: 1 1 240px; }
+  a.authurl { color: #58a6ff; word-break: break-all; }
+  .authstatus { min-height: 20px; margin-top: 6px; color: #8b949e; }
+  .authstatus.err { color: #ff7b72; }
+  .authstatus.ok { color: #56d364; }
   #login { max-width: 360px; margin: 12vh auto; text-align: center; }
   #login h1 { letter-spacing: 2px; }
   #login .row { justify-content: center; margin-top: 14px; }
@@ -128,6 +142,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
     <button id="signout" onclick="logout()">Sign out</button>
   </header>
   <main>
+    <div id="authBanner" class="hidden"></div>
     <div class="row">
       <select id="dir"></select>
       <button class="primary" onclick="startSession()">Start session</button>
@@ -175,6 +190,18 @@ export const INDEX_HTML = `<!DOCTYPE html>
         <div class="dialog-body" id="diffBody"></div>
       </div>
     </div>
+
+    <div id="authModal" class="backdrop hidden" role="dialog" aria-modal="true"
+         aria-labelledby="authTitle" tabindex="-1" onclick="authBackdrop(event)">
+      <div class="dialog" onclick="event.stopPropagation()">
+        <div class="dialog-head">
+          <h2 id="authTitle">Log in to Claude</h2>
+          <span class="spacer"></span>
+          <button onclick="closeAuth()" aria-label="Close login">✕</button>
+        </div>
+        <div class="dialog-body" id="authBody"></div>
+      </div>
+    </div>
   </main>
 </div>
 
@@ -213,6 +240,7 @@ function show() {
   document.getElementById("signout").style.display = pwRequired ? "" : "none";
   loadDirs();
   refresh();
+  checkAuth();
 }
 
 async function loadDirs() {
@@ -322,7 +350,7 @@ async function copyText(text, btn) {
 // anything odd appearing in session output).
 function safeLoginUrl(u) {
   return typeof u === "string" &&
-    /^https:\\/\\/(claude\\.ai|console\\.anthropic\\.com|auth\\.anthropic\\.com|login\\.anthropic\\.com)\\//.test(u);
+    /^https:\\/\\/(claude\\.com|claude\\.ai|console\\.anthropic\\.com|auth\\.anthropic\\.com|login\\.anthropic\\.com)\\//.test(u);
 }
 
 async function refresh() {
@@ -383,6 +411,181 @@ async function refresh() {
     }
     tb.appendChild(tr);
   }
+}
+
+// ===== claude account auth (so spawned sessions are authenticated) =====
+let authPoll = null; // interval running while the login modal is open
+
+function renderAuthBanner(status) {
+  const b = document.getElementById("authBanner");
+  b.className = "";
+  b.innerHTML = "";
+  if (!status) { b.className = "hidden"; return; }
+  if (status.loggedIn) {
+    b.className = "ok";
+    let txt = "Claude: logged in";
+    if (status.email) txt += " as " + status.email;
+    if (status.subscriptionType) txt += " (" + status.subscriptionType + ")";
+    b.appendChild(document.createTextNode(txt));
+  } else {
+    b.className = "warn";
+    const msg = document.createElement("span");
+    msg.textContent = "⚠ The Claude account is not logged in — sessions can't run until you authenticate.";
+    b.appendChild(msg);
+    const sp = document.createElement("span"); sp.className = "spacer"; b.appendChild(sp);
+    const btn = document.createElement("button");
+    btn.className = "primary";
+    btn.textContent = "Log in to Claude";
+    btn.onclick = openAuth;
+    b.appendChild(btn);
+  }
+}
+
+async function checkAuth() {
+  try {
+    const r = await api("/api/claude-auth");
+    if (!r.ok) return null;
+    const d = await r.json();
+    renderAuthBanner(d.status);
+    return d;
+  } catch (e) { return null; }
+}
+
+function setAuthStatusMsg(cls, msg) {
+  const el = document.getElementById("authState");
+  if (!el) return;
+  el.className = "authstatus" + (cls ? " " + cls : "");
+  el.textContent = msg;
+}
+
+function renderAuthModal(login) {
+  const body = document.getElementById("authBody");
+  body.innerHTML = "";
+
+  const s1 = document.createElement("div");
+  s1.className = "authstep";
+  const h1 = document.createElement("h3");
+  h1.textContent = "1. Open this link, sign in, then copy the code";
+  s1.appendChild(h1);
+  if (login && login.url) {
+    const row = document.createElement("div"); row.className = "row";
+    const a = document.createElement("a");
+    a.className = "authurl"; a.href = login.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+    a.textContent = "Open the Claude sign-in page";
+    row.appendChild(a);
+    const copy = document.createElement("button");
+    copy.textContent = "Copy link";
+    copy.onclick = () => copyText(login.url, copy);
+    row.appendChild(copy);
+    s1.appendChild(row);
+  } else {
+    const p = document.createElement("div"); p.className = "muted";
+    p.textContent = "Starting login…";
+    s1.appendChild(p);
+  }
+  body.appendChild(s1);
+
+  const s2 = document.createElement("div");
+  s2.className = "authstep";
+  const h2 = document.createElement("h3");
+  h2.textContent = "2. Paste the code here";
+  s2.appendChild(h2);
+  const row2 = document.createElement("div"); row2.className = "row";
+  const input = document.createElement("input");
+  input.id = "authCode"; input.placeholder = "authorization code"; input.autocomplete = "off";
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") submitCode(); });
+  row2.appendChild(input);
+  const submit = document.createElement("button");
+  submit.className = "primary"; submit.textContent = "Submit"; submit.id = "authSubmit";
+  submit.onclick = submitCode;
+  row2.appendChild(submit);
+  s2.appendChild(row2);
+  const st = document.createElement("div");
+  st.id = "authState"; st.className = "authstatus";
+  s2.appendChild(st);
+  body.appendChild(s2);
+
+  if (login && login.phase === "exchanging") setAuthStatusMsg("", "Exchanging code…");
+  else if (login && login.phase === "error" && login.error) setAuthStatusMsg("err", login.error);
+}
+
+async function openAuth() {
+  const modal = document.getElementById("authModal");
+  modal.classList.remove("hidden");
+  modal.focus();
+  renderAuthModal(null);
+  try {
+    const r = await api("/api/claude-auth/login", { method: "POST" });
+    if (r.ok) {
+      const login = await r.json();
+      renderAuthModal(login);
+      if (login.url) { const i = document.getElementById("authCode"); if (i) i.focus(); }
+    } else {
+      setAuthStatusMsg("err", "Could not start login.");
+    }
+  } catch (e) { setAuthStatusMsg("err", "Could not start login."); }
+  if (authPoll) clearInterval(authPoll);
+  authPoll = setInterval(pollAuth, 1500);
+}
+
+async function pollAuth() {
+  if (document.getElementById("authModal").classList.contains("hidden")) { stopAuthPoll(); return; }
+  const d = await checkAuth();
+  if (!d) return;
+  const login = d.login || {};
+  // Fill in the URL once it appears, without clobbering a code being typed.
+  if (login.url && !document.querySelector("#authBody a.authurl")) renderAuthModal(login);
+  if (d.status && d.status.loggedIn) {
+    setAuthStatusMsg("ok", "Logged in! You can close this.");
+    stopAuthPoll();
+    setTimeout(closeAuth, 1200);
+  } else if (login.phase === "error" && login.error) {
+    setAuthStatusMsg("err", login.error);
+  }
+}
+
+function stopAuthPoll() { if (authPoll) { clearInterval(authPoll); authPoll = null; } }
+
+async function submitCode() {
+  const input = document.getElementById("authCode");
+  if (!input) return;
+  const code = input.value.trim();
+  if (!code) { setAuthStatusMsg("err", "Enter the code first."); return; }
+  const btn = document.getElementById("authSubmit");
+  if (btn) btn.disabled = true;
+  setAuthStatusMsg("", "Submitting code…");
+  try {
+    const r = await api("/api/claude-auth/code", { method: "POST", body: JSON.stringify({ code: code }) });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d.ok) {
+      setAuthStatusMsg("ok", "Logged in!");
+      stopAuthPoll();
+      await checkAuth();
+      setTimeout(() => { closeAuth(); refresh(); }, 1000);
+    } else {
+      setAuthStatusMsg("err", (d && d.error) ? d.error : "Login failed — try again.");
+    }
+  } catch (e) {
+    setAuthStatusMsg("err", "Network error submitting code.");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function closeAuth() {
+  stopAuthPoll();
+  const modal = document.getElementById("authModal");
+  if (modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  document.getElementById("authBody").innerHTML = "";
+  // Abort an unfinished login so a stale PTY process doesn't linger (a completed
+  // login is already done — this just clears its state).
+  api("/api/claude-auth/login", { method: "DELETE" }).catch(() => {});
+  checkAuth();
+}
+
+function authBackdrop(ev) {
+  if (ev.target && ev.target.id === "authModal") closeAuth();
 }
 
 function openLog(s) {
@@ -663,19 +866,28 @@ document.getElementById("pw").addEventListener("keydown", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !document.getElementById("diffModal").classList.contains("hidden")) {
-    closeDiff();
-  }
+  if (e.key !== "Escape") return;
+  if (!document.getElementById("authModal").classList.contains("hidden")) { closeAuth(); return; }
+  if (!document.getElementById("diffModal").classList.contains("hidden")) closeDiff();
 });
 
 setInterval(() => {
-  // Don't rebuild the session table while the diff modal is open — it would
-  // detach the row's Diff button (breaking focus-restore on close) and churn
-  // the page behind the modal. The next tick after closing refreshes.
+  // Don't rebuild the session table while a modal is open — it would detach the
+  // row's buttons (breaking focus-restore on close) and churn the page behind the
+  // modal. The next tick after closing refreshes.
   if (document.getElementById("app").classList.contains("hidden")) return;
   if (!document.getElementById("diffModal").classList.contains("hidden")) return;
+  if (!document.getElementById("authModal").classList.contains("hidden")) return;
   refresh();
 }, 3000);
+
+// Refresh the Claude-auth banner periodically (a process spawn, so kept slow). The
+// login modal does its own faster polling while open.
+setInterval(() => {
+  if (document.getElementById("app").classList.contains("hidden")) return;
+  if (!document.getElementById("authModal").classList.contains("hidden")) return;
+  checkAuth();
+}, 30000);
 
 // Decide which view to show: already authed → app; passwordless → auto sign-in;
 // otherwise reveal the login form.

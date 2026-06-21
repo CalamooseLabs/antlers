@@ -26,6 +26,13 @@ import {
   removeDirectory,
   resolveDir,
 } from "./directories.ts";
+import {
+  cancelClaudeLogin,
+  claudeAuthStatus,
+  loginState,
+  startClaudeLogin,
+  submitClaudeCode,
+} from "./claude.ts";
 import { streamLog } from "./sse.ts";
 import { gitDiff } from "./diff.ts";
 import { json, readJsonLimited } from "./http.ts";
@@ -86,6 +93,30 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
   if (!await isAuthed(req)) return json({ error: "Unauthorized" }, 401);
 
   if (path === "/api/me" && method === "GET") return json({ ok: true });
+
+  // ---- Claude account auth (so spawned sessions are authenticated) ----
+  // Whether the service user's Claude account is logged in, plus any in-flight
+  // login flow's state. The web UI surfaces a banner + a login modal from this.
+  if (path === "/api/claude-auth" && method === "GET") {
+    return json({ status: await claudeAuthStatus(config), login: loginState() });
+  }
+  // Start (or rejoin) the interactive `claude auth login` flow; returns the login
+  // state, including the OAuth URL once it has been captured.
+  if (path === "/api/claude-auth/login" && method === "POST") {
+    return json(await startClaudeLogin(config));
+  }
+  // Abort an in-flight login.
+  if (path === "/api/claude-auth/login" && method === "DELETE") {
+    cancelClaudeLogin();
+    return json({ ok: true });
+  }
+  // Submit the authorization code the user pasted from the OAuth page.
+  if (path === "/api/claude-auth/code" && method === "POST") {
+    const body: Record<string, unknown> = await readJsonLimited(req).catch(() => ({}));
+    if (typeof body.code !== "string") return json({ error: "Invalid code" }, 400);
+    const res = await submitClaudeCode(config, body.code);
+    return json(res, res.ok ? 200 : 400);
+  }
 
   if (path === "/api/directories" && method === "GET") {
     return json({ directories: listDirectories(config), canManage: canManageDirectories(config) });

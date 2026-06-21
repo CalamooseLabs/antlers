@@ -20,6 +20,7 @@
 
 import { loadConfig } from "./config.ts";
 import { getSecret, initKey } from "./auth.ts";
+import { seedClaudeConfig } from "./claude.ts";
 import { recoverSessions, saveSnapshot, startReaper } from "./sessions.ts";
 import { loadUserDirs } from "./directories.ts";
 import { handler } from "./router.ts";
@@ -29,6 +30,11 @@ async function main(): Promise<void> {
   const config = await loadConfig();
   await Deno.mkdir(config.stateDir, { recursive: true }).catch(() => {});
   await initKey(await getSecret(config.stateDir));
+
+  // Seed onboarding-complete + theme + per-directory trust into the Claude config
+  // dir so a fresh service user's sessions don't block on the theme picker /
+  // workspace-trust dialog (no-op when seedClaudeOnboarding is false).
+  await seedClaudeConfig(config);
 
   await loadUserDirs(config.stateDir);
   const recovered = await recoverSessions(config.stateDir);

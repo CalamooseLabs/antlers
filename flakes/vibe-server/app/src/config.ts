@@ -33,6 +33,14 @@ export interface ServerConfig {
   // --remote-control` doesn't fall into headless `--print` mode. Disable only for
   // a genuinely non-interactive sessionCommand.
   pty: boolean;
+  // Seed the Claude config dir's .claude.json (hasCompletedOnboarding + theme +
+  // per-directory trust) so a fresh service user's sessions don't block on the
+  // first-run theme picker / workspace-trust dialog. See claude.ts.
+  seedClaudeOnboarding: boolean;
+  // Theme written into the seeded .claude.json (and settings.json) so Claude Code
+  // doesn't prompt to pick one. One of Claude Code's theme names, e.g. "dark",
+  // "light", "dark-daltonized", "light-daltonized", "dark-ansi", "light-ansi".
+  claudeTheme: string;
 }
 
 export const DEFAULTS: ServerConfig = {
@@ -49,6 +57,8 @@ export const DEFAULTS: ServerConfig = {
   sessionNamePrefix: "",
   maxLogBytes: 26214400, // 25 MiB
   pty: true,
+  seedClaudeOnboarding: true,
+  claudeTheme: "dark",
 };
 
 export async function loadConfig(): Promise<ServerConfig> {

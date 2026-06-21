@@ -98,8 +98,16 @@ with lib; let
       if scfg.newProjectTemplate != null
       then toString scfg.newProjectTemplate
       else null;
-    inherit (scfg) requireTLS sessionNamePrefix maxLogBytes pty;
+    inherit (scfg) requireTLS sessionNamePrefix maxLogBytes pty seedClaudeOnboarding claudeTheme;
   });
+
+  # Where Claude stores its config (onboarding/theme/trust in .claude.json, the
+  # OAuth login in .credentials.json). Pinned so the location is deterministic and
+  # both the login flow and spawned sessions read/write the same place.
+  claudeConfigDirPath =
+    if scfg.claudeConfigDir != null
+    then toString scfg.claudeConfigDir
+    else "${stateDir}/.claude";
 
   # Auto-relax ProtectHome when any project dir (or the Claude config dir) lives
   # under /home — otherwise the sandbox hides it even when listed in ReadWritePaths.
@@ -231,7 +239,7 @@ in {
     claudeConfigDir = mkOption {
       type = types.nullOr types.path;
       default = null;
-      description = "Pre-seeded Claude config dir holding a subscription OAuth login (run `claude` `/login` once as the service user, or copy its `~/.claude`). Exported as CLAUDE_CONFIG_DIR (and made writable). This is the recommended auth path for Max/Team/Pro plans — sessions then bill the subscription, not the API.";
+      description = "Claude config dir holding the subscription OAuth login (in `.credentials.json`). Exported as CLAUDE_CONFIG_DIR and made writable; when null it defaults to `<stateDir>/.claude`. You can authenticate the service user directly from the web UI (the \"Log in to Claude\" banner runs `claude auth login` and stores the login here), pre-seed it (run `claude auth login` once as the service user, or copy a `~/.claude`), or point it at an existing login. This is the recommended auth path for Max/Team/Pro plans — sessions then bill the subscription, not the API.";
     };
 
     remoteControl.enable = mkOption {
@@ -284,6 +292,19 @@ in {
       default = true;
       description = "Allocate a pseudo-terminal (via util-linux `script`) for each spawned session. Required for interactive `claude --remote-control`: without a TTY, Claude Code falls into headless `--print` mode and exits with \"Input must be provided … when using --print\". Set false only for a genuinely non-interactive `sessionCommand` (e.g. `claude -p …`).";
     };
+
+    seedClaudeOnboarding = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Seed the Claude config dir's `.claude.json` (hasCompletedOnboarding + theme + per-directory trust) at startup and before each spawn, so a fresh service user's sessions don't block on Claude Code's first-run theme picker or workspace-trust dialog. The seed is written by the server process, whose write scope is fixed at build time to the state dir, so it only takes effect when the config dir is under `${stateDir}` (the default); a custom `claudeConfigDir` elsewhere must be pre-seeded (a warning is emitted). Set false if you fully manage the config dir yourself.";
+    };
+
+    claudeTheme = mkOption {
+      type = types.str;
+      default = "dark";
+      example = "light";
+      description = "Theme written into the seeded `.claude.json` so Claude Code doesn't prompt to pick one (only used when seedClaudeOnboarding is true). One of Claude Code's theme names: \"dark\", \"light\", \"dark-daltonized\", \"light-daltonized\", \"dark-ansi\", \"light-ansi\".";
+    };
   };
 
   config = mkIf scfg.enable {
@@ -305,6 +326,15 @@ in {
         "services.vibe-server: exposed on a non-loopback address over plain HTTP without requireTLS — front it with a TLS reverse proxy (then set services.vibe-server.requireTLS = true) for anything beyond a trusted LAN.")
       ++ (optional (scfg.passwordFile == null && scfg.openFirewall && scfg.hostname != "127.0.0.1" && scfg.hostname != "::1")
         "services.vibe-server: no passwordFile set — the web UI is passwordless and anyone who can reach it can spawn Claude Code sessions. Set services.vibe-server.passwordFile (or restrict the network) when exposing it beyond a trusted host.")
+      # The compiled server's Deno --allow-write is fixed at build time to the
+      # state dir, so the in-process onboarding seed can only write under it. A
+      # custom claudeConfigDir outside it is fine for auth (the `claude` child
+      # writes the login), but the seed is skipped → first-run prompts may block.
+      ++ (optional (scfg.seedClaudeOnboarding
+        && scfg.claudeConfigDir != null
+        && claudeConfigDirPath != stateDir
+        && !(hasPrefix "${stateDir}/" claudeConfigDirPath))
+      "services.vibe-server: claudeConfigDir (${claudeConfigDirPath}) is outside ${stateDir}, so seedClaudeOnboarding cannot write its .claude.json there (the server's write scope is fixed at build time) and sessions may block on Claude Code's first-run theme/trust prompts. Pre-seed that dir (it must hold the login anyway) or keep claudeConfigDir under ${stateDir}.")
       ++ (optional scfg.runAsRoot
         "services.vibe-server: running as root (runAsRoot = true) — the service and every Claude Code session it spawns run with full privileges. Use a dedicated user/group with the right directory permissions instead, where possible.");
 
@@ -341,9 +371,10 @@ in {
           StateDirectoryMode = "0750";
           RuntimeDirectory = "vibe";
 
-          Environment =
-            ["HOME=${stateDir}"]
-            ++ optional (scfg.claudeConfigDir != null) "CLAUDE_CONFIG_DIR=${toString scfg.claudeConfigDir}";
+          Environment = [
+            "HOME=${stateDir}"
+            "CLAUDE_CONFIG_DIR=${claudeConfigDirPath}"
+          ];
 
           # Filesystem confinement is the real sandbox (the Deno binary is built
           # with broad --allow-read/-run). Never set MemoryDenyWriteExecute — it

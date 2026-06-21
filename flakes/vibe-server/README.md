@@ -52,7 +52,9 @@ the module renders `/etc/vibe/config.json` (`$VIBE_CONFIG`) and wires the unit:
   "projectsDir": "/var/lib/vibe/projects",
   "requireTLS": false,
   "sessionNamePrefix": "",
-  "maxLogBytes": 26214400
+  "maxLogBytes": 26214400,
+  "seedClaudeOnboarding": true,
+  "claudeTheme": "dark"
 }
 ```
 
@@ -61,16 +63,38 @@ hand-written config and run `deno run -A src/main.ts`.
 
 ## Auth & billing
 
-The service user must be authenticated to Claude. For **subscription** plans
-(Max/Team/Pro) pre-seed `claudeConfigDir` with an OAuth `/login` (run `claude`
-once as the service user, or copy its `~/.claude`). For API-key billing set
-`environmentFile` to a file containing `ANTHROPIC_API_KEY=…` — and use a
-`vibePackage` launcher configured for API-key billing (the default launcher
-favours subscription OAuth and drops a stray `ANTHROPIC_API_KEY`).
+The service user must be authenticated to Claude before its sessions can do
+anything. Three ways, in order of convenience:
+
+1. **Log in from the web UI (subscription).** When the account isn't logged in,
+   the UI shows a *"Log in to Claude"* banner. Click it and the server runs
+   `claude auth login` for the service user: a modal gives you the Claude sign-in
+   link, you authenticate and paste the code back, and the OAuth login is stored
+   in the Claude config dir (`CLAUDE_CONFIG_DIR`, default `<stateDir>/.claude`).
+   Every session spawned afterwards inherits it — you only do this once.
+2. **Pre-seed `claudeConfigDir` (subscription).** Run `claude auth login` once as
+   the service user, or copy an existing `~/.claude`, and point `claudeConfigDir`
+   at it.
+3. **API-key billing.** Set `environmentFile` to a file containing
+   `ANTHROPIC_API_KEY=…` — and use a `vibePackage` launcher configured for API-key
+   billing (the default launcher favours subscription OAuth and drops a stray
+   `ANTHROPIC_API_KEY`).
+
+**First-run prompts are handled for you.** A fresh Claude config otherwise blocks
+every session on the first-run *theme picker* and the *workspace-trust* dialog.
+The server seeds `<configDir>/.claude.json` (onboarding complete + `claudeTheme` +
+trust for each configured/started directory) so sessions launch straight into
+Remote Control. Disable with `seedClaudeOnboarding = false` if you manage the
+config dir yourself. (The seed is written by the server process, whose write
+scope is fixed at build time to `<stateDir>`, so it only applies when the config
+dir is under `<stateDir>` — the default. A `claudeConfigDir` set elsewhere must be
+pre-seeded; the module warns when that combination can't take effect.)
 
 The web UI's own login is separate: a shared password (`passwordFile`) gates who
 can reach the session manager. Leave `passwordFile` unset for a **passwordless**
-UI (trusted host / loopback only) — see [Behavior notes](#behavior-notes).
+UI (trusted host / loopback only) — see [Behavior notes](#behavior-notes). Note
+the Claude-login flow is behind that gate, so anyone who can reach the UI can
+authenticate the service user — keep the network restricted accordingly.
 
 ## Quick-launch directories
 
@@ -114,7 +138,9 @@ UI's *Add directory* form then creates/registers directories under it (see
 | `sessionNamePrefix`       | `""`                             | prefix for generated Remote Control session names (e.g. `"prod"`)          |
 | `maxLogBytes`             | `26214400` (25 MiB)              | per-session captured-log size cap (`0` = unlimited; a cap, not rotation)    |
 | `requireTLS`              | `false`                          | reject plain-HTTP requests (HTTP 426, except `/healthz`); set behind a TLS proxy |
-| `claudeConfigDir`         | `null`                           | pre-seeded OAuth login dir (recommended subscription auth → `CLAUDE_CONFIG_DIR`) |
+| `seedClaudeOnboarding`    | `true`                           | seed `.claude.json` (onboarding complete + theme + per-dir trust) so sessions don't block on Claude's first-run theme picker / trust dialog |
+| `claudeTheme`             | `"dark"`                         | theme written into the seeded config (`dark`, `light`, `dark-daltonized`, …); only used when `seedClaudeOnboarding` |
+| `claudeConfigDir`         | `null` → `<stateDir>/.claude`    | Claude config dir (`CLAUDE_CONFIG_DIR`) holding the OAuth login; log in from the UI, pre-seed it, or point at an existing login (recommended subscription auth) |
 | `environmentFile`         | `null`                           | systemd `EnvironmentFile` (e.g. `ANTHROPIC_API_KEY=…` for API-key billing)  |
 | `user` / `group`          | `"vibe"` / `"vibe"`              | service identity (only the default `vibe` user/group is auto-created)       |
 | `runAsRoot`               | `false`                          | run the service + spawned sessions as root (ignores `user`/`group`); handy for accessing dirs owned by assorted users, at the cost of privilege separation |
@@ -208,7 +234,8 @@ SSE stream flowing.
 | `main.ts`     | wiring: load config, recover sessions, serve, signal/shutdown        |
 | `config.ts`   | `ServerConfig` types, defaults, load from `/etc/vibe/config.json`     |
 | `auth.ts`     | HMAC-signed cookie, constant-time password check, per-IP login throttle |
-| `sessions.ts` | spawn (env-allowlisted), kill, snapshot/recover, login-URL scan, reaper |
+| `claude.ts`   | the `claude` CLI + config dir: spawn-env allowlist, `.claude.json` onboarding/theme/trust seeding, `auth status`, the interactive `auth login` flow |
+| `sessions.ts` | spawn, kill, snapshot/recover, login-URL scan, reaper                  |
 | `directories.ts` | runtime project dirs: create-from-template / register / unregister + persist |
 | `diff.ts`     | read-only git working-tree diff (tracked + untracked) for the Diff modal |
 | `sse.ts`      | read-only SSE tail of a session log                                  |
@@ -227,6 +254,7 @@ Offline `deno test` units + integration, wired into `nix flake check` as
 | `assert.ts`       | tiny zero-import assert helpers (keep tests import-free, see below)     |
 | `util_test.ts`    | `b64url` round-trip, `isValidName`, `isError`                          |
 | `auth_test.ts`    | cookie HMAC sign/verify + tamper/key-rotation, `passwordRequired`, `checkPassword`, login rate-limit |
+| `claude_test.ts`  | `extractLoginUrl` (OAuth URL out of OSC-8 escapes), `parseAuthStatus`, `mergeOnboarding`, `extractLoginError` |
 | `sessions_test.ts`| `shQuote` (shell-injection safety), `substitute` (`@DIR@`/`@NAME@`)    |
 | `diff_test.ts`    | `gitDiff` against a temp repo: not-a-repo / clean / tracked change / untracked file / `.gitignore` exclusion |
 
@@ -242,7 +270,10 @@ module: `port`, `hostname`, `stateDir`, `passwordFile`, `directories`
 `@NAME@` substituted), `extraEnv` (extra env-var names to propagate),
 `projectsDir` (base dir for UI-created projects, null disables), and
 `newProjectTemplate` (template scaffolded into new projects), `requireTLS`
-(reject non-TLS), `sessionNamePrefix`, and `maxLogBytes` (per-session log cap).
+(reject non-TLS), `sessionNamePrefix`, `maxLogBytes` (per-session log cap),
+`seedClaudeOnboarding` (seed `.claude.json` onboarding/trust), and `claudeTheme`
+(the seeded theme). The Claude config dir itself is selected by the module via
+`CLAUDE_CONFIG_DIR` (default `<stateDir>/.claude`), not this file.
 
 ## HTTP endpoints
 
@@ -253,6 +284,10 @@ module: `port`, `hostname`, `stateDir`, `passwordFile`, `directories`
 | `GET /api/auth-mode`                  | no   | `{passwordRequired}` — drives the login page |
 | `POST /api/login` / `POST /api/logout`| no   | shared-password login (rate-limited; passwordless when unset) |
 | `GET /api/me`                         | yes  | cookie check                              |
+| `GET /api/claude-auth`                | yes  | Claude account auth status + in-flight login state |
+| `POST /api/claude-auth/login`         | yes  | start (or rejoin) `claude auth login`; returns the OAuth URL |
+| `DELETE /api/claude-auth/login`       | yes  | abort an in-flight login                  |
+| `POST /api/claude-auth/code`          | yes  | submit the pasted authorization code (`{code}`) |
 | `GET /api/directories`                | yes  | list directories (config + user-added) + `canManage` |
 | `POST /api/directories`               | yes  | create-from-template or register (`{name}`) |
 | `DELETE /api/directories/:name`       | yes  | unregister a user-added directory (files kept) |
@@ -276,10 +311,25 @@ module: `port`, `hostname`, `stateDir`, `passwordFile`, `directories`
   `kill(-pid)` reaps the tree). The spawn environment is **allowlisted**
   (`PATH`, `HOME`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, … + `extraEnv`) so
   stray secrets don't leak into Claude Code or its browser-readable logs.
+- **Claude account login** — the UI shows the service user's `claude auth status`
+  as a banner; when not logged in, *"Log in to Claude"* drives the interactive
+  `claude auth login` flow. The server spawns it under a PTY (util-linux `script`)
+  with piped stdin, scans the output for the `claude.com` OAuth URL (surfaced as a
+  link), and writes the pasted authorization code back into the PTY. Only one
+  login runs at a time (auto-killed after 10 min if abandoned); on success the
+  login is stored in the shared config dir so every subsequent session is
+  authenticated. The whole flow is cookie-gated (see Auth & billing).
+- **Onboarding seed** — when `seedClaudeOnboarding` is set (default), the server
+  merges `hasCompletedOnboarding` + `claudeTheme` + per-directory
+  `hasTrustDialogAccepted` into `<configDir>/.claude.json` (at startup for the
+  configured dirs, and before each spawn for that session's dir), preserving any
+  existing keys. Without it a fresh service user's sessions hang on Claude Code's
+  first-run theme picker / workspace-trust dialog.
 - **Login link** — if a session's early output contains a Claude/Anthropic OAuth
-  URL, it's captured as `SessionInfo.loginUrl` and rendered as a clickable link
-  in the UI (host-validated client- and server-side) so the user can
-  authenticate.
+  URL (including the `claude.com` login host), it's captured as
+  `SessionInfo.loginUrl` and rendered as a clickable link in the UI (host-validated
+  client- and server-side). With the account-level login above this is rarely
+  needed, but it still surfaces a per-session prompt if one appears.
 - **Diff viewer** — `GET /api/sessions/:id/diff` returns a JSON `DiffResult`
   (`{ isRepo, branch?, empty, diff, truncated, error? }`) for the session's
   working directory, rendered by the UI's per-session **Diff** modal (responsive,
