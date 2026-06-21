@@ -32,6 +32,7 @@ import {
   submitClaudeCode,
 } from "./claude.ts";
 import { streamLog } from "./sse.ts";
+import { renderLog } from "./term.ts";
 import { gitDiff } from "./diff.ts";
 import { canCommit, canPush, cleanMessage, cleanPin, commitAndPush } from "./commit.ts";
 import { json, readJsonLimited } from "./http.ts";
@@ -218,14 +219,54 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     const s = getSession(dl[1]);
     if (!s) return json({ error: "Not found" }, 404);
     if (s.info.external) return json({ error: "No captured log" }, 404);
+    // The captured log is raw PTY output from a full-screen TUI. By default render
+    // it to the readable screen it represents (term.ts); `?raw=1` serves the raw
+    // bytes verbatim for debugging.
+    const raw = url.searchParams.get("raw") === "1";
     try {
-      const data = await Deno.readFile(s.logPath);
-      return new Response(data, {
-        headers: {
-          "content-type": "text/plain; charset=utf-8",
-          "content-disposition": `attachment; filename="${s.info.name}.log"`,
-        },
-      });
+      if (raw) {
+        // Raw bytes verbatim: control/escape codes and possibly chunk-split UTF-8,
+        // so label it binary (not text/utf-8) — it's an attachment regardless.
+        const data = await Deno.readFile(s.logPath);
+        return new Response(data, {
+          headers: {
+            "content-type": "application/octet-stream",
+            "content-disposition": `attachment; filename="${s.info.name}.raw.log"`,
+          },
+        });
+      }
+      // Rendered screen. renderLog is fully synchronous (no awaits) and Deno is
+      // single-threaded, so emulating a maxed-out (25 MiB) log would freeze the
+      // event loop — stalling /healthz, SSE tails, kills. Bound it: a snapshot only
+      // reflects the CURRENT screen, and earlier repaints are overwritten, so the
+      // last RENDER_BUDGET bytes reproduce it. (Seeking mid-UTF-8 may clip one lead
+      // byte; TermFilter's streaming decoder drops it — harmless for a tail render.)
+      const RENDER_BUDGET = 1 << 20; // 1 MiB
+      const file = await Deno.open(s.logPath, { read: true });
+      try {
+        const size = (await file.stat()).size;
+        const start = size > RENDER_BUDGET ? size - RENDER_BUDGET : 0;
+        const len = size - start;
+        await file.seek(start, Deno.SeekMode.Start);
+        const bytes = new Uint8Array(len);
+        let off = 0;
+        while (off < len) {
+          const n = await file.read(bytes.subarray(off));
+          if (n === null) break;
+          off += n;
+        }
+        const body = new TextEncoder().encode(renderLog(bytes.subarray(0, off)) + "\n");
+        return new Response(body, {
+          headers: {
+            "content-type": "text/plain; charset=utf-8",
+            "content-disposition": `attachment; filename="${s.info.name}.log"`,
+          },
+        });
+      } finally {
+        try {
+          file.close();
+        } catch { /* ignore */ }
+      }
     } catch {
       return json({ error: "Not found" }, 404);
     }

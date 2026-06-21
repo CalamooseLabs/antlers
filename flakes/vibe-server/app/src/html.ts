@@ -630,12 +630,23 @@ function openLog(s) {
   dl.href = "/api/sessions/" + s.id + "/logs/download";
   dl.textContent = "Download";
   meta.appendChild(dl);
+  meta.appendChild(document.createTextNode(" · "));
+  const note = document.createElement("span");
+  note.className = "muted";
+  note.textContent = "live terminal view";
+  meta.appendChild(note);
   const pre = document.getElementById("log");
-  pre.textContent = "";
+  pre.textContent = "Connecting…";
   es = new EventSource("/api/sessions/" + s.id + "/logs");
+  es.onopen = () => { if (pre.textContent === "Connecting…") pre.textContent = "Connected — waiting for output…"; };
+  // Each event is a full snapshot of the session's current terminal screen
+  // (rendered server-side from the raw PTY output) — REPLACE the view, don't append.
+  // Only re-pin to the bottom if the user was already there, so scrolling up to read
+  // earlier rows isn't yanked back down on every snapshot.
   es.onmessage = (ev) => {
-    pre.textContent += ev.data + "\\n";
-    pre.scrollTop = pre.scrollHeight;
+    const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+    pre.textContent = ev.data;
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
   };
   es.onerror = () => { /* keep trying; EventSource auto-reconnects */ };
 }
