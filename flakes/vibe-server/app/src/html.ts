@@ -909,7 +909,7 @@ function openCommit(s) {
   const note = document.getElementById("commitBranchNote");
   if (s.commitBranch) {
     // textContent — commitBranch is server config, but render it safely anyway.
-    note.textContent = "Commits go to branch \"" + s.commitBranch + "\" (created if it doesn't exist).";
+    note.textContent = "Commits go to branch \\"" + s.commitBranch + "\\" (created if it doesn't exist).";
     note.style.display = "";
   } else {
     note.textContent = "";
