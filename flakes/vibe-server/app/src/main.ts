@@ -11,25 +11,47 @@
 // (spawn/kill/snapshot/recover), sse (log tail), http (helpers), html (UI),
 // router (routes). This file just wires them together and runs the server.
 //
-// What it does: a shared-password login (signed cookie) gates a small web UI
-// that lists predefined directories, spawns `vibe` sessions in them (each in
-// Claude Code Remote Control mode, driven from claude.ai / mobile), lists/kills
-// those sessions, surfaces a login link if a session needs auth, and streams
-// each session's captured output read-only over SSE. Sessions survive a
-// vibe-server restart and are re-adopted on boot.
+// What it does: a shared-password login (signed cookie) gates a small web UI that
+// lists directories (and can browse the host filesystem under browseRoot to
+// create/register more), spawns `vibe` sessions in them, lists/kills those
+// sessions, surfaces a login link if a session needs auth, and streams each
+// session's captured output read-only over SSE. A `vibe` run by hand on the host
+// also self-registers (loopback-gated POST /api/register, via the discovery file
+// written below) so it shows up too. Server-spawned sessions survive a restart
+// and are re-adopted on boot.
 
-import { loadConfig } from "./config.ts";
+import { loadConfig, type ServerConfig } from "./config.ts";
 import { getSecret, initKey } from "./auth.ts";
 import { seedClaudeConfig } from "./claude.ts";
-import { recoverSessions, saveSnapshot, startReaper } from "./sessions.ts";
+import { recoverSessions, saveSnapshot, setRegToken, startReaper } from "./sessions.ts";
 import { loadUserDirs } from "./directories.ts";
 import { handler } from "./router.ts";
-import { isError, log } from "./util.ts";
+import { b64url, isError, log } from "./util.ts";
+
+// Drop a discovery file a locally-run `vibe` reads to find + authenticate to this
+// server (POST /api/register, gated by this token + a loopback peer). systemd's
+// RuntimeDirectory creates /run/vibe and wipes it on stop, so the file never goes
+// stale; mode 0644 lets other local users (a hand-run `vibe`) read it. Best-effort
+// — failure just means manual sessions won't appear in the UI.
+async function writeEndpointFile(config: ServerConfig, token: string): Promise<void> {
+  const dir = "/run/vibe";
+  await Deno.mkdir(dir, { recursive: true }).catch(() => {});
+  const file = `${dir}/endpoint.json`;
+  await Deno.writeTextFile(file, JSON.stringify({ url: `http://127.0.0.1:${config.port}`, token }));
+  await Deno.chmod(file, 0o644).catch(() => {});
+}
 
 async function main(): Promise<void> {
   const config = await loadConfig();
   await Deno.mkdir(config.stateDir, { recursive: true }).catch(() => {});
   await initKey(await getSecret(config.stateDir));
+
+  // Per-process self-registration token + discovery file (see writeEndpointFile).
+  const regToken = b64url(crypto.getRandomValues(new Uint8Array(24)));
+  setRegToken(regToken);
+  await writeEndpointFile(config, regToken).catch((e) =>
+    log("warn", "could not write endpoint discovery file", { err: isError(e) ? e.message : String(e) })
+  );
 
   // Seed onboarding-complete + theme + per-directory trust into the Claude config
   // dir so a fresh service user's sessions don't block on the theme picker /
@@ -70,9 +92,11 @@ async function main(): Promise<void> {
     (req, info) => {
       const fwd = req.headers.get("x-forwarded-for");
       const ra = info.remoteAddr;
-      const ip = (fwd ? fwd.split(",")[0].trim() : "") ||
-        (ra && "hostname" in ra ? ra.hostname : "?");
-      return handler(req, config, ip).catch((e) => {
+      // peerIp is the real socket peer (used for the loopback-gated register
+      // endpoint); ip prefers x-forwarded-for for logging / rate-limit keying.
+      const peerIp = ra && "hostname" in ra ? ra.hostname : "";
+      const ip = (fwd ? fwd.split(",")[0].trim() : "") || peerIp || "?";
+      return handler(req, config, ip, peerIp).catch((e) => {
         log("error", "request error", { err: isError(e) ? e.message : String(e) });
         return new Response(JSON.stringify({ error: "Internal error" }), {
           status: 500,

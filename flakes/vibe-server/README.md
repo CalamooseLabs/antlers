@@ -2,11 +2,14 @@
 
 The Deno web service behind **`services.vibe-server`** — a small **lifecycle manager**
 for Claude Code sessions. An optional shared-password login (passwordless when no
-`passwordFile` is set) gates a single-page UI that lists predefined directories,
-spawns a `vibe` session in each (in Claude Code **Remote Control** mode),
-lists/kills sessions, and streams each session's captured output read-only. You
-actually *drive* a session from [claude.ai/code](https://claude.ai/code) or the
-mobile app — the browser only manages lifecycle.
+`passwordFile` is set) gates a single-page UI that lists directories (and can
+**browse the server's filesystem** to create or register more — see
+[Add directory](#add-directory)), spawns a `vibe` session in each, lists/kills
+sessions, and streams each session's captured output read-only. A `vibe` you run
+**by hand** on the server self-registers and shows up here too (see
+[Manual sessions](#manual-sessions)). You actually *drive* a session from
+[claude.ai/code](https://claude.ai/code) or the mobile app — the browser only
+manages lifecycle.
 
 Exposed by the root flake as `packages.<system>.vibe-server`; its `ExecStart` is
 wired up by `nixosModules.vibe-server` (`./module.nix`). Sessions are launched with
@@ -50,6 +53,7 @@ the module renders `/etc/vibe/config.json` (`$VIBE_CONFIG`) and wires the unit:
   "directories": [ { "name": "antlers", "path": "/srv/projects/antlers" } ],
   "sessionCommand": [ "/nix/store/…-vibe/bin/vibe", "--remote-control", "@NAME@" ],
   "projectsDir": "/var/lib/vibe/projects",
+  "browseRoot": "/home",
   "requireTLS": false,
   "sessionNamePrefix": "",
   "maxLogBytes": 26214400,
@@ -115,9 +119,46 @@ services.vibe-server.directories = [
 
 `name` must match `[A-Za-z0-9_-]+` and `path` must be absolute (both enforced by
 module assertions). These config-defined directories are **immutable** from the
-UI. To let users add more at runtime, leave `projectsDir` set (the default) — the
-UI's *Add directory* form then creates/registers directories under it (see
-[Directory management](#behavior-notes)).
+UI. To let users add more at runtime, see [Add directory](#add-directory).
+
+## Add directory
+
+The UI's **Add directory** button opens a file browser rooted at
+`services.vibe-server.browseRoot` (default `/home`; `null` disables management).
+Navigate into subfolders, then either:
+
+- **Create a new project** — type a name and click *Create / Register*: the server
+  scaffolds `<browsed dir>/<name>` from `newProjectTemplate` (the `vibe-shell`
+  template) and `git init`s it, then registers it.
+- **Register an existing folder** — leave the name blank and click *Create /
+  Register*: the browsed folder is registered as-is (label = its sanitized
+  basename), for pre-existing repos.
+
+`browseRoot` is also added to the systemd `ReadWritePaths`, so a session started
+in any browsed/registered directory can actually write there (a path outside the
+service's writable set is read-only under `ProtectSystem = strict`). User-added
+directories persist to `stateDir/directories.json` and merge with the immutable
+config `directories`; the ✕ chip *unregisters* one (files are kept on disk).
+Browsing is symlink-safe (resolved and re-bounded to `browseRoot`) and read-only.
+
+> A broad `browseRoot` (e.g. `/`) makes a large part of the host browsable and
+> writable to sessions; combined with a passwordless, firewall-opened UI the
+> module emits a warning. Set `passwordFile` / `localNetworkOnly`, or narrow
+> `browseRoot`, when exposing the service.
+
+## Manual sessions
+
+A `vibe` you run **by hand** on the same host shows up in the session list too:
+when vibe-server is running it drops a discovery file at `/run/vibe/endpoint.json`
+(URL + token, mode 0644) and the `vibe` launcher reads it and self-registers
+(`POST /api/register`, gated by a **loopback peer + the token**), heartbeats while
+it runs, and deregisters on exit. Such a session is listed with its directory,
+status and a **Diff** button, but has **no captured-log tail** (its output is in
+your terminal / claude.ai) and **no Kill button** (manage it from its own
+terminal). Server-spawned sessions set `VIBE_MANAGED=1` and skip self-registration;
+opt out per-run with `VIBE_NO_REGISTER=1`. Manual sessions are *not* persisted
+across a vibe-server restart (they keep running; they just re-register on rerun),
+and the reaper retires them ~90s after their heartbeats stop.
 
 ## `services.vibe-server` options
 
@@ -133,7 +174,8 @@ UI's *Add directory* form then creates/registers directories under it (see
 | `sessionCommand`          | `vibe --remote-control @NAME@`   | command run per session; `@DIR@`/`@NAME@` substituted, cwd = chosen dir     |
 | `remoteControl.enable`    | `true`                           | default `sessionCommand` launches in Remote Control mode (false → set a headless `sessionCommand`) |
 | `extraEnv`                | `[]`                             | extra env-var **names** to propagate into sessions (values from the service env); everything else is dropped |
-| `projectsDir`             | `"/var/lib/vibe/projects"`       | base dir the UI may create/register projects under; `null` disables UI directory management |
+| `browseRoot`              | `"/home"`                        | root the UI's *Add directory* file browser may navigate + create/register under; also added to `ReadWritePaths` so sessions there can write; `null` disables UI directory management |
+| `projectsDir`             | `"/var/lib/vibe/projects"`       | legacy writable scratch dir (created + made writable); the *Add directory* form now scaffolds into the browsed dir, not here; `null` skips creating it |
 | `newProjectTemplate`      | the `vibe-shell` template        | template copied into a newly-created project (`null` → empty dir)           |
 | `sessionNamePrefix`       | `""`                             | prefix for generated Remote Control session names (e.g. `"prod"`)          |
 | `maxLogBytes`             | `26214400` (25 MiB)              | per-session captured-log size cap (`0` = unlimited; a cap, not rotation)    |
@@ -235,14 +277,14 @@ SSE stream flowing.
 | `config.ts`   | `ServerConfig` types, defaults, load from `/etc/vibe/config.json`     |
 | `auth.ts`     | HMAC-signed cookie, constant-time password check, per-IP login throttle |
 | `claude.ts`   | the `claude` CLI + config dir: spawn-env allowlist, `.claude.json` onboarding/theme/trust seeding, `auth status`, the interactive `auth login` flow |
-| `sessions.ts` | spawn, kill, snapshot/recover, login-URL scan, reaper                  |
-| `directories.ts` | runtime project dirs: create-from-template / register / unregister + persist |
+| `sessions.ts` | spawn, kill, snapshot/recover, login-URL scan, reaper; external (manually-run `vibe`) session register/heartbeat/deregister + the discovery token |
+| `directories.ts` | runtime project dirs: filesystem `browse` (bounded to `browseRoot`), create-from-template / register existing / unregister + persist |
 | `diff.ts`     | read-only git working-tree diff (tracked + untracked) for the Diff modal |
 | `sse.ts`      | read-only SSE tail of a session log                                  |
 | `http.ts`     | JSON responses + size-capped JSON body reader                        |
 | `html.ts`     | the inlined single-page UI                                           |
-| `router.ts`   | route table (public login/health, then cookie-gated)                |
-| `util.ts`     | base64url, `BufferSource` cast, structured `log`                     |
+| `router.ts`   | route table (public login/health + loopback register, then cookie-gated) |
+| `util.ts`     | base64url, `BufferSource` cast, structured `log`, `isLoopbackIp`, pure path/name helpers (`normalizeAbs`/`withinRoot`/`sanitizeName`/`uniqueName`/`basenameOf`) |
 
 ## Tests (`app/test/`)
 
@@ -256,6 +298,7 @@ Offline `deno test` units + integration, wired into `nix flake check` as
 | `auth_test.ts`    | cookie HMAC sign/verify + tamper/key-rotation, `passwordRequired`, `checkPassword`, login rate-limit |
 | `claude_test.ts`  | `extractLoginUrl` (OAuth URL out of OSC-8 escapes), `parseAuthStatus`, `mergeOnboarding`, `extractLoginError` |
 | `sessions_test.ts`| `shQuote` (shell-injection safety), `substitute` (`@DIR@`/`@NAME@`)    |
+| `paths_test.ts`   | `normalizeAbs`/`withinRoot` (browse-root bounding, no `..` escape), `sanitizeName`, `uniqueName`, `basenameOf`, `isLoopbackIp` |
 | `diff_test.ts`    | `gitDiff` against a temp repo: not-a-repo / clean / tracked change / untracked file / `.gitignore` exclusion |
 
 Run locally: `cd app && deno test --allow-read --allow-write --allow-run --allow-env --no-lock test/`.
@@ -268,7 +311,8 @@ Read from `$VIBE_CONFIG` (default `/etc/vibe/config.json`), written by the NixOS
 module: `port`, `hostname`, `stateDir`, `passwordFile`, `directories`
 (`{name,path}` — `name` must match `[A-Za-z0-9_-]+`), `sessionCommand` (`@DIR@` /
 `@NAME@` substituted), `extraEnv` (extra env-var names to propagate),
-`projectsDir` (base dir for UI-created projects, null disables), and
+`browseRoot` (file-browser root + writable path for UI directory management, null
+disables), `projectsDir` (legacy writable scratch dir, null skips), and
 `newProjectTemplate` (template scaffolded into new projects), `requireTLS`
 (reject non-TLS), `sessionNamePrefix`, `maxLogBytes` (per-session log cap),
 `seedClaudeOnboarding` (seed `.claude.json` onboarding/trust), and `claudeTheme`
@@ -283,13 +327,17 @@ module: `port`, `hostname`, `stateDir`, `passwordFile`, `directories`
 | `GET /healthz`                        | no   | liveness probe (`{ok, sessions}`)         |
 | `GET /api/auth-mode`                  | no   | `{passwordRequired}` — drives the login page |
 | `POST /api/login` / `POST /api/logout`| no   | shared-password login (rate-limited; passwordless when unset) |
+| `POST /api/register`                  | token | a local `vibe` self-registers (`{token,name,dir,pid}` → `{id,token}`); loopback peer only |
+| `PUT /api/register`                   | token | external-session heartbeat (`{id,token}`); loopback only |
+| `DELETE /api/register`                | token | external-session deregister (`{id,token}`); loopback only |
 | `GET /api/me`                         | yes  | cookie check                              |
 | `GET /api/claude-auth`                | yes  | Claude account auth status + in-flight login state |
 | `POST /api/claude-auth/login`         | yes  | start (or rejoin) `claude auth login`; returns the OAuth URL |
 | `DELETE /api/claude-auth/login`       | yes  | abort an in-flight login                  |
 | `POST /api/claude-auth/code`          | yes  | submit the pasted authorization code (`{code}`) |
 | `GET /api/directories`                | yes  | list directories (config + user-added) + `canManage` |
-| `POST /api/directories`               | yes  | create-from-template or register (`{name}`) |
+| `GET /api/browse`                     | yes  | list subdirectories of `?path=` (bounded to `browseRoot`) |
+| `POST /api/directories`               | yes  | create (`{path,name}` → scaffold `<path>/<name>`) or register existing (`{path}`) |
 | `DELETE /api/directories/:name`       | yes  | unregister a user-added directory (files kept) |
 | `GET /api/sessions`                   | yes  | list sessions                             |
 | `POST /api/sessions`                  | yes  | spawn a session (`{dir}`)                 |
@@ -356,18 +404,30 @@ module: `port`, `hostname`, `stateDir`, `passwordFile`, `directories`
   **Note:** like the log viewer, this is auth-gated and shows whatever is in the
   working tree — including the contents of *tracked-and-modified* secret files
   (e.g. a committed `.env`); anyone with the shared password can see them.
-- **Directory management** — when `projectsDir` is configured, `POST
-  /api/directories` creates `projectsDir/<name>` (scaffolded from
-  `newProjectTemplate` + `git init`) or registers an existing one; user-added
-  dirs persist to `stateDir/directories.json` and merge with the immutable
-  config `directories`. `DELETE` only unregisters (files are kept). Names are
-  validated `[A-Za-z0-9_-]+`, so created paths can't traverse out of `projectsDir`.
-- **Restart survival** — the running set is snapshotted to
-  `stateDir/sessions.json` (serialized writes) and re-adopted on boot. Re-adopted
-  sessions have no `ChildProcess` handle, so a 30s reaper polls `/proc` to retire
-  ones that have exited. Shutdown (SIGTERM/SIGINT) persists the snapshot and stops
-  serving but **does not kill** sessions — Remote Control sessions should outlive
-  a service restart.
+- **Directory management** — when `browseRoot` is set, `GET /api/browse` lists the
+  subdirectories of a path (bounded to `browseRoot`, symlink-resolved and
+  re-bounded, read-only) so the UI can pick a location, and `POST /api/directories`
+  either creates `<path>/<name>` (scaffolded from `newProjectTemplate` + `git
+  init`) when a `name` is given, or registers the browsed folder as-is when it
+  isn't. Both bound `path` to `browseRoot` (string + realpath check, so `..` and
+  symlinks can't escape); created names are validated `[A-Za-z0-9_-]+`. User-added
+  dirs persist to `stateDir/directories.json` and merge with the immutable config
+  `directories`. `DELETE` only unregisters (files are kept).
+- **Manual (external) sessions** — a `vibe` run by hand on the host self-registers
+  via `POST /api/register` (gated by the loopback peer + the discovery-file token
+  at `/run/vibe/endpoint.json`) and heartbeats; the server lists it with diff but
+  no log tail / no Kill. Server-spawned sessions carry `VIBE_MANAGED=1` and skip
+  this. The reaper retires an external session ~90s after its heartbeats stop
+  (cross-user `/proc` is hidden by `ProtectProc=invisible`, so liveness rides on
+  the heartbeat, not `pidAlive`).
+- **Restart survival** — the running set of *server-spawned* sessions is
+  snapshotted to `stateDir/sessions.json` (serialized writes) and re-adopted on
+  boot. Re-adopted sessions have no `ChildProcess` handle, so a 30s reaper polls
+  `/proc` to retire ones that have exited. Shutdown (SIGTERM/SIGINT) persists the
+  snapshot and stops serving but **does not kill** sessions — Remote Control
+  sessions should outlive a service restart. External (manually-registered)
+  sessions are deliberately *not* snapshotted: they belong to a user's terminal
+  and re-register themselves on rerun.
 - **Caps** — request bodies are size-capped (anti-OOM on the public login);
   retained sessions are capped (oldest terminated evicted, with their logs); each
   session's log is size-capped (`maxLogBytes`, default 25 MiB — appends stop past

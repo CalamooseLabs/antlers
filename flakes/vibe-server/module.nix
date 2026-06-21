@@ -94,6 +94,7 @@ with lib; let
     sessionCommand = scfg.sessionCommand;
     extraEnv = scfg.extraEnv;
     projectsDir = scfg.projectsDir;
+    browseRoot = scfg.browseRoot;
     newProjectTemplate =
       if scfg.newProjectTemplate != null
       then toString scfg.newProjectTemplate
@@ -114,7 +115,8 @@ with lib; let
   homePaths =
     (map (d: d.path) scfg.directories)
     ++ (optional (scfg.claudeConfigDir != null) (toString scfg.claudeConfigDir))
-    ++ (optional (scfg.projectsDir != null) scfg.projectsDir);
+    ++ (optional (scfg.projectsDir != null) scfg.projectsDir)
+    ++ (optional (scfg.browseRoot != null) scfg.browseRoot);
   anyUnderHome = any (p: p == "/home" || hasPrefix "/home/" p) homePaths;
   protectHome =
     if scfg.protectHome != null
@@ -182,7 +184,14 @@ in {
     projectsDir = mkOption {
       type = types.nullOr types.str;
       default = "${stateDir}/projects";
-      description = "Base directory under which the web UI may create/register projects (the \"Add directory\" form). New projects are scaffolded from `newProjectTemplate` here, then `git init`-ed. Set to null to disable directory management from the UI. A non-null path is created (systemd-tmpfiles) and made writable to the service.";
+      description = "Writable scratch directory created (systemd-tmpfiles) and made writable to the service. Legacy: the \"Add directory\" form now scaffolds into the directory chosen in the file browser (bounded by `browseRoot`), not here; this remains as a writable working area. Set to null to skip creating it.";
+    };
+
+    browseRoot = mkOption {
+      type = types.nullOr types.str;
+      default = "/home";
+      example = "/srv/projects";
+      description = "Root directory the web UI's \"Add directory\" file browser may navigate, and under which it creates new projects / registers existing folders. It is ALSO added to the systemd `ReadWritePaths`, so sessions started in any browsed or registered directory can actually write (paths outside the service's writable set are read-only under `ProtectSystem = strict`). Set to null to disable filesystem browsing / directory management from the UI entirely. Widen (e.g. \"/\") or narrow as needed — note a broad root makes a large part of the host writable to sessions, and combined with a passwordless, firewall-opened UI is flagged by a warning.";
     };
 
     newProjectTemplate = mkOption {
@@ -340,7 +349,11 @@ in {
         && !(hasPrefix "${stateDir}/" claudeConfigDirPath))
       "services.vibe-server: claudeConfigDir (${claudeConfigDirPath}) is outside ${stateDir}, so seedClaudeOnboarding cannot write its .claude.json there (the server's write scope is fixed at build time) and sessions may block on Claude Code's first-run theme/trust prompts. Pre-seed that dir (it must hold the login anyway) or keep claudeConfigDir under ${stateDir}.")
       ++ (optional scfg.runAsRoot
-        "services.vibe-server: running as root (runAsRoot = true) — the service and every Claude Code session it spawns run with full privileges. Use a dedicated user/group with the right directory permissions instead, where possible.");
+        "services.vibe-server: running as root (runAsRoot = true) — the service and every Claude Code session it spawns run with full privileges. Use a dedicated user/group with the right directory permissions instead, where possible.")
+      # The file browser + ReadWritePaths inclusion makes browseRoot navigable and
+      # writable to sessions; with a passwordless, exposed UI that's a wide surface.
+      ++ (optional (scfg.browseRoot != null && scfg.passwordFile == null && scfg.openFirewall && scfg.hostname != "127.0.0.1" && scfg.hostname != "::1")
+        "services.vibe-server: browseRoot (${scfg.browseRoot}) lets anyone using the web UI browse the host filesystem and register directories there (which then become writable to spawned sessions) — but the UI is passwordless and the port is firewall-opened. Set services.vibe-server.passwordFile, restrict the network (localNetworkOnly), or set browseRoot = null.");
 
     assertions = [
       {
@@ -350,6 +363,10 @@ in {
       {
         assertion = all (d: builtins.match "[A-Za-z0-9_-]+" d.name != null) scfg.directories;
         message = "services.vibe-server.directories: every name must match [A-Za-z0-9_-]+ (the web UI rejects other names).";
+      }
+      {
+        assertion = scfg.browseRoot == null || hasPrefix "/" scfg.browseRoot;
+        message = "services.vibe-server.browseRoot must be an absolute path (start with /), or null.";
       }
     ];
 
@@ -393,6 +410,7 @@ in {
             ++ (map (d: d.path) scfg.directories)
             ++ (optional (scfg.claudeConfigDir != null) (toString scfg.claudeConfigDir))
             ++ (optional (scfg.projectsDir != null) scfg.projectsDir)
+            ++ (optional (scfg.browseRoot != null) scfg.browseRoot)
           );
 
           # Extra hardening, safe for a Deno/Node web service. No

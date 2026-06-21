@@ -49,6 +49,20 @@ Runtime env overrides (no rebuild):
 | `VIBE_NAME`           | set the Remote Control session name (overrides the auto-generated name) |
 | `VIBE_NAME_PREFIX`    | set the prefix for the auto-generated `<prefix>-<repo>-<YYYYMMDD>` name |
 | `VIBE_API_KEY_AUTH`   | keep a stray `ANTHROPIC_API_KEY` (opt out of subscription auth)   |
+| `VIBE_NO_REGISTER`    | `1` — don't self-register with a local vibe-server (see below)    |
+| `VIBE_SERVER_ENDPOINT`| path to the vibe-server discovery file (default `/run/vibe/endpoint.json`) |
+
+### Showing up in vibe-server
+
+If a [`vibe-server`](../vibe-server) runs on the same host, a `vibe` you start by
+hand **self-registers** with it so the session appears in its web UI (listed with
+a Diff button; driven, as always, from claude.ai / mobile). It works by reading
+the server's discovery file (`/run/vibe/endpoint.json` — URL + token) and POSTing
+its name/dir/pid over loopback, heartbeating while it runs and deregistering on
+exit. It needs `curl` (bundled) and read access to that file; everything is
+best-effort, so with no server present `vibe` behaves exactly as before. Sessions
+**spawned by** vibe-server set `VIBE_MANAGED=1` and skip this (they're already
+tracked); set `VIBE_NO_REGISTER=1` to opt a manual run out.
 
 ## Auth & billing
 

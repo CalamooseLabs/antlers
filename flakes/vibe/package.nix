@@ -46,6 +46,7 @@
   jq,
   coreutils,
   git,
+  curl,
 }: {
   model ? "opus[1m]",
   effort ? null,
@@ -78,7 +79,7 @@
 in
   writeShellApplication {
     name = "vibe";
-    runtimeInputs = [claude-code jq coreutils git];
+    runtimeInputs = [claude-code jq coreutils git curl];
     text = ''
       # vibe — run Claude Code with antlers-pinned settings.
       # (writeShellApplication supplies the shebang + `set -euo pipefail` + shellcheck.)
@@ -97,9 +98,12 @@ in
             '  vibe --help                    this help' \
             'Remote Control name defaults to [<prefix>-]<repo>-<YYYYMMDD>' \
             '  (<repo> = basename of the working dir git toplevel); [name] overrides it.' \
+            'If a vibe-server runs on this host, the session self-registers so it' \
+            '  appears in the web UI (set VIBE_NO_REGISTER=1 to opt out).' \
             'Env overrides: VIBE_MODEL, VIBE_EFFORT, VIBE_ULTRACODE=1,' \
             '  VIBE_PERMISSION_MODE=<mode>, VIBE_REMOTE_CONTROL=1, VIBE_NAME=<name>,' \
-            '  VIBE_NAME_PREFIX=<prefix>, VIBE_API_KEY_AUTH=1 (API billing).'
+            '  VIBE_NAME_PREFIX=<prefix>, VIBE_API_KEY_AUTH=1 (API billing),' \
+            '  VIBE_NO_REGISTER=1, VIBE_SERVER_ENDPOINT=<path to endpoint.json>.'
           echo
           echo "Pinned settings:"
           jq . "$BAKED_SETTINGS" 2>/dev/null || cat "$BAKED_SETTINGS"
@@ -155,6 +159,55 @@ in
         unset ANTHROPIC_API_KEY
       fi
 
+      # Single cleanup for the temp settings dir, the heartbeat loop, and the
+      # self-registration — run once on exit. So we must NOT `exec` when any of
+      # these is active, or the EXIT trap would never fire.
+      SETTINGS_DIR=""
+      HEARTBEAT_PID=""
+      REG_ID=""
+      REG_DEREG=""
+      REG_URL=""
+      cleanup() {
+        if [ -n "$HEARTBEAT_PID" ]; then kill "$HEARTBEAT_PID" 2>/dev/null || true; fi
+        if [ -n "$REG_ID" ] && [ -n "$REG_URL" ]; then
+          curl -fsS -m 2 -X DELETE "$REG_URL/api/register" \
+            -H 'content-type: application/json' \
+            --data "$(jq -nc --arg id "$REG_ID" --arg token "$REG_DEREG" '{id: $id, token: $token}')" \
+            >/dev/null 2>&1 || true
+        fi
+        if [ -n "$SETTINGS_DIR" ]; then rm -rf "$SETTINGS_DIR" || true; fi
+      }
+      trap cleanup EXIT
+
+      # Resolve the session name — used both for `--remote-control` and for
+      # self-registration (so a plain interactive `vibe` is listed too). Precedence:
+      # an explicit --remote-control <name> / VIBE_NAME (already in $NAME), then a
+      # configured remoteControlName, then auto-generated [<prefix>-]<repo>-<YYYYMMDD>
+      # from the working directory's git toplevel (cwd fallback).
+      if [ -z "$NAME" ]; then
+        if [ -n "$CONFIGURED_NAME" ]; then
+          NAME="$CONFIGURED_NAME"
+        else
+          REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
+          # Restrict the repo segment to a safe session-name charset.
+          REPO="$(printf '%s' "$REPO" | tr -c 'A-Za-z0-9_-' '-')"
+          DATE="$(date +%Y%m%d)"
+          if [ -n "$NAME_PREFIX" ]; then
+            NAME="$NAME_PREFIX-$REPO-$DATE"
+          else
+            NAME="$REPO-$DATE"
+          fi
+        fi
+      fi
+
+      # Remote control uses the top-level `--remote-control [name]` FLAG, not the
+      # `claude remote-control` SUBCOMMAND, so `--settings` (model / effort /
+      # permissions) is fully honoured. The session is driven from claude.ai / mobile.
+      RC_ARGS=()
+      if [ "$REMOTE" = true ]; then
+        RC_ARGS=(--remote-control "$NAME")
+      fi
+
       # Resolve the settings file. Both modes deliver the pinned model / effort /
       # ultracode / permissions identically — via `claude --settings <file>`. Layer
       # optional VIBE_MODEL / VIBE_EFFORT / VIBE_ULTRACODE overrides on top of the
@@ -163,7 +216,6 @@ in
       SETTINGS="$BAKED_SETTINGS"
       if [ -n "''${VIBE_MODEL:-}" ] || [ -n "''${VIBE_EFFORT:-}" ] || [ -n "''${VIBE_ULTRACODE:-}" ]; then
         SETTINGS_DIR="$(mktemp -d)"
-        trap 'rm -rf "$SETTINGS_DIR"' EXIT
         SETTINGS="$SETTINGS_DIR/settings.json"
         jq \
           --arg model "''${VIBE_MODEL:-}" \
@@ -175,41 +227,51 @@ in
           "$BAKED_SETTINGS" > "$SETTINGS"
       fi
 
-      # Remote control uses the top-level `--remote-control [name]` FLAG, not the
-      # `claude remote-control` SUBCOMMAND. The flag runs the normal interactive
-      # command with Remote Control enabled, so `--settings` (model / effort /
-      # permissions) is fully honoured — the subcommand only accepts
-      # --name / --permission-mode. The session is then driven from claude.ai /
-      # the mobile app.
-      RC_ARGS=()
-      if [ "$REMOTE" = true ]; then
-        # Resolve the Remote Control session name. Precedence: an explicit
-        # --remote-control <name> / VIBE_NAME (already in $NAME), then a configured
-        # remoteControlName, then auto-generated [<prefix>-]<repo>-<YYYYMMDD> from the
-        # working directory's git toplevel (cwd fallback).
-        if [ -z "$NAME" ]; then
-          if [ -n "$CONFIGURED_NAME" ]; then
-            NAME="$CONFIGURED_NAME"
+      # Self-register with a local vibe-server, if one is present. When vibe-server
+      # runs on this host it drops a discovery file (URL + token) at
+      # /run/vibe/endpoint.json; we POST our name/dir/pid so the session shows up in
+      # the web UI, heartbeat while we run, and deregister on exit. Server-spawned
+      # sessions set VIBE_MANAGED=1 (already tracked) and skip this; opt out per-run
+      # with VIBE_NO_REGISTER=1, or point elsewhere with VIBE_SERVER_ENDPOINT. All
+      # best-effort: a missing file or any curl failure just skips registration.
+      ENDPOINT_FILE="''${VIBE_SERVER_ENDPOINT:-/run/vibe/endpoint.json}"
+      if [ -z "''${VIBE_MANAGED:-}" ] && [ -z "''${VIBE_NO_REGISTER:-}" ] && [ -r "$ENDPOINT_FILE" ]; then
+        REG_URL="$(jq -r '.url // empty' "$ENDPOINT_FILE" 2>/dev/null || true)"
+        REG_TOKEN="$(jq -r '.token // empty' "$ENDPOINT_FILE" 2>/dev/null || true)"
+        if [ -n "$REG_URL" ] && [ -n "$REG_TOKEN" ]; then
+          REG_RESP="$(curl -fsS -m 2 -X POST "$REG_URL/api/register" \
+            -H 'content-type: application/json' \
+            --data "$(jq -nc --arg t "$REG_TOKEN" --arg n "$NAME" --arg d "$PWD" --argjson p "$$" \
+              '{token: $t, name: $n, dir: $d, pid: $p}')" 2>/dev/null || true)"
+          REG_ID="$(printf '%s' "$REG_RESP" | jq -r '.id // empty' 2>/dev/null || true)"
+          REG_DEREG="$(printf '%s' "$REG_RESP" | jq -r '.token // empty' 2>/dev/null || true)"
+          if [ -n "$REG_ID" ] && [ -n "$REG_DEREG" ]; then
+            # Heartbeat in the background so the server keeps the session "running"
+            # (it can't rely on /proc visibility for a cross-user process).
+            (
+              while sleep 30; do
+                curl -fsS -m 2 -X PUT "$REG_URL/api/register" \
+                  -H 'content-type: application/json' \
+                  --data "$(jq -nc --arg id "$REG_ID" --arg token "$REG_DEREG" '{id: $id, token: $token}')" \
+                  >/dev/null 2>&1 || true
+              done
+            ) &
+            HEARTBEAT_PID=$!
           else
-            REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
-            # Restrict the repo segment to a safe session-name charset.
-            REPO="$(printf '%s' "$REPO" | tr -c 'A-Za-z0-9_-' '-')"
-            DATE="$(date +%Y%m%d)"
-            if [ -n "$NAME_PREFIX" ]; then
-              NAME="$NAME_PREFIX-$REPO-$DATE"
-            else
-              NAME="$REPO-$DATE"
-            fi
+            # Registration did not take — nothing to heartbeat or clean up.
+            REG_ID=""
+            REG_URL=""
           fi
+        else
+          REG_URL=""
         fi
-        RC_ARGS=(--remote-control "$NAME")
       fi
 
-      if [ "$SETTINGS" = "$BAKED_SETTINGS" ]; then
-        # No temp settings file to clean up — exec for a tighter process tree.
+      # Launch. `exec` only when there is nothing for the EXIT trap to do (no temp
+      # settings, not registered); otherwise run claude as a child so cleanup() fires.
+      if [ "$SETTINGS" = "$BAKED_SETTINGS" ] && [ -z "$REG_ID" ]; then
         exec claude --settings "$SETTINGS" "''${RC_ARGS[@]}" "''${PERM_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
       else
-        # Not exec'd: the EXIT trap must still fire to clean up the temp settings.
         claude --settings "$SETTINGS" "''${RC_ARGS[@]}" "''${PERM_ARGS[@]}" ${lib.escapeShellArgs extraArgs} "$@"
       fi
     '';

@@ -19,7 +19,15 @@ export interface ServerConfig {
   // of the built-in allowlist (see sessions.ts). Everything else is dropped.
   extraEnv: string[];
   // Base dir under which the web UI may create/register projects (null disables).
+  // Legacy: the scaffold destination is now the directory chosen in the file
+  // browser (bounded by browseRoot), not this. Kept for back-compat / as a
+  // writable scratch area.
   projectsDir: string | null;
+  // Root the web UI's "Add directory" file browser may navigate, and under which
+  // it creates/registers projects. Also added to the systemd ReadWritePaths so
+  // sessions in browsed dirs can write. null disables browsing / directory
+  // management from the UI. (See module.nix.)
+  browseRoot: string | null;
   // Template dir copied into a newly-created project (null = create an empty dir).
   newProjectTemplate: string | null;
   // Reject plain-HTTP requests (all but /healthz) — set when a TLS reverse proxy
@@ -52,6 +60,7 @@ export const DEFAULTS: ServerConfig = {
   sessionCommand: ["vibe", "--remote-control", "@NAME@"],
   extraEnv: [],
   projectsDir: null,
+  browseRoot: null,
   newProjectTemplate: null,
   requireTLS: false,
   sessionNamePrefix: "",

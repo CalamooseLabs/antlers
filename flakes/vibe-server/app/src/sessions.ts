@@ -1,7 +1,7 @@
 // Session lifecycle: spawn (env-allowlisted), track, kill, snapshot/recover
 // across restarts, and a periodic reaper. ZERO external imports.
 
-import { b64url, isError, log } from "./util.ts";
+import { b64url, basenameOf, isError, log, sanitizeName } from "./util.ts";
 import { buildEnv, seedTrust } from "./claude.ts";
 import type { DirConfig, ServerConfig } from "./config.ts";
 
@@ -22,12 +22,21 @@ export interface SessionInfo {
   // Set when the session's early output contained a Claude/Anthropic login URL —
   // the UI renders it as a clickable link so the user can authenticate.
   loginUrl?: string;
+  // True for a session a manually-run `vibe` self-registered (POST /api/register)
+  // rather than one the server spawned. It has no child handle and no captured
+  // log; the launcher heartbeats to keep it "running". The UI reflects it (status
+  // + diff) but hides Logs/Kill (its output lives in the user's own terminal).
+  external?: boolean;
 }
 
 interface Session {
   info: SessionInfo;
   child: Deno.ChildProcess | null; // null for sessions re-adopted after a restart
   logPath: string;
+  // For external (self-registered) sessions: the per-registration token the
+  // launcher echoes back on heartbeat/deregister, and the last heartbeat time.
+  deregToken?: string;
+  lastSeen?: number;
 }
 
 const sessions = new Map<string, Session>();
@@ -131,7 +140,9 @@ export async function spawnSession(config: ServerConfig, dir: DirConfig): Promis
     args: setsidArgs,
     cwd: dir.path,
     // TERM gives the PTY a sane terminal type; an allowlisted TERM overrides it.
-    env: { TERM: "xterm-256color", ...buildEnv(config) },
+    // VIBE_MANAGED tells the `vibe` launcher this session is already tracked by
+    // the server, so it skips self-registration (POST /api/register).
+    env: { TERM: "xterm-256color", VIBE_MANAGED: "1", ...buildEnv(config) },
     stdin: "null",
     stdout: "piped",
     stderr: "piped",
@@ -227,6 +238,12 @@ export async function spawnSession(config: ServerConfig, dir: DirConfig): Promis
 export function killSession(id: string): boolean {
   const s = sessions.get(id);
   if (!s) return false;
+  // External (self-registered) sessions are never signalled from here: their pid
+  // is a hand-run launcher we don't own, so kill(-pid) could hit the user's
+  // terminal process group or — after PID reuse / under runAsRoot — an unrelated
+  // process. They're managed from their own terminal; the DELETE route refuses
+  // them before this, and this is defense-in-depth.
+  if (s.info.external) return false;
   if (s.info.status === "exited" || s.info.status === "failed") {
     sessions.delete(id);
     return true;
@@ -249,6 +266,74 @@ export function killSession(id: string): boolean {
   return true;
 }
 
+// ---- externally-registered (manually-run `vibe`) sessions ----
+//
+// A `vibe` started by hand on this host self-registers (POST /api/register, gated
+// by the loopback peer + the discovery-file token below) so it shows up in the
+// session list. Such a session has no ChildProcess and no captured log — its
+// output stays in the user's terminal / claude.ai — so the launcher heartbeats
+// (PUT /api/register) to keep it "running" and the reaper retires it on staleness
+// (cross-user /proc is hidden by ProtectProc=invisible, so pidAlive can't be
+// trusted for it). External sessions are deliberately NOT snapshotted.
+
+// The discovery-file token (set once at startup by main.ts). A register POST must
+// present it; per-registration tokens (returned to the launcher) gate heartbeat /
+// deregister.
+let regToken = "";
+export function setRegToken(t: string): void {
+  regToken = t;
+}
+export function registerTokenMatches(t: string): boolean {
+  return regToken.length > 0 && t === regToken;
+}
+
+const EXTERNAL_TTL_MS = 90_000; // retire an external session this long after its last heartbeat
+
+export async function registerExternal(
+  fields: { name: string; dir: string; pid: number },
+): Promise<{ id: string; token: string }> {
+  await pruneSessions();
+  const id = b64url(crypto.getRandomValues(new Uint8Array(9)));
+  const deregToken = b64url(crypto.getRandomValues(new Uint8Array(18)));
+  const info: SessionInfo = {
+    id,
+    dir: sanitizeName(basenameOf(fields.dir)) || "external",
+    path: fields.dir,
+    name: fields.name,
+    pid: fields.pid,
+    status: "running",
+    startedAt: Date.now(),
+    command: "(external vibe session)",
+    external: true,
+  };
+  sessions.set(id, { info, child: null, logPath: "", deregToken, lastSeen: Date.now() });
+  log("info", "external session registered", { id, name: fields.name, dir: fields.dir });
+  return { id, token: deregToken };
+}
+
+// Refresh an external session's heartbeat. Returns false for an unknown id, a bad
+// token, or a session no longer running. Heartbeats are best-effort: the launcher
+// ignores the result, so a still-running manual session the server has forgotten
+// (e.g. after a restart — external sessions aren't snapshotted) reappears only
+// when `vibe` is run again, not automatically.
+export function heartbeatExternal(id: string, token: string): boolean {
+  const s = sessions.get(id);
+  if (!s || !s.info.external || s.deregToken !== token) return false;
+  if (s.info.status !== "running") return false;
+  s.lastSeen = Date.now();
+  return true;
+}
+
+export function deregisterExternal(id: string, token: string): boolean {
+  const s = sessions.get(id);
+  if (!s || !s.info.external || s.deregToken !== token) return false;
+  if (s.info.status === "running" || s.info.status === "terminating") {
+    s.info.status = "exited";
+    s.info.exitedAt = Date.now();
+  }
+  return true;
+}
+
 // ---- snapshot / recovery across restarts ----
 //
 // Remote Control sessions (and their setsid process groups) outlive the
@@ -266,7 +351,9 @@ let snapWriting: Promise<void> = Promise.resolve();
 export function saveSnapshot(stateDir: string): Promise<void> {
   snapWriting = snapWriting.then(async () => {
     const running = [...sessions.values()]
-      .filter((s) => s.info.status === "running")
+      // External (self-registered) sessions are not persisted — they belong to a
+      // user's terminal, not the server, and re-register themselves on rerun.
+      .filter((s) => s.info.status === "running" && !s.info.external)
       .map((s) => s.info);
     try {
       await Deno.writeTextFile(snapshotPath(stateDir), JSON.stringify(running));
@@ -305,14 +392,20 @@ export async function recoverSessions(stateDir: string): Promise<number> {
 export function startReaper(stateDir: string): void {
   setInterval(() => {
     let changed = false;
+    const now = Date.now();
     for (const s of sessions.values()) {
-      if (
-        s.child === null &&
-        (s.info.status === "running" || s.info.status === "terminating") &&
-        !pidAlive(s.info.pid)
-      ) {
+      if (s.info.status !== "running" && s.info.status !== "terminating") continue;
+      if (s.info.external) {
+        // Heartbeat-tracked: retire once the launcher stops checking in (its
+        // process may be cross-user, so /proc visibility can't be relied on).
+        if (now - (s.lastSeen ?? s.info.startedAt) > EXTERNAL_TTL_MS) {
+          s.info.status = "exited";
+          s.info.exitedAt = now;
+          changed = true;
+        }
+      } else if (s.child === null && !pidAlive(s.info.pid)) {
         s.info.status = "exited";
-        s.info.exitedAt = Date.now();
+        s.info.exitedAt = now;
         changed = true;
       }
     }

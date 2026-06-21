@@ -5,7 +5,7 @@
 // `git init`-ed so its flake is usable. ZERO external imports.
 
 import type { DirConfig, ServerConfig } from "./config.ts";
-import { isError, isValidName, log } from "./util.ts";
+import { basenameOf, isError, isValidName, log, normalizeAbs, sanitizeName, uniqueName, withinRoot } from "./util.ts";
 
 const userDirs = new Map<string, DirConfig>();
 
@@ -62,7 +62,74 @@ export function resolveDir(config: ServerConfig, name: string): DirConfig | unde
 }
 
 export function canManageDirectories(config: ServerConfig): boolean {
-  return config.projectsDir !== null && config.projectsDir !== "";
+  return config.browseRoot !== null && config.browseRoot.trim() !== "";
+}
+
+function browseRootOf(config: ServerConfig): string {
+  return normalizeAbs((config.browseRoot ?? "/").trim() || "/");
+}
+
+// realpath a path, falling back to its normalized form if it can't be resolved
+// (e.g. it doesn't exist) — callers re-check the bound afterwards.
+async function realOrNorm(p: string): Promise<string> {
+  try {
+    return await Deno.realPath(p);
+  } catch {
+    return normalizeAbs(p);
+  }
+}
+
+export interface BrowseEntry {
+  name: string;
+  path: string;
+  registered: boolean;
+}
+
+export interface BrowseResult {
+  root: string;
+  path: string;
+  parent: string | null;
+  entries: BrowseEntry[];
+  error?: string;
+}
+
+// Parent of `p` within `root` (null at the root itself / when out of bounds).
+function parentWithin(root: string, p: string): string | null {
+  if (p === root || !withinRoot(root, p)) return null;
+  const parent = normalizeAbs(p.slice(0, p.lastIndexOf("/")) || "/");
+  return withinRoot(root, parent) ? parent : root;
+}
+
+// List the subdirectories of `reqPath` (default: the browse root), bounded to
+// browseRoot. Symlinks are resolved with realPath and re-bounded so a link inside
+// the root can't escape it. Read-only; never throws (errors surface in `.error`).
+export async function browse(config: ServerConfig, reqPath?: string): Promise<BrowseResult> {
+  const root = await realOrNorm(browseRootOf(config));
+  let target = reqPath && reqPath.startsWith("/") ? normalizeAbs(reqPath) : root;
+  if (!withinRoot(root, target)) target = root; // cheap string bound before hitting the FS
+  target = await realOrNorm(target);
+  if (!withinRoot(root, target)) target = root; // symlink escape → clamp to root
+
+  const registered = new Set(listDirectories(config).map((d) => d.path));
+  const entries: BrowseEntry[] = [];
+  try {
+    for await (const e of Deno.readDir(target)) {
+      if (!e.isDirectory && !e.isSymlink) continue;
+      const full = target === "/" ? `/${e.name}` : `${target}/${e.name}`;
+      if (e.isSymlink) {
+        try {
+          if (!(await Deno.stat(full)).isDirectory) continue;
+        } catch {
+          continue; // dangling / unreadable symlink
+        }
+      }
+      entries.push({ name: e.name, path: full, registered: registered.has(full) });
+    }
+  } catch {
+    return { root, path: target, parent: parentWithin(root, target), entries: [], error: "cannot read directory" };
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  return { root, path: target, parent: parentWithin(root, target), entries };
 }
 
 async function run(args: string[]): Promise<void> {
@@ -88,30 +155,60 @@ async function scaffold(template: string, dest: string): Promise<void> {
   await run(["git", "-C", dest, "add", "-A"]).catch(() => {});
 }
 
-// Create (scaffolding from the template when missing) or register a directory
-// under projectsDir, then persist it. Returns the registered directory.
-export async function addDirectory(config: ServerConfig, name: string): Promise<DirConfig> {
-  if (!isValidName(name)) throw new Error("invalid name");
+// Add a directory the user picked in the file browser. The chosen folder (`path`)
+// must be inside browseRoot. With a `name`, create `<path>/<name>` (scaffolded
+// from the template + git-init, if it doesn't exist already) and register it.
+// Without a name, register the chosen folder itself (label = its sanitized
+// basename, de-duplicated). Persists and returns the registered directory.
+export async function addDirectory(
+  config: ServerConfig,
+  opts: { path: string; name?: string },
+): Promise<DirConfig> {
   if (!canManageDirectories(config)) throw new Error("directory management disabled");
-  if (config.directories.some((d) => d.name === name)) throw new Error("name already configured");
-  const base = config.projectsDir as string;
-  const path = `${base}/${name}`;
-  await Deno.mkdir(base, { recursive: true });
-
-  let created = false;
-  if (!(await isDir(path))) {
-    if (config.newProjectTemplate) {
-      await scaffold(config.newProjectTemplate, path);
-    } else {
-      await Deno.mkdir(path, { recursive: true });
-    }
-    created = true;
+  const root = await realOrNorm(browseRootOf(config));
+  if (!opts.path.startsWith("/") || !withinRoot(root, normalizeAbs(opts.path))) {
+    throw new Error("location is outside the browse root");
   }
+  let base: string;
+  try {
+    base = await Deno.realPath(opts.path);
+  } catch {
+    throw new Error("location does not exist");
+  }
+  if (!withinRoot(root, base)) throw new Error("location is outside the browse root");
+  if (!(await isDir(base))) throw new Error("location is not a directory");
 
-  const dir: DirConfig = { name, path };
-  userDirs.set(name, dir);
+  const taken = new Set<string>([
+    ...config.directories.map((d) => d.name),
+    ...[...userDirs.values()].map((d) => d.name),
+  ]);
+
+  let dir: DirConfig;
+  if (opts.name) {
+    if (!isValidName(opts.name)) throw new Error("invalid name");
+    if (taken.has(opts.name)) throw new Error("name already in use");
+    let dest = `${base}/${opts.name}`;
+    let created = false;
+    if (!(await isDir(dest))) {
+      if (config.newProjectTemplate) await scaffold(config.newProjectTemplate, dest);
+      else await Deno.mkdir(dest, { recursive: true });
+      created = true;
+    }
+    // Re-resolve and re-bound, mirroring the register branch: isDir() follows
+    // symlinks, so a pre-existing symlink at <base>/<name> pointing outside
+    // browseRoot would otherwise be registered (and later run a session) out of
+    // bounds. realPath collapses it; reject anything that escapes the root.
+    dest = await Deno.realPath(dest);
+    if (!withinRoot(root, dest)) throw new Error("location is outside the browse root");
+    dir = { name: opts.name, path: dest };
+    log("info", "directory created", { name: dir.name, path: dir.path, created });
+  } else {
+    const label = uniqueName(sanitizeName(basenameOf(base)), taken);
+    dir = { name: label, path: base };
+    log("info", "directory registered", { name: dir.name, path: dir.path });
+  }
+  userDirs.set(dir.name, dir);
   await persist(config.stateDir);
-  log("info", "directory added", { name, path, created });
   return dir;
 }
 

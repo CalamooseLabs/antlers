@@ -49,8 +49,18 @@ export const INDEX_HTML = `<!DOCTYPE html>
     th, td { padding: 6px 6px; }
     table { display: block; overflow-x: auto; white-space: nowrap; }
   }
-  .howto { color: #8b949e; margin: 8px 0 0; }
-  .howto a { color: #58a6ff; }
+  /* ---- add-directory file browser ---- */
+  .fs-list { border: 1px solid #21262d; border-radius: 6px; max-height: 42vh; overflow: auto; }
+  .fs-entry { display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+    border-bottom: 1px solid #161b22; }
+  .fs-entry:last-child { border-bottom: 0; }
+  .fs-entry.nav { cursor: pointer; }
+  .fs-entry.nav:hover { background: #161b22; }
+  .fs-entry .ico { color: #8b949e; flex: 0 0 auto; }
+  .fs-entry .tag { margin-left: auto; font-size: 11px; color: #8b949e; }
+  #addName { flex: 1 1 240px; }
+  .local { font-size: 11px; color: #8b949e; padding: 1px 7px; border: 1px solid #30363d;
+    border-radius: 10px; margin-left: 6px; }
   /* ---- claude account auth banner + login modal ---- */
   #authBanner { margin: 0 0 12px; }
   #authBanner.warn { background: #3a2d12; color: #d29922; border: 1px solid #9e6a03;
@@ -149,17 +159,10 @@ export const INDEX_HTML = `<!DOCTYPE html>
       <span class="muted" id="startErr"></span>
     </div>
     <div class="row" id="addrow" style="margin-top:10px">
-      <input id="newdir" placeholder="new project name (a-z0-9-_)" />
-      <button onclick="addDir()">Add directory</button>
+      <button onclick="openAddDir()">Add directory</button>
       <span class="muted" id="dirErr"></span>
     </div>
     <div class="row" id="dirchips" style="margin-top:6px"></div>
-    <p class="howto">
-      Sessions run in Claude Code Remote Control mode — open
-      <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer">claude.ai/code</a>
-      or the mobile app and pick the session name to drive it. If a row shows
-      <strong>Log in</strong>, click it to authenticate first.
-    </p>
 
     <table>
       <thead>
@@ -202,6 +205,29 @@ export const INDEX_HTML = `<!DOCTYPE html>
         <div class="dialog-body" id="authBody"></div>
       </div>
     </div>
+
+    <div id="addModal" class="backdrop hidden" role="dialog" aria-modal="true"
+         aria-labelledby="addTitle" tabindex="-1" onclick="addBackdrop(event)">
+      <div class="dialog" onclick="event.stopPropagation()">
+        <div class="dialog-head">
+          <h2 id="addTitle">Add directory</h2>
+          <span class="spacer"></span>
+          <button onclick="closeAddDir()" aria-label="Close">✕</button>
+        </div>
+        <div class="dialog-body">
+          <div class="meta" id="addPath"></div>
+          <div id="addList" class="fs-list"></div>
+          <div class="authstep" style="margin-top:14px">
+            <h3>Name a new project to create here, or leave blank to register this folder</h3>
+            <div class="row">
+              <input id="addName" placeholder="new project name (a-z0-9-_) — blank to register this folder" autocomplete="off" />
+              <button class="primary" id="addSubmit" onclick="submitAddDir()">Create / Register</button>
+            </div>
+            <div class="authstatus err" id="addErr"></div>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
 </div>
 
@@ -226,6 +252,7 @@ async function logout() {
   await api("/api/logout", { method: "POST" });
   closeLog();
   closeDiff();
+  closeAddDir();
   document.getElementById("app").classList.add("hidden");
   // Passwordless mode has nothing to sign out to — re-run the boot decision,
   // which signs back in automatically. (The Sign out button is hidden there.)
@@ -279,16 +306,85 @@ async function loadDirs() {
   }
 }
 
-async function addDir() {
-  const input = document.getElementById("newdir");
-  const name = input.value.trim();
-  const err = document.getElementById("dirErr");
-  if (!name) return;
-  const r = await api("/api/directories", { method: "POST", body: JSON.stringify({ name }) });
-  if (!r.ok) { const b = await r.json().catch(() => ({})); err.textContent = b.error || "Failed to add"; return; }
-  err.textContent = "";
-  input.value = "";
-  loadDirs();
+// ===== add-directory file browser =====
+let addCurrent = null; // the directory currently shown in the browser
+
+function openAddDir() {
+  const modal = document.getElementById("addModal");
+  modal.classList.remove("hidden");
+  modal.focus();
+  document.getElementById("addName").value = "";
+  setAddErr("");
+  browseTo(null);
+}
+
+function closeAddDir() {
+  const modal = document.getElementById("addModal");
+  if (modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  document.getElementById("addList").innerHTML = "";
+  addCurrent = null;
+}
+
+function addBackdrop(ev) { if (ev.target && ev.target.id === "addModal") closeAddDir(); }
+
+function setAddErr(msg) { document.getElementById("addErr").textContent = msg || ""; }
+
+async function browseTo(path) {
+  setAddErr("");
+  const r = await api("/api/browse" + (path ? "?path=" + encodeURIComponent(path) : ""));
+  if (r.status === 401) { closeAddDir(); return logout(); }
+  if (!r.ok) { setAddErr("Cannot browse there."); return; }
+  renderBrowse(await r.json());
+}
+
+function fsEntry(label, onclick, tag) {
+  const row = document.createElement("div");
+  row.className = onclick ? "fs-entry nav" : "fs-entry muted";
+  const ic = document.createElement("span"); ic.className = "ico"; ic.textContent = "📁";
+  row.appendChild(ic);
+  const nm = document.createElement("span"); nm.textContent = label; row.appendChild(nm);
+  if (tag) { const t = document.createElement("span"); t.className = "tag"; t.textContent = tag; row.appendChild(t); }
+  if (onclick) row.onclick = onclick;
+  return row;
+}
+
+function renderBrowse(d) {
+  addCurrent = d.path;
+  document.getElementById("addPath").textContent = "Location: " + d.path;
+  const list = document.getElementById("addList");
+  list.innerHTML = "";
+  if (d.parent) list.appendChild(fsEntry(".. (up)", () => browseTo(d.parent), null));
+  if (!d.entries || !d.entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "fs-entry muted";
+    empty.textContent = d.error ? d.error : "(no subfolders here)";
+    list.appendChild(empty);
+  }
+  for (const e of (d.entries || [])) {
+    list.appendChild(fsEntry(e.name, () => browseTo(e.path), e.registered ? "registered" : null));
+  }
+}
+
+async function submitAddDir() {
+  if (!addCurrent) return;
+  const name = document.getElementById("addName").value.trim();
+  const btn = document.getElementById("addSubmit");
+  btn.disabled = true;
+  setAddErr("");
+  try {
+    const body = { path: addCurrent };
+    if (name) body.name = name;
+    const r = await api("/api/directories", { method: "POST", body: JSON.stringify(body) });
+    if (r.status === 401) { closeAddDir(); return logout(); }
+    const d = await r.json().catch(() => ({}));
+    if (r.ok) { closeAddDir(); loadDirs(); }
+    else { setAddErr(d.error || "Failed to add directory."); }
+  } catch (e) {
+    setAddErr("Network error.");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function removeDir(name) {
@@ -370,10 +466,13 @@ async function refresh() {
     const code = (s.exitCode === undefined || s.exitCode === null) ? "" : " (" + s.exitCode + ")";
     tr.innerHTML =
       '<td class="nmcell"></td>' +
-      '<td class="muted">' + s.path + '</td>' +
+      '<td class="muted dircell"></td>' +
       '<td><span class="pill ' + s.status + '">' + s.status + code + '</span></td>' +
       '<td class="muted">' + fmtTime(s.startedAt) + uptimeStr(s) + '</td>' +
       '<td class="row actions"></td>';
+    // CRITICAL: s.path is attacker-influenced for external (self-registered)
+    // sessions, so set it via textContent — never interpolate it into innerHTML.
+    tr.querySelector(".dircell").textContent = s.path;
     const nm = tr.querySelector(".nmcell");
     nm.appendChild(document.createTextNode(s.name + " "));
     const copyBtn = document.createElement("button");
@@ -382,6 +481,13 @@ async function refresh() {
     copyBtn.setAttribute("aria-label", "Copy session name " + s.name);
     copyBtn.onclick = () => copyText(s.name, copyBtn);
     nm.appendChild(copyBtn);
+    if (s.external) {
+      const tag = document.createElement("span");
+      tag.className = "local";
+      tag.textContent = "local";
+      tag.title = "Started by hand on the server; managed from its own terminal / claude.ai";
+      nm.appendChild(tag);
+    }
     const actions = tr.querySelector(".actions");
     if (safeLoginUrl(s.loginUrl)) {
       const a = document.createElement("a");
@@ -392,16 +498,20 @@ async function refresh() {
       a.textContent = "🔑 Log in";
       actions.appendChild(a);
     }
-    const logsBtn = document.createElement("button");
-    logsBtn.textContent = "Logs";
-    logsBtn.onclick = () => openLog(s);
-    actions.appendChild(logsBtn);
+    // External sessions have no server-captured log (output is in the user's
+    // terminal) and aren't killed from here — show only Diff for them.
+    if (!s.external) {
+      const logsBtn = document.createElement("button");
+      logsBtn.textContent = "Logs";
+      logsBtn.onclick = () => openLog(s);
+      actions.appendChild(logsBtn);
+    }
     const diffBtn = document.createElement("button");
     diffBtn.textContent = "Diff";
     diffBtn.setAttribute("aria-label", "View git diff for " + s.name);
     diffBtn.onclick = () => openDiff(s);
     actions.appendChild(diffBtn);
-    if (s.status === "running") {
+    if (s.status === "running" && !s.external) {
       const killBtn = document.createElement("button");
       killBtn.className = "danger";
       killBtn.textContent = "Kill";
@@ -867,6 +977,7 @@ document.getElementById("pw").addEventListener("keydown", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
+  if (!document.getElementById("addModal").classList.contains("hidden")) { closeAddDir(); return; }
   if (!document.getElementById("authModal").classList.contains("hidden")) { closeAuth(); return; }
   if (!document.getElementById("diffModal").classList.contains("hidden")) closeDiff();
 });

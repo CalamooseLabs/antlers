@@ -13,14 +13,19 @@ import {
   passwordRequired,
 } from "./auth.ts";
 import {
+  deregisterExternal,
   getSession,
+  heartbeatExternal,
   killSession,
   listSessions,
+  registerExternal,
+  registerTokenMatches,
   sessionCount,
   spawnSession,
 } from "./sessions.ts";
 import {
   addDirectory,
+  browse,
   canManageDirectories,
   listDirectories,
   removeDirectory,
@@ -37,9 +42,11 @@ import { streamLog } from "./sse.ts";
 import { gitDiff } from "./diff.ts";
 import { json, readJsonLimited } from "./http.ts";
 import { INDEX_HTML } from "./html.ts";
-import { isError, isValidName } from "./util.ts";
+import { isError, isLoopbackIp, isValidName } from "./util.ts";
 
-export async function handler(req: Request, config: ServerConfig, clientIp: string): Promise<Response> {
+// `peerIp` is the RAW socket peer (not x-forwarded-for) — used to confine the
+// local self-registration endpoints to loopback.
+export async function handler(req: Request, config: ServerConfig, clientIp: string, peerIp: string): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
   const method = req.method;
@@ -47,8 +54,10 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
   // (directly or via a reverse proxy), so plain-HTTP LAN use still works.
   const secure = req.headers.get("x-forwarded-proto") === "https" || url.protocol === "https:";
 
-  // When TLS is required, refuse plain-HTTP requests (except the liveness probe).
-  if (config.requireTLS && !secure && path !== "/healthz") {
+  // When TLS is required, refuse plain-HTTP requests (except the liveness probe
+  // and the loopback-only self-registration endpoint, which a local `vibe` always
+  // reaches over plain HTTP on 127.0.0.1, bypassing any TLS front).
+  if (config.requireTLS && !secure && path !== "/healthz" && path !== "/api/register") {
     return json({ error: "HTTPS required" }, 426);
   }
 
@@ -89,6 +98,45 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     return json({ ok: true }, 200, { "set-cookie": clearCookie(secure) });
   }
 
+  // ---- local self-registration (a manually-run `vibe` on this host) ----
+  // NOT cookie-gated: gated by the loopback peer + the discovery-file token (POST)
+  // / per-registration token (PUT heartbeat, DELETE deregister). Lets a hand-run
+  // `vibe` appear in the session list. See sessions.ts + main.ts.
+  if (path === "/api/register") {
+    if (!isLoopbackIp(peerIp)) return json({ error: "Forbidden" }, 403);
+    const body: Record<string, unknown> = await readJsonLimited(req).catch(() => ({}));
+    if (method === "POST") {
+      if (typeof body.token !== "string" || !registerTokenMatches(body.token)) {
+        return json({ error: "Unauthorized" }, 401);
+      }
+      const name = body.name;
+      const dir = body.dir;
+      const pid = typeof body.pid === "number" ? body.pid : Number(body.pid);
+      if (typeof name !== "string" || !isValidName(name)) return json({ error: "Invalid name" }, 400);
+      // Absolute path, length-capped, and free of control characters (defense in
+      // depth — the UI also renders it via textContent, never innerHTML).
+      if (typeof dir !== "string" || !dir.startsWith("/") || dir.length > 4096 || [...dir].some((c) => c.charCodeAt(0) < 0x20)) {
+        return json({ error: "Invalid dir" }, 400);
+      }
+      if (!Number.isInteger(pid) || pid <= 0) return json({ error: "Invalid pid" }, 400);
+      try {
+        return json(await registerExternal({ name, dir, pid }), 201);
+      } catch {
+        return json({ error: "Could not register" }, 400);
+      }
+    }
+    if (method === "PUT" || method === "DELETE") {
+      if (typeof body.id !== "string" || typeof body.token !== "string") {
+        return json({ error: "Invalid" }, 400);
+      }
+      const ok = method === "PUT"
+        ? heartbeatExternal(body.id, body.token)
+        : deregisterExternal(body.id, body.token);
+      return json({ ok }, ok ? 200 : 404);
+    }
+    return json({ error: "Method not allowed" }, 405);
+  }
+
   // Everything below requires authentication.
   if (!await isAuthed(req)) return json({ error: "Unauthorized" }, 401);
 
@@ -122,13 +170,25 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     return json({ directories: listDirectories(config), canManage: canManageDirectories(config) });
   }
 
-  // Create (scaffold from the template if missing) or register a directory.
+  // Browse the server's filesystem (subdirectories only), bounded to browseRoot,
+  // so the UI can pick where to create/register a project.
+  if (path === "/api/browse" && method === "GET") {
+    if (!canManageDirectories(config)) return json({ error: "Browsing disabled" }, 403);
+    return json(await browse(config, url.searchParams.get("path") ?? undefined));
+  }
+
+  // Create a new project (`{path, name}` → scaffold `<path>/<name>`) or register
+  // an existing folder (`{path}` → register it as-is). `path` is the folder the
+  // user browsed to; addDirectory bounds it to browseRoot.
   if (path === "/api/directories" && method === "POST") {
+    if (!canManageDirectories(config)) return json({ error: "Directory management disabled" }, 403);
     const body: Record<string, unknown> = await readJsonLimited(req).catch(() => ({}));
-    const name = body.name;
-    if (typeof name !== "string" || !isValidName(name)) return json({ error: "Invalid name" }, 400);
+    const dirPath = body.path;
+    if (typeof dirPath !== "string" || !dirPath.startsWith("/")) return json({ error: "Invalid path" }, 400);
+    const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
+    if (name !== undefined && !isValidName(name)) return json({ error: "Invalid name" }, 400);
     try {
-      return json({ directory: await addDirectory(config, name) }, 201);
+      return json({ directory: await addDirectory(config, { path: dirPath, name }) }, 201);
     } catch (e) {
       return json({ error: isError(e) ? e.message : "Could not add directory" }, 400);
     }
@@ -159,6 +219,10 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
 
   const del = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)$/);
   if (del && method === "DELETE") {
+    // External sessions belong to a user's terminal — never signal their pid from
+    // here (it isn't ours; see killSession). The UI hides Kill for them anyway.
+    const s = getSession(del[1]);
+    if (s && s.info.external) return json({ error: "External sessions are managed from their own terminal" }, 409);
     const ok = killSession(del[1]);
     return json({ ok }, ok ? 200 : 404);
   }
@@ -167,6 +231,8 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
   if (logs && method === "GET") {
     const s = getSession(logs[1]);
     if (!s) return json({ error: "Not found" }, 404);
+    // External sessions have no captured log — their output is in the user's terminal.
+    if (s.info.external) return json({ error: "No captured log" }, 404);
     return streamLog(s.logPath);
   }
 
@@ -174,6 +240,7 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
   if (dl && method === "GET") {
     const s = getSession(dl[1]);
     if (!s) return json({ error: "Not found" }, 404);
+    if (s.info.external) return json({ error: "No captured log" }, 404);
     try {
       const data = await Deno.readFile(s.logPath);
       return new Response(data, {
@@ -191,10 +258,14 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
   if (diff && method === "GET") {
     const s = getSession(diff[1]);
     if (!s) return json({ error: "Not found" }, 404);
-    // The path is server-controlled (config / projectsDir), never from the request.
-    // Defense-in-depth: only diff a still-registered directory, so an unregistered/
-    // stale dir becomes a clean 409 rather than a stray git run.
-    if (!resolveDir(config, s.info.dir)) return json({ error: "Directory no longer registered" }, 409);
+    // For server-spawned sessions the path is server-controlled (config /
+    // browseRoot); defense-in-depth: only diff a still-registered directory, so a
+    // stale/unregistered dir is a clean 409 rather than a stray git run. External
+    // sessions aren't in the registry — their path came from a token-authenticated
+    // loopback registration; git runs read-only + scrubbed, so diff it directly.
+    if (!s.info.external && !resolveDir(config, s.info.dir)) {
+      return json({ error: "Directory no longer registered" }, 409);
+    }
     return json(await gitDiff(s.info.path)); // gitDiff never throws (catches internally)
   }
 
