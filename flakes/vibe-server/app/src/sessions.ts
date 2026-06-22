@@ -54,6 +54,9 @@ interface Session {
   // sendInput). Present only for server-spawned pty sessions; absent for headless
   // (pty=false) and re-adopted sessions (no child handle → no stdin). Closed on exit.
   inputWriter?: WritableStreamDefaultWriter<Uint8Array>;
+  // Serializes typed-input sends (see sendInput): each message's text+CR writes
+  // chain onto the previous so concurrent sends to one session can't interleave.
+  sendChain?: Promise<void>;
   // For external (self-registered) sessions: the per-registration token the
   // launcher echoes back on heartbeat/deregister, and the last heartbeat time.
   deregToken?: string;
@@ -349,9 +352,11 @@ export function killSession(id: string): boolean {
 //
 // The web UI can send a one-off message to a server-spawned session's Claude Code
 // prompt: we write it into the session's PTY (via the held stdin writer, which
-// `script` forwards to the child) followed by a CR to submit it — the same channel
-// the claude-auth code-paste proves works. This is NOT a substitute for Remote
-// Control (no streamed reply here); it's a "type this and hit Enter" affordance.
+// `script` forwards to the child), then — after a brief pause — a lone CR to submit
+// it (see inputChunks: the CR must not ride in on the text's write burst, or the
+// TUI folds it into the prompt as a newline instead of submitting). This is NOT a
+// substitute for Remote Control (no streamed reply here); it's a "type this and hit
+// Enter" affordance.
 
 // Cap on a single injected message (bytes of the normalized text, before the CR).
 export const MAX_INPUT_BYTES = 16 * 1024;
@@ -364,6 +369,49 @@ export function cleanInput(raw: unknown): string {
   if (typeof raw !== "string") return "";
   // deno-lint-ignore no-control-regex -- intentionally stripping C0 + DEL control bytes
   return raw.replace(/\r\n?|\n/g, " ").replace(/[\x00-\x1f\x7f]/g, "").trim();
+}
+
+// Pure: the two PTY writes a submitted message becomes — the cleaned text, then
+// the Enter keypress (CR) as its OWN chunk. sendInput paces these apart in time
+// because the Claude Code TUI tells a paste from typing by how an input burst
+// arrives: when the text and a trailing CR land in one write, the whole burst
+// reads as a paste and the CR becomes a literal newline in the prompt — so the
+// message appears but never submits ("just sits there", the reported bug). A CR
+// delivered on its own, after the text has drained, registers as a discrete
+// Enter. Split out as a pure function so the two-chunk shape is unit-testable.
+export function inputChunks(msg: string): [Uint8Array, Uint8Array] {
+  const enc = new TextEncoder();
+  return [enc.encode(msg), enc.encode("\r")];
+}
+
+// Pause between writing the message text and the Enter keypress, so the CR isn't
+// swallowed into the text's write burst (see inputChunks). It's one delay per
+// submitted message, so a value comfortably above any paste-coalescing window is
+// effectively free. This rides on the TUI's (undocumented) paste-vs-typing burst
+// heuristic rather than bracketed-paste markers — cleanInput strips ESC and this
+// raw-PTY path has no terminal emulator, so timing is the only submit signal; it
+// may need revisiting on a Claude Code TUI upgrade.
+export const SUBMIT_DELAY_MS: number = 120;
+// A zero/negative gap defeats the fix (the two writes coalesce into one read), so
+// fail loudly at import rather than silently regress.
+if (SUBMIT_DELAY_MS <= 0) throw new Error("SUBMIT_DELAY_MS must be > 0");
+
+// Write one cleaned message into a PTY input writer as a *submitted* prompt: the
+// text, then — after `delayMs` — the Enter (CR) as its own write. The pause is
+// load-bearing: with both bytes in one write the child PTY coalesces them into a
+// single read and the TUI reads the trailing CR as a paste newline, so nothing
+// submits. Callers serialize this per session (see sendInput's sendChain) so two
+// messages can't interleave their writes; kept separate so tests can drive it
+// against a fake writer.
+export async function submitInput(
+  writer: { write(chunk: Uint8Array): Promise<void> },
+  msg: string,
+  delayMs: number = SUBMIT_DELAY_MS,
+): Promise<void> {
+  const [text, enter] = inputChunks(msg);
+  await writer.write(text);
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+  await writer.write(enter);
 }
 
 // True when a session can accept typed input: server-owned, running, and still
@@ -391,9 +439,17 @@ export async function sendInput(
   if (new TextEncoder().encode(msg).length > MAX_INPUT_BYTES) {
     return { ok: false, code: 400, error: "Message is too long" };
   }
+  // Serialize sends per session. A message is two writes split by SUBMIT_DELAY_MS,
+  // so concurrent POSTs to the same session would otherwise interleave (text A,
+  // text B, CR, CR → one garbled merged submission). Chain each send onto the last
+  // so its text+gap+CR finishes before the next starts — mirrors the snapshot
+  // writer's chain (snapWriting). The stored chain swallows errors so one failed
+  // send can't poison later ones; this caller still sees its own error via `run`.
+  const writer = s.inputWriter;
+  const run = (s.sendChain ?? Promise.resolve()).then(() => submitInput(writer, msg));
+  s.sendChain = run.catch(() => {});
   try {
-    // \r is the Enter keypress in the PTY's raw input — it submits the prompt.
-    await s.inputWriter.write(new TextEncoder().encode(msg + "\r"));
+    await run;
     return { ok: true, code: 200 };
   } catch (e) {
     return { ok: false, code: 500, error: `Could not deliver message: ${isError(e) ? e.message : String(e)}` };
