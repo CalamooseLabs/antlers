@@ -45,11 +45,18 @@
 
     # Fade In screenwriting app (vendored, unfree), relocated from cala-m-os.
     fadein = pkgs.callPackage ./flakes/fadein/package.nix {};
+
+    # moosefetch — a Cala-M-OS flavored fastfetch wrapper (programs.moosefetch).
+    # The readout is driven by a keyword list (reads like a module-import list,
+    # "" => a blank line) and the logo is a brand mark rendered to truecolor ANSI
+    # art at build time. package.nix returns a FUNCTION of config, like mkVibeWrapper.
+    mkMoosefetch = pkgs.callPackage ./flakes/moosefetch/package.nix {};
+    moosefetch = mkMoosefetch {};
   in {
     # ---- Buildable packages: `nix build .#zed-editor`, `nix run .#zed-editor` ----
     packages.${system} =
       {
-        inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein;
+        inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein moosefetch;
         default = zed-editor;
       }
       // scripts;
@@ -76,7 +83,7 @@
     # e.g. inputs.antlers.lib.x86_64-linux.mkZedWrapper { ...zed settings... }
     #      inputs.antlers.lib.x86_64-linux.mkVibeWrapper { model = "opus"; ... }
     lib.${system} = {
-      inherit mkZedWrapper mkVibeWrapper scripts;
+      inherit mkZedWrapper mkVibeWrapper mkMoosefetch scripts;
     };
 
     # ---- Overlay so NixOS / home-manager configs can consume directly ----
@@ -89,6 +96,7 @@
         vibe = (final.callPackage ./flakes/vibe/package.nix {}) {};
         vibe-server = final.callPackage ./flakes/vibe-server/package.nix {};
         fadein = final.callPackage ./flakes/fadein/package.nix {};
+        moosefetch = (final.callPackage ./flakes/moosefetch/package.nix {}) {};
       }
       // (final.callPackages ./flakes/scripts/package.nix {});
 
@@ -103,10 +111,14 @@
       vibe = import ./flakes/vibe/module.nix self;
       vibe-server = import ./flakes/vibe-server/module.nix self;
       antlers-scripts = import ./flakes/scripts/module.nix "system";
+      moosefetch = import ./flakes/moosefetch/module.nix "system";
     };
 
-    # home-manager variant of programs.antlers-scripts (installs into home.packages).
-    homeManagerModules.antlers-scripts = import ./flakes/scripts/module.nix "home";
+    # home-manager variants (install into home.packages).
+    homeManagerModules = {
+      antlers-scripts = import ./flakes/scripts/module.nix "home";
+      moosefetch = import ./flakes/moosefetch/module.nix "home";
+    };
 
     # ---- Explicit `nix run` targets ----
     apps.${system} =
@@ -122,6 +134,10 @@
         vibe = {
           type = "app";
           program = "${vibe}/bin/vibe";
+        };
+        moosefetch = {
+          type = "app";
+          program = "${moosefetch}/bin/moosefetch";
         };
         default = self.apps.${system}.zed-editor;
       }
