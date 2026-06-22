@@ -159,6 +159,7 @@ is the default while a runtime env var (`CONFIG_PATH=… rebuild-config`) still 
 | `restore-config` | `nix-store --verify --repair` → `nh os switch` → restart NetworkManager |
 | `ssh-key-import` | pull the Yubikey FIDO2 resident SSH key into `~/.ssh` + agent |
 | `gpg-key-import` | idempotently import a (Yubikey) GPG public key into your keyring |
+| `yubikey-clone` | provision a spare Yubikey — diagnose + clone the OpenPGP git-signing/SSH keys, generate fresh FIDO2 + age identities |
 | `github-repo-puller` | clone / fast-forward a configured set of GitHub repos |
 | `chromium-ephemeral` | ungoogled-chromium with a throwaway, deleted-on-exit profile |
 | `bridge-internet` | share the host's internet over an ethernet NIC (dnsmasq + nftables NAT) |

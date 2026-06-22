@@ -164,6 +164,31 @@ location: {
                 }
               ];
             }))
+            ++ (optional cfg.yubikey-clone.enable (wrap {
+              pkg = "yubikey-clone";
+              env = [
+                {
+                  name = "GPG_KEY_ID";
+                  value = cfg.yubikey-clone.keyId;
+                }
+                {
+                  name = "GPG_PUBLIC_KEY_FILE";
+                  value = cfg.yubikey-clone.publicKeyFile;
+                }
+                {
+                  name = "SSH_BACKUP_KEY_NAME";
+                  value = cfg.yubikey-clone.sshBackupKeyName;
+                }
+                {
+                  name = "SSH_FIDO2_APPLICATION";
+                  value = cfg.yubikey-clone.fido2Application;
+                }
+                {
+                  name = "CONFIG_PATH";
+                  value = cfg.yubikey-clone.configPath;
+                }
+              ];
+            }))
             ++ (optional cfg.bridge-internet.enable (wrap {
               pkg = "bridge-internet";
               env = [
@@ -343,6 +368,13 @@ location: {
             gpg-key-import = scriptModule {
               keyFile = strOpt "/run/agenix/yubigpg.asc";
               keyId = strOpt "50D56BF0B93CA212";
+            };
+            yubikey-clone = scriptModule {
+              keyId = strOpt "50D56BF0B93CA212";
+              publicKeyFile = strOpt "/run/agenix/yubigpg.asc";
+              sshBackupKeyName = strOpt "backup_id_ed25519_sk";
+              fido2Application = strOpt "ssh:";
+              configPath = strOpt "/etc/nixos";
             };
             bridge-internet = scriptModule {
               ipRange = strOpt "10.0.0";

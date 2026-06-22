@@ -38,6 +38,8 @@
   direnv,
   openssh,
   gnupg,
+  yubikey-manager,
+  age-plugin-yubikey,
   systemd,
   sqlite,
   dnsmasq,
@@ -83,6 +85,8 @@ in {
 
   # --- Tier 2: host-coupled, parameterized (defaults reproduce current hosts) ---
   gpg-key-import = mk "gpg-key-import" [gnupg coreutils];
+  # Provision a spare Yubikey (clone OpenPGP git/SSH keys; fresh FIDO2 + age).
+  yubikey-clone = mk "yubikey-clone" [gnupg yubikey-manager age-plugin-yubikey openssh coreutils gnugrep gnused gawk];
   remote-kvm = mk "remote-kvm" [curl chromium coreutils];
   pi-imager = mk "pi-imager" [rpi-imager];
   # One generic Servarr restore tool; the module instantiates <app>-restore wrappers.
