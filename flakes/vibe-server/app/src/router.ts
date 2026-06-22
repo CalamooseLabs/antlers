@@ -13,6 +13,7 @@ import {
   passwordRequired,
 } from "./auth.ts";
 import {
+  canSendInput,
   deregisterExternal,
   getSession,
   heartbeatExternal,
@@ -20,6 +21,7 @@ import {
   listSessions,
   registerExternal,
   registerTokenMatches,
+  sendInput,
   sessionCount,
   setSessionState,
   spawnSession,
@@ -214,6 +216,8 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
         // Resolved launcher pins, for the session Details view.
         model: p ? p.model : "",
         effort: p ? p.effort : "",
+        // Whether the UI may offer "Message" (server-owned running PTY session).
+        canInput: canSendInput(s.id),
       };
     });
     return json({ sessions });
@@ -372,6 +376,17 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     // 200 once a commit landed (even if a later push failed — the result carries
     // the per-directory details); 400 only when nothing was committed.
     return json(result, result.committed ? 200 : 400);
+  }
+
+  // Type a message into a running session's Claude Code prompt (a PTY write of the
+  // text + Enter). Like Kill/commit-push, server-owned sessions only — sendInput
+  // re-checks external/running/PTY-writer and returns the HTTP code (external →
+  // 409, gone → 404, no writer/not running → 409, empty/too-long → 400).
+  const inp = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/message$/);
+  if (inp && method === "POST") {
+    const body: Record<string, unknown> = await readJsonLimited(req).catch(() => ({}));
+    const r = await sendInput(inp[1], body.message);
+    return json(r.ok ? { ok: true } : { error: r.error }, r.code);
   }
 
   return json({ error: "Not found" }, 404);

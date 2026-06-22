@@ -50,6 +50,10 @@ interface Session {
   info: SessionInfo;
   child: Deno.ChildProcess | null; // null for sessions re-adopted after a restart
   logPath: string;
+  // The PTY's input side, so the web UI can type into the session's prompt (see
+  // sendInput). Present only for server-spawned pty sessions; absent for headless
+  // (pty=false) and re-adopted sessions (no child handle → no stdin). Closed on exit.
+  inputWriter?: WritableStreamDefaultWriter<Uint8Array>;
   // For external (self-registered) sessions: the per-registration token the
   // launcher echoes back on heartbeat/deregister, and the last heartbeat time.
   deregToken?: string;
@@ -190,7 +194,10 @@ export async function spawnSession(config: ServerConfig, preset: PresetConfig): 
       VIBE_SESSION_ID: id,
       ...buildEnv(config),
     },
-    stdin: "null",
+    // A pty session gets a piped stdin so the web UI can type into the prompt:
+    // `script` forwards whatever we write to it into the child's PTY (the exact
+    // channel claude auth login's code-paste uses). Headless commands keep it null.
+    stdin: config.pty ? "piped" : "null",
     stdout: "piped",
     stderr: "piped",
   });
@@ -204,6 +211,10 @@ export async function spawnSession(config: ServerConfig, preset: PresetConfig): 
     } catch { /* ignore */ }
     throw new Error(`Failed to launch session: ${isError(e) ? e.message : String(e)}`);
   }
+
+  // Hold the PTY's input side for sendInput. Only `config.pty` spawns a piped
+  // stdin (accessing child.stdin otherwise throws), so guard on it.
+  const inputWriter = config.pty ? child.stdin.getWriter() : undefined;
 
   const info: SessionInfo = {
     id,
@@ -292,9 +303,13 @@ export async function spawnSession(config: ServerConfig, preset: PresetConfig): 
     try {
       logFile.close();
     } catch { /* ignore */ }
+    // Streams drained ⇒ the process is gone; release the stdin writer (best-effort,
+    // it may already be errored). Closing sends EOF to `script`, which is harmless
+    // post-exit.
+    if (inputWriter) inputWriter.close().catch(() => {});
   });
 
-  sessions.set(id, { info, child, logPath });
+  sessions.set(id, { info, child, logPath, inputWriter });
   void saveSnapshot(config.stateDir);
   return info;
 }
@@ -328,6 +343,61 @@ export function killSession(id: string): boolean {
     if (s.info.status === "terminating") term("SIGKILL");
   }, 5000);
   return true;
+}
+
+// ---- typed input into a running session's prompt (PTY write) ----
+//
+// The web UI can send a one-off message to a server-spawned session's Claude Code
+// prompt: we write it into the session's PTY (via the held stdin writer, which
+// `script` forwards to the child) followed by a CR to submit it — the same channel
+// the claude-auth code-paste proves works. This is NOT a substitute for Remote
+// Control (no streamed reply here); it's a "type this and hit Enter" affordance.
+
+// Cap on a single injected message (bytes of the normalized text, before the CR).
+export const MAX_INPUT_BYTES = 16 * 1024;
+
+// Pure: normalize a web-submitted message into the text typed at the prompt.
+// Newlines collapse to spaces so a multi-line paste arrives as ONE prompt (rather
+// than submitting line-by-line at each LF), and remaining control bytes are dropped
+// so nothing can inject terminal escape sequences into the TUI. "" if empty.
+export function cleanInput(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  // deno-lint-ignore no-control-regex -- intentionally stripping C0 + DEL control bytes
+  return raw.replace(/\r\n?|\n/g, " ").replace(/[\x00-\x1f\x7f]/g, "").trim();
+}
+
+// True when a session can accept typed input: server-owned, running, and still
+// holding a live PTY writer (not external, not re-adopted after a restart — those
+// have no child handle and thus no stdin). Surfaced to the UI as `canInput`.
+export function canSendInput(id: string): boolean {
+  const s = sessions.get(id);
+  return !!s && !s.info.external && s.info.status === "running" && !!s.inputWriter;
+}
+
+// Type a message into a running PTY session's prompt and submit it (text + CR).
+// Returns an HTTP-shaped result the route maps directly (code is also set on
+// success = 200). Best-effort: a write that races the process exiting is a 500.
+export async function sendInput(
+  id: string,
+  raw: unknown,
+): Promise<{ ok: boolean; code: number; error?: string }> {
+  const s = sessions.get(id);
+  if (!s) return { ok: false, code: 404, error: "Not found" };
+  if (s.info.external) return { ok: false, code: 409, error: "External sessions are driven from their own terminal" };
+  if (s.info.status !== "running") return { ok: false, code: 409, error: "Session is not running" };
+  if (!s.inputWriter) return { ok: false, code: 409, error: "Input is unavailable for this session" };
+  const msg = cleanInput(raw);
+  if (!msg) return { ok: false, code: 400, error: "A message is required" };
+  if (new TextEncoder().encode(msg).length > MAX_INPUT_BYTES) {
+    return { ok: false, code: 400, error: "Message is too long" };
+  }
+  try {
+    // \r is the Enter keypress in the PTY's raw input — it submits the prompt.
+    await s.inputWriter.write(new TextEncoder().encode(msg + "\r"));
+    return { ok: true, code: 200 };
+  } catch (e) {
+    return { ok: false, code: 500, error: `Could not deliver message: ${isError(e) ? e.message : String(e)}` };
+  }
 }
 
 // ---- externally-registered (manually-run `vibe`) sessions ----

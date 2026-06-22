@@ -13,7 +13,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  body { margin: 0; font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
     background: #0d1117; color: #c9d1d9; }
   header { display: flex; align-items: center; justify-content: space-between;
     padding: 12px 20px; border-bottom: 1px solid #21262d; }
@@ -23,11 +23,20 @@ export const INDEX_HTML = `<!DOCTYPE html>
   button:hover { background: #30363d; }
   button.primary { background: #238636; border-color: #2ea043; color: #fff; }
   button.danger { background: #6e2222; border-color: #b62324; color: #fff; }
-  main { padding: 20px; max-width: 1200px; margin: 0 auto; }
+  main { padding: 24px 28px; max-width: 1280px; margin: 0 auto; }
   select, input { font: inherit; background: #0d1117; color: #c9d1d9;
     border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; }
+  /* Checkboxes must NOT inherit the text-input box styling above (padding/border
+     would bloat them) nor the .authstep flex-stretch below — keep them small and
+     left of their label. */
+  input[type="checkbox"] { flex: 0 0 auto; width: 16px; height: 16px; margin: 0;
+    padding: 0; border: 0; background: none; border-radius: 0; accent-color: #2ea043; cursor: pointer; }
   table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #21262d; }
+  /* The rows are deliberately no-wrap (name/actions stay on one line), so the table
+     has a hard min-width. Scroll it INSIDE this wrapper at every width so an
+     overflowing table never makes the whole page body scroll horizontally. */
+  .table-wrap { overflow-x: auto; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid #21262d; }
   th { color: #8b949e; font-weight: 600; }
   .pill { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
   .running { background: #133a1b; color: #56d364; }
@@ -46,6 +55,14 @@ export const INDEX_HTML = `<!DOCTYPE html>
   .dot-failed { background: #f85149; }
   .dot-exited { background: transparent; border: 1px solid #6e7681; }
   .toktag { color: #8b949e; font-size: 12px; margin-left: 6px; }
+  /* Keep rows from wrapping: name on one line, long dir paths ellipsize (full path
+     in the title tooltip + Details), and the action buttons stay on a single
+     right-aligned line in a shrink-to-fit column. */
+  .nmcell { white-space: nowrap; }
+  .dpath { display: block; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.actions { width: 1%; }
+  .actions { gap: 6px; flex-wrap: nowrap; justify-content: flex-end; }
+  .actions button { padding: 5px 9px; }
   .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
   .kv dt { color: #8b949e; }
   .kv dd { margin: 0; color: #c9d1d9; word-break: break-word; }
@@ -63,7 +80,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
   @media (max-width: 640px) {
     main { padding: 12px; }
     th, td { padding: 6px 6px; }
-    table { display: block; overflow-x: auto; white-space: nowrap; }
+    table { white-space: nowrap; } /* single-line rows; .table-wrap handles the scroll */
   }
   /* ---- add-directory file browser ---- */
   .fs-list { border: 1px solid #21262d; border-radius: 6px; max-height: 42vh; overflow: auto; }
@@ -86,7 +103,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
   .authstep { margin: 0 0 18px; }
   .authstep h3 { font-size: 13px; margin: 0 0 8px; color: #8b949e; font-weight: 600; }
   .authstep .row { gap: 8px; }
-  .authstep input { flex: 1 1 240px; }
+  .authstep input:not([type="checkbox"]) { flex: 1 1 240px; }
   a.authurl { color: #58a6ff; word-break: break-all; }
   .authstatus { min-height: 20px; margin-top: 6px; color: #8b949e; }
   .authstatus.err { color: #ff7b72; }
@@ -94,7 +111,9 @@ export const INDEX_HTML = `<!DOCTYPE html>
   /* ---- claude plan-usage panel ---- */
   #usagePanel { margin: 0 0 14px; border: 1px solid #21262d; border-radius: 8px;
     padding: 10px 14px; background: #0f141b; }
-  #usagePanel .uhead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  #usagePanel .uhead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px;
+    cursor: pointer; user-select: none; }
+  #usagePanel .uhead .caret { color: #8b949e; flex: 0 0 auto; }
   #usagePanel .utitle { color: #8b949e; font-weight: 600; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
   #usagePanel .unote { color: #8b949e; font-size: 11px; }
   #usagePanel .unote.stale { color: #d29922; }
@@ -196,12 +215,14 @@ export const INDEX_HTML = `<!DOCTYPE html>
       <span class="muted" id="startErr"></span>
     </div>
 
-    <table>
-      <thead>
-        <tr><th></th><th>Session</th><th>Directory</th><th>Status</th><th>Started</th><th></th></tr>
-      </thead>
-      <tbody id="sessions"></tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th></th><th>Session</th><th>Directory</th><th>Status</th><th>Started</th><th></th></tr>
+        </thead>
+        <tbody id="sessions"></tbody>
+      </table>
+    </div>
 
     <div id="logView" class="hidden">
       <div class="row" style="margin-top:20px">
@@ -282,6 +303,30 @@ export const INDEX_HTML = `<!DOCTYPE html>
         </div>
       </div>
     </div>
+
+    <div id="messageModal" class="backdrop hidden" role="dialog" aria-modal="true"
+         aria-labelledby="messageTitle" tabindex="-1" onclick="messageBackdrop(event)">
+      <div class="dialog" onclick="event.stopPropagation()">
+        <div class="dialog-head">
+          <h2 id="messageTitle">Send message</h2>
+          <span class="spacer"></span>
+          <button onclick="closeMessage()" aria-label="Close">✕</button>
+        </div>
+        <div class="dialog-body">
+          <div class="authstep">
+            <div class="meta" style="margin-bottom:8px">Typed into the session's Claude Code prompt and submitted (Enter). For a full back-and-forth, drive the session from Remote Control on claude.ai.</div>
+            <h3>Message</h3>
+            <textarea id="messageText" rows="4" placeholder="Type a message to the session…"
+                      autocomplete="off" style="width:100%;box-sizing:border-box;resize:vertical"></textarea>
+            <div class="row" style="margin-top:12px">
+              <button class="primary" id="messageSend" onclick="submitMessage()">Send</button>
+              <span class="muted">Ctrl+Enter to send</span>
+            </div>
+            <div class="authstatus" id="messageState"></div>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
 </div>
 
@@ -291,6 +336,7 @@ let pwRequired = true; // set from /api/auth-mode on load; false = passwordless
 let usagePoll = null;          // interval re-fetching the cached usage snapshot
 let usageTick = null;          // 1s interval re-rendering reset countdowns locally
 let usageResetEls = [];        // [{ el, resetsAt }] countdown spans the tick updates
+let usageCollapsed = loadUsageCollapsed(); // panel collapse state; survives the 20s re-render + reloads
 
 async function api(path, opts) {
   const r = await fetch(path, { headers: { "content-type": "application/json" }, ...opts });
@@ -455,8 +501,13 @@ async function refresh() {
       '<td class="muted">' + fmtTime(s.startedAt) + uptimeStr(s) + '</td>' +
       '<td class="row actions"></td>';
     // CRITICAL: s.path is attacker-influenced for external (self-registered)
-    // sessions, so set it via textContent — never interpolate it into innerHTML.
-    tr.querySelector(".dircell").textContent = s.path;
+    // sessions, so set it via textContent / the .title property — never interpolate
+    // it into innerHTML. The span ellipsizes long paths; the title shows the full one.
+    const dpath = document.createElement("span");
+    dpath.className = "dpath";
+    dpath.textContent = s.path;
+    dpath.title = s.path;
+    tr.querySelector(".dircell").appendChild(dpath);
     const nm = tr.querySelector(".nmcell");
     nm.appendChild(document.createTextNode(s.name + " "));
     const copyBtn = document.createElement("button");
@@ -500,6 +551,15 @@ async function refresh() {
     detBtn.setAttribute("aria-label", "Session details for " + s.name);
     detBtn.onclick = () => openDetails(s);
     actions.appendChild(detBtn);
+    // Type a message into the session's prompt — only for running, server-owned PTY
+    // sessions (the server re-checks; the route is the real gate).
+    if (s.canInput) {
+      const msgBtn = document.createElement("button");
+      msgBtn.textContent = "Message";
+      msgBtn.setAttribute("aria-label", "Send a message to " + s.name);
+      msgBtn.onclick = () => openMessage(s);
+      actions.appendChild(msgBtn);
+    }
     // Commit & Push — only on running, server-owned sessions, only when the
     // feature is enabled and commit isn't touch-gated (server re-checks anyway).
     if (s.canCommit && s.status === "running" && !s.external) {
@@ -729,6 +789,19 @@ function fmtAgo(ms) {
   return Math.floor(m / 60) + "h ago";
 }
 
+function loadUsageCollapsed() {
+  try { return localStorage.getItem("vibe.usageCollapsed") === "1"; } catch (_) { return false; }
+}
+
+function saveUsageCollapsed(v) {
+  try { localStorage.setItem("vibe.usageCollapsed", v ? "1" : "0"); } catch (_) { /* private mode, etc. */ }
+}
+
+function applyUsageCollapsed(body, caret) {
+  if (usageCollapsed) { body.classList.add("hidden"); caret.textContent = "▸"; }
+  else { body.classList.remove("hidden"); caret.textContent = "▾"; }
+}
+
 function renderUsage(state) {
   const panel = document.getElementById("usagePanel");
   usageResetEls = [];
@@ -738,6 +811,9 @@ function renderUsage(state) {
 
   const head = document.createElement("div");
   head.className = "uhead";
+  const caret = document.createElement("span");
+  caret.className = "caret";
+  head.appendChild(caret);
   const title = document.createElement("span");
   title.className = "utitle";
   title.textContent = "Claude usage" + (state.subscriptionType ? " · " + state.subscriptionType : "");
@@ -751,12 +827,24 @@ function renderUsage(state) {
   head.appendChild(note);
   panel.appendChild(head);
 
+  // Body holds the bars; the head toggles it. Collapse state lives in the module
+  // var (this whole panel is rebuilt every poll, so a DOM-only toggle would reset).
+  const body = document.createElement("div");
+  body.className = "ubody";
+  panel.appendChild(body);
+  head.onclick = () => {
+    usageCollapsed = !usageCollapsed;
+    saveUsageCollapsed(usageCollapsed);
+    applyUsageCollapsed(body, caret);
+  };
+  applyUsageCollapsed(body, caret);
+
   if (!wins.length) {
     if (state.available || !state.error) {
       const p = document.createElement("div");
       p.className = "muted";
       p.textContent = "No usage data yet.";
-      panel.appendChild(p);
+      body.appendChild(p);
     }
     return;
   }
@@ -787,7 +875,7 @@ function renderUsage(state) {
     row.appendChild(bar);
     row.appendChild(pctEl);
     row.appendChild(reset);
-    panel.appendChild(row);
+    body.appendChild(row);
   }
 }
 
@@ -1206,6 +1294,8 @@ function renderFile(f) {
 // ===== commit & push modal =====
 let commitSession = null;   // the session whose commit modal is open
 let commitLastFocus = null; // element to restore focus to on close
+let messageSession = null;  // the session whose send-message modal is open
+let messageLastFocus = null;
 
 function openCommit(s) {
   commitSession = s;
@@ -1362,13 +1452,86 @@ async function submitCommit() {
   }
 }
 
+// ===== send-message modal =====
+function openMessage(s) {
+  messageSession = s;
+  messageLastFocus = document.activeElement;
+  const modal = document.getElementById("messageModal");
+  document.getElementById("messageTitle").textContent = "Send message — " + s.name;
+  const ta = document.getElementById("messageText");
+  ta.value = "";
+  document.getElementById("messageSend").disabled = false;
+  setMessageStatusMsg("", "");
+  modal.classList.remove("hidden");
+  modal.focus();
+  ta.focus();
+}
+
+function closeMessage() {
+  const modal = document.getElementById("messageModal");
+  if (modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  messageSession = null;
+  document.getElementById("messageText").value = "";
+  if (messageLastFocus && messageLastFocus.focus) messageLastFocus.focus();
+  messageLastFocus = null;
+}
+
+function messageBackdrop(ev) { if (ev.target && ev.target.id === "messageModal") closeMessage(); }
+
+function setMessageStatusMsg(cls, msg) {
+  const el = document.getElementById("messageState");
+  el.className = "authstatus" + (cls ? " " + cls : "");
+  el.textContent = msg || "";
+}
+
+async function submitMessage() {
+  if (!messageSession) return;
+  const id = messageSession.id;
+  // A late response must not touch the DOM / log out if the modal was closed or a
+  // different session opened while the request was in flight.
+  const stale = () => !messageSession || messageSession.id !== id;
+  const ta = document.getElementById("messageText");
+  const text = ta.value;
+  if (!text.trim()) { setMessageStatusMsg("err", "Type a message first."); return; }
+  const btn = document.getElementById("messageSend");
+  btn.disabled = true;
+  setMessageStatusMsg("", "Sending…");
+  try {
+    const r = await api("/api/sessions/" + id + "/message", {
+      method: "POST",
+      body: JSON.stringify({ message: text })
+    });
+    if (stale()) return;
+    if (r.status === 401) { closeMessage(); return logout(); }
+    const d = await r.json().catch(() => ({}));
+    if (stale()) return;
+    if (r.ok && d.ok) {
+      ta.value = "";           // keep the modal open so you can send another
+      setMessageStatusMsg("ok", "Sent.");
+      ta.focus();
+    } else {
+      setMessageStatusMsg("err", d.error || ("Failed to send (HTTP " + r.status + ")."));
+    }
+  } catch (e) {
+    if (!stale()) setMessageStatusMsg("err", "Network error.");
+  } finally {
+    if (!stale()) btn.disabled = false;
+  }
+}
+
 document.getElementById("pw").addEventListener("keydown", (e) => {
   if (e.key === "Enter") login();
+});
+
+document.getElementById("messageText").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitMessage(); }
 });
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!document.getElementById("authModal").classList.contains("hidden")) { closeAuth(); return; }
+  if (!document.getElementById("messageModal").classList.contains("hidden")) { closeMessage(); return; }
   if (!document.getElementById("commitModal").classList.contains("hidden")) { closeCommit(); return; }
   if (!document.getElementById("detailsModal").classList.contains("hidden")) { closeDetails(); return; }
   if (!document.getElementById("diffModal").classList.contains("hidden")) closeDiff();
@@ -1383,6 +1546,7 @@ setInterval(() => {
   if (!document.getElementById("authModal").classList.contains("hidden")) return;
   if (!document.getElementById("commitModal").classList.contains("hidden")) return;
   if (!document.getElementById("detailsModal").classList.contains("hidden")) return;
+  if (!document.getElementById("messageModal").classList.contains("hidden")) return;
   refresh();
 }, 3000);
 
