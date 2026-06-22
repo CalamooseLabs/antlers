@@ -31,6 +31,12 @@ export const INDEX_HTML = `<!DOCTYPE html>
      left of their label. */
   input[type="checkbox"] { flex: 0 0 auto; width: 16px; height: 16px; margin: 0;
     padding: 0; border: 0; background: none; border-radius: 0; accent-color: #2ea043; cursor: pointer; }
+  /* A checkbox + its label on one line. Do NOT use the generic .row here: its
+     flex-wrap:wrap drops a long label onto its own line (and away from the box).
+     The box stays fixed at the left; the label takes the remaining width and wraps
+     its own text. */
+  .checkline { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; cursor: pointer; }
+  .checkline > span { flex: 1 1 auto; min-width: 0; }
   table { width: 100%; border-collapse: collapse; margin-top: 16px; }
   /* The rows are deliberately no-wrap (name/actions stay on one line), so the table
      has a hard min-width. Scroll it INSIDE this wrapper at every width so an
@@ -61,8 +67,15 @@ export const INDEX_HTML = `<!DOCTYPE html>
   .nmcell { white-space: nowrap; }
   .dpath { display: block; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td.actions { width: 1%; }
-  .actions { gap: 6px; flex-wrap: nowrap; justify-content: flex-end; }
-  .actions button { padding: 5px 9px; }
+  /* Buttons go in an inner flex row so the <td> stays a real table-cell and
+     contributes its full width to the table — an overflowing row then scrolls
+     inside .table-wrap instead of the buttons overlapping the neighbouring
+     columns. Do NOT make the <td> itself display:flex (that drops it out of the
+     table layout, so it no longer reserves width) and do NOT add .row here (its
+     flex-wrap:wrap would stack the buttons into a squished vertical column). */
+  .actbtns { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; justify-content: flex-end; }
+  .actbtns > * { flex: 0 0 auto; white-space: nowrap; }
+  .actbtns button { padding: 5px 9px; }
   .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
   .kv dt { color: #8b949e; }
   .kv dd { margin: 0; color: #c9d1d9; word-break: break-word; }
@@ -289,10 +302,10 @@ export const INDEX_HTML = `<!DOCTYPE html>
             <h3 style="margin-top:12px">YubiKey PIN</h3>
             <input id="commitPin" type="password" placeholder="OpenPGP card PIN"
                    autocomplete="off" style="width:100%;box-sizing:border-box" />
-            <label id="commitPushRow" class="row" style="margin-top:10px">
+            <label id="commitPushRow" class="checkline" style="margin-top:10px">
               <input id="commitPush" type="checkbox" /> <span class="muted">Push after committing</span>
             </label>
-            <label id="commitAllRow" class="row" style="margin-top:10px;display:none">
+            <label id="commitAllRow" class="checkline" style="margin-top:10px;display:none">
               <input id="commitAll" type="checkbox" /> <span class="muted" id="commitAllLabel">Apply to all directories in this preset</span>
             </label>
             <div class="row" style="margin-top:12px">
@@ -499,7 +512,7 @@ async function refresh() {
       '<td class="muted dircell"></td>' +
       '<td><span class="pill ' + pillClass + '">' + pillText + '</span>' + tokTag + '</td>' +
       '<td class="muted">' + fmtTime(s.startedAt) + uptimeStr(s) + '</td>' +
-      '<td class="row actions"></td>';
+      '<td class="actions"><div class="actbtns"></div></td>';
     // CRITICAL: s.path is attacker-influenced for external (self-registered)
     // sessions, so set it via textContent / the .title property — never interpolate
     // it into innerHTML. The span ellipsizes long paths; the title shows the full one.
@@ -523,7 +536,7 @@ async function refresh() {
       tag.title = "Started by hand on the server; managed from its own terminal / claude.ai";
       nm.appendChild(tag);
     }
-    const actions = tr.querySelector(".actions");
+    const actions = tr.querySelector(".actbtns");
     if (safeLoginUrl(s.loginUrl)) {
       const a = document.createElement("a");
       a.href = s.loginUrl;

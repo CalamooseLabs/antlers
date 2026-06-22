@@ -164,28 +164,28 @@ location: {
                 }
               ];
             }))
-            ++ (optional cfg.yubikey-clone.enable (wrap {
-              pkg = "yubikey-clone";
+            ++ (optional cfg.yubikey-provision.enable (wrap {
+              pkg = "yubikey-provision";
               env = [
                 {
-                  name = "GPG_KEY_ID";
-                  value = cfg.yubikey-clone.keyId;
+                  name = "SSH_KEY_FILE";
+                  value = cfg.yubikey-provision.keyFile;
+                } # dropped when "" -> script default $HOME/.ssh/id_ed25519
+                {
+                  name = "PIV_SLOT";
+                  value = cfg.yubikey-provision.slot;
                 }
                 {
-                  name = "GPG_PUBLIC_KEY_FILE";
-                  value = cfg.yubikey-clone.publicKeyFile;
+                  name = "PIV_PIN_POLICY";
+                  value = cfg.yubikey-provision.pinPolicy;
                 }
                 {
-                  name = "SSH_BACKUP_KEY_NAME";
-                  value = cfg.yubikey-clone.sshBackupKeyName;
-                }
-                {
-                  name = "SSH_FIDO2_APPLICATION";
-                  value = cfg.yubikey-clone.fido2Application;
+                  name = "PIV_TOUCH_POLICY";
+                  value = cfg.yubikey-provision.touchPolicy;
                 }
                 {
                   name = "CONFIG_PATH";
-                  value = cfg.yubikey-clone.configPath;
+                  value = cfg.yubikey-provision.configPath;
                 }
               ];
             }))
@@ -369,11 +369,11 @@ location: {
               keyFile = strOpt "/run/agenix/yubigpg.asc";
               keyId = strOpt "50D56BF0B93CA212";
             };
-            yubikey-clone = scriptModule {
-              keyId = strOpt "50D56BF0B93CA212";
-              publicKeyFile = strOpt "/run/agenix/yubigpg.asc";
-              sshBackupKeyName = strOpt "backup_id_ed25519_sk";
-              fido2Application = strOpt "ssh:";
+            yubikey-provision = scriptModule {
+              keyFile = strOpt ""; # "" => keep the script's $HOME/.ssh/id_ed25519 default
+              slot = strOpt "9a";
+              pinPolicy = strOpt "once";
+              touchPolicy = strOpt "cached";
               configPath = strOpt "/etc/nixos";
             };
             bridge-internet = scriptModule {
