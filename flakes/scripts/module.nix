@@ -102,6 +102,15 @@ location: {
                 }
               ];
             }))
+            ++ (optional cfg.remote-build.enable (wrap {
+              pkg = "remote-build";
+              env = [
+                {
+                  name = "REMOTE_BUILD_PATH";
+                  value = cfg.remote-build.configPath;
+                }
+              ];
+            }))
             ++ (optional cfg.edit-config.enable (wrap {
               pkg = "edit-config";
               env = [
@@ -168,10 +177,6 @@ location: {
               pkg = "yubikey-provision";
               env = [
                 {
-                  name = "SSH_KEY_FILE";
-                  value = cfg.yubikey-provision.keyFile;
-                } # dropped when "" -> script default $HOME/.ssh/id_ed25519
-                {
                   name = "PIV_SLOT";
                   value = cfg.yubikey-provision.slot;
                 }
@@ -182,6 +187,22 @@ location: {
                 {
                   name = "PIV_TOUCH_POLICY";
                   value = cfg.yubikey-provision.touchPolicy;
+                }
+                {
+                  name = "PIV_ALGO";
+                  value = cfg.yubikey-provision.algo;
+                }
+                {
+                  name = "GPG_ALGO";
+                  value = cfg.yubikey-provision.gpgAlgo;
+                }
+                {
+                  name = "GPG_EXPIRE";
+                  value = cfg.yubikey-provision.gpgExpire;
+                }
+                {
+                  name = "GPG_TOUCH";
+                  value = cfg.yubikey-provision.gpgTouch;
                 }
                 {
                   name = "CONFIG_PATH";
@@ -357,6 +378,7 @@ location: {
             enable = mkEnableOption "the antlers reusable script collection";
 
             rebuild-config = scriptModule {configPath = strOpt "/etc/nixos";};
+            remote-build = scriptModule {configPath = strOpt "/etc/nixos";};
             edit-config = scriptModule {configDir = strOpt "/etc/nixos";};
             restore-config = scriptModule {configPath = strOpt "/etc/nixos";};
             ssh-key-import = scriptModule {keyName = strOpt "id_ed25519_sk";};
@@ -370,10 +392,13 @@ location: {
               keyId = strOpt "50D56BF0B93CA212";
             };
             yubikey-provision = scriptModule {
-              keyFile = strOpt ""; # "" => keep the script's $HOME/.ssh/id_ed25519 default
-              slot = strOpt "9a";
+              slot = strOpt "9a"; # PIV slot for the generated SSH key
               pinPolicy = strOpt "once";
               touchPolicy = strOpt "cached";
+              algo = strOpt "auto"; # PIV key algorithm; auto => ED25519 (fw>=5.7) else ECCP256
+              gpgAlgo = strOpt "auto"; # OpenPGP key algorithm; auto => 25519 (fw>=5.2.3) else rsa2048
+              gpgExpire = strOpt "0"; # OpenPGP key expiry; 0 => never
+              gpgTouch = strOpt "cached"; # signature-key touch policy (ykman openpgp set-touch)
               configPath = strOpt "/etc/nixos";
             };
             bridge-internet = scriptModule {

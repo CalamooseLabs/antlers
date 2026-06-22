@@ -27,7 +27,7 @@ location: {
           # builder's opinionated default layout apply" (forwarding [] would
           # render an empty readout instead).
           pkg = mkMoosefetch ({
-              inherit (cfg) logo logoFile logoSize logoColors separator keyColor keyMap extraConfig;
+              inherit (cfg) logo logoFile logoSize logoColors logoPaddingRight separator keyColor keyMap extraConfig;
             }
             // lib.optionalAttrs (cfg.modules != []) {inherit (cfg) modules;});
         in {
@@ -74,6 +74,16 @@ location: {
               type = types.str;
               default = "full";
               description = ''chafa color depth: "full" (24-bit truecolor), "256", "240", "16", "8", "2", or "none".'';
+            };
+
+            logoPaddingRight = mkOption {
+              type = types.ints.unsigned;
+              default = 4;
+              description = ''
+                Cells of padding between the logo and the info column (the gap).
+                Widen it together with a larger `logoSize` to push the info column
+                toward the right edge and fill the terminal width.
+              '';
             };
 
             separator = mkOption {

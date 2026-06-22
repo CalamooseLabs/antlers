@@ -54,6 +54,9 @@
   # chafa render geometry (cells) and color depth. "full" = 24-bit truecolor.
   logoSize ? "24x12",
   logoColors ? "full",
+  # Cells of padding between the logo and the info column (the gap). Widen it
+  # alongside a larger `logoSize` to push the info toward the right edge.
+  logoPaddingRight ? 4,
   # The "<key>:<value>" separator and an optional key color (a fastfetch color
   # name like "blue"/"green" or "" for the fastfetch default).
   separator ? "  ",
@@ -106,8 +109,7 @@
     then logoFile
     else if logo == "none"
     then null
-    else
-      builtinLogos.${logo}
+    else builtinLogos.${logo}
       or (throw "moosefetch: unknown logo \"${logo}\" — use \"calamoose\", \"cala-m-os\", \"none\", or set logoFile.");
 
   # Render PNG -> cleaned truecolor ANSI symbol art. chafa wraps the frame in
@@ -150,7 +152,7 @@
       padding = {
         top = 1;
         left = 1;
-        right = 4;
+        right = logoPaddingRight;
       };
     };
 

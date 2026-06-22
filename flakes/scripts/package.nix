@@ -37,7 +37,6 @@
   lazygit,
   direnv,
   openssh,
-  openssl,
   gnupg,
   yubikey-manager,
   systemd,
@@ -74,6 +73,9 @@
 in {
   # --- Tier 1: clean, portable CLIs ---
   rebuild-config = mk "rebuild-config" [git lazygit nh];
+  # remote-build pulls the config from its git remote, then rebuilds. git comes
+  # via `nix run nixpkgs#git` inside the body, so only nh + nix are baked in.
+  remote-build = mk "remote-build" [nh nix];
   edit-config = mk "edit-config" [direnv]; # zeditor resolves from the dev-shell PATH
   restore-config = mk "restore-config" [nh nix];
   ssh-key-import = mk "ssh-key-import" [openssh coreutils gnugrep];
@@ -85,8 +87,8 @@ in {
 
   # --- Tier 2: host-coupled, parameterized (defaults reproduce current hosts) ---
   gpg-key-import = mk "gpg-key-import" [gnupg coreutils];
-  # Import an existing SSH private key into a YubiKey PIV slot (hardware-backed SSH).
-  yubikey-provision = mk "yubikey-provision" [yubikey-manager openssh openssl coreutils gnused];
+  # Generate a fresh on-card SSH key (PIV) + OpenPGP signing key on a YubiKey.
+  yubikey-provision = mk "yubikey-provision" [yubikey-manager openssh gnupg coreutils gnused];
   remote-kvm = mk "remote-kvm" [curl chromium coreutils];
   pi-imager = mk "pi-imager" [rpi-imager];
   # One generic Servarr restore tool; the module instantiates <app>-restore wrappers.
