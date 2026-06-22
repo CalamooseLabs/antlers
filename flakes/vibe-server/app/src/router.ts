@@ -33,6 +33,7 @@ import {
   submitClaudeCode,
 } from "./claude.ts";
 import { streamLog } from "./sse.ts";
+import { getUsage } from "./usage.ts";
 import { renderLog } from "./term.ts";
 import { gitDiffMulti } from "./diff.ts";
 import { canCommit, canPush, cleanMessage, cleanPin, commitAndPushAll } from "./commit.ts";
@@ -181,6 +182,14 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     if (typeof body.code !== "string") return json({ error: "Invalid code" }, 400);
     const res = await submitClaudeCode(config, body.code);
     return json(res, res.ok ? 200 : 400);
+  }
+
+  // Live Claude plan-usage — the same server-authoritative data the interactive
+  // `/usage` shows (5h session window + weekly windows + reset times). Fetched
+  // read-only from Anthropic's OAuth usage endpoint and cached/throttled in
+  // usage.ts, so this route just returns the (possibly cached) snapshot.
+  if (path === "/api/usage" && method === "GET") {
+    return json(await getUsage(config));
   }
 
   // The launch presets (from programs.vibe.presets). The UI lists them; each is a

@@ -151,6 +151,9 @@ with lib; let
     sessionCommand = scfg.sessionCommand;
     extraEnv = scfg.extraEnv;
     inherit (scfg) requireTLS sessionNamePrefix maxLogBytes pty seedClaudeOnboarding claudeTheme;
+    # Live plan-usage panel (the same data `/usage` shows), fetched read-only.
+    usageEnabled = scfg.usage.enable;
+    usageRefreshSec = scfg.usage.refreshInterval;
     # Global Commit & Push wiring; the per-preset branch/pushRemote/touch live on
     # each preset above.
     commitPush = {
@@ -370,6 +373,37 @@ in {
       description = "Theme written into the seeded `.claude.json` so Claude Code doesn't prompt to pick one (only used when seedClaudeOnboarding is true). One of Claude Code's theme names: \"dark\", \"light\", \"dark-daltonized\", \"light-daltonized\", \"dark-ansi\", \"light-ansi\".";
     };
 
+    usage = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Show a live Claude plan-usage panel in the web UI — the same
+          server-authoritative data the interactive `/usage` command shows (the
+          ~5-hour session window plus the weekly windows, with reset countdowns).
+          It is fetched read-only from Anthropic's OAuth usage endpoint (the
+          undocumented endpoint the `claude` CLI itself calls) using the service
+          user's existing subscription login; no credentials are written. Set false
+          to remove the panel and make no outbound usage calls at all. Has no effect
+          for API-key auth (the endpoint is subscription/OAuth only) — the panel
+          then simply reports that it is unavailable.
+        '';
+      };
+
+      refreshInterval = mkOption {
+        type = types.ints.unsigned;
+        default = 300;
+        description = ''
+          How often (seconds) the server refreshes its cached usage snapshot from
+          Anthropic. Clamped to a 180s minimum in-app because the endpoint is
+          aggressively rate-limited; all browsers read the single cached value (the
+          endpoint is never hit per-viewer) and tick the reset countdowns locally,
+          so a small value here only changes how fresh the percentages are, not the
+          page's responsiveness.
+        '';
+      };
+    };
+
     commitPush = {
       enable = mkEnableOption ''
         the web "Commit & Push" button. When on, each running server-spawned session
@@ -464,10 +498,7 @@ in {
       # commitPush runs as the unit's user; the YubiKey, ~/.gnupg, and ~/.gitconfig
       # belong to a login user, so the default `vibe`/root user can't sign.
       ++ (optional (cp.enable && (scfg.runAsRoot || runUser == "vibe"))
-        "services.vibe-server: commitPush.enable is on but the service runs as ${runUser}, which almost certainly cannot reach your YubiKey/gpg-agent (the card, ~/.gnupg, and ~/.gitconfig belong to your login user). Set services.vibe-server.user to that login user (with runAsRoot = false), or Commit & Push will fail to sign.")
-      # Surface the host prerequisites once when the feature is on.
-      ++ (optional cp.enable
-        "services.vibe-server: commitPush.enable is on — a deliberate shift to letting the web UI MUTATE repos. For it to work: the signing user's gpg-agent must allow non-interactive PIN entry (`allow-loopback-pinentry` in ~/.gnupg/gpg-agent.conf, then reload), pcscd must be running, and the gpg-agent/card must be reachable by the service (e.g. `loginctl enable-linger ${runUser}`). The PIN typed in the browser transits the server in memory (a 0600 tmpfs file, one signing attempt, then deleted). A wrong PIN counts toward the card's lockout. See the module README.");
+        "services.vibe-server: commitPush.enable is on but the service runs as ${runUser}, which almost certainly cannot reach your YubiKey/gpg-agent (the card, ~/.gnupg, and ~/.gitconfig belong to your login user). Set services.vibe-server.user to that login user (with runAsRoot = false), or Commit & Push will fail to sign.");
 
     assertions = [
       {

@@ -182,6 +182,32 @@ The interaction state comes from two sources (hooks preferred):
 Both update on the table's ~3s poll. Re-adopted sessions (after a service restart)
 keep their last-known state until a hook fires again — there's no live PTY to scrape.
 
+## Usage panel
+
+A compact **Claude usage** strip sits at the top of the page (on by default;
+`services.vibe-server.usage.enable = false` removes it). It shows the same
+server-authoritative numbers the interactive `/usage` command does — the **~5-hour
+session window**, the **weekly** windows (all-models, plus Sonnet / Opus when your
+plan reports them), and any **extra-usage** credits — each as a percent bar with a
+live **resets in …** countdown.
+
+The data is the subscription account's, fetched server-side: vibe-server reads the
+OAuth access token from `.credentials.json` **read-only** (it never refreshes or
+rewrites it — a running session keeps that token fresh; if it has expired the panel
+just says a session will refresh it) and calls Anthropic's usage endpoint — the
+**undocumented** endpoint the `claude` CLI itself uses. Consequences:
+
+- it's fetched **at most once per `usage.refreshInterval`** (default 300s, floored
+  at 180s) and **cached** — every browser reads that one snapshot (the endpoint is
+  never hit per-viewer) and ticks the countdowns locally each second. The endpoint
+  is aggressively rate-limited, so the floor stays;
+- on a transient failure (rate-limit / timeout) the last good snapshot stays
+  visible, marked **stale**;
+- it only works for **subscription (OAuth) auth** — under API-key billing the panel
+  reports it's unavailable;
+- being undocumented it can change or break, so it fails soft: the rest of the UI is
+  unaffected.
+
 ## Commit & Push
 
 > **Off by default** (`commitPush.enable = false`). This is the **only** feature
@@ -316,6 +342,8 @@ services.vibe-server = {
 | `protectHome`             | `null` (auto)                    | systemd `ProtectHome`; auto `false` when a configured dir is under `/home`, else `"tmpfs"` |
 | `enableNixLd`             | `true`                           | enable nix-ld so the compiled Deno binary can run                           |
 | `pty`                     | `true`                           | allocate a PTY per session (via `script`) so interactive `claude --remote-control` doesn't fall into headless `--print` mode; disable only for a non-interactive `sessionCommand` |
+| `usage.enable`            | `true`                           | show the live **Claude usage** panel (5h + weekly windows, read-only — see [Usage panel](#usage-panel)); `false` removes it and makes no outbound usage calls. Subscription/OAuth auth only |
+| `usage.refreshInterval`   | `300`                            | seconds between server-side usage refreshes (floored at 180s in-app — the endpoint is rate-limited). Browsers read the cached value and tick countdowns locally |
 | `commitPush.enable`       | `false`                          | master switch for the web **Commit & Push** button (see [Commit & Push](#commit--push)). Off by default; the one feature that lets the UI *mutate* repos. The per-preset `branch` / `pushRemote` / `commitRequiresTouch` / `pushRequiresTouch` live on `programs.vibe.presets.<name>` |
 | `commitPush.gnupgHome`    | `null` → `<signing home>/.gnupg` | `GNUPGHOME` for the signing subprocess (card config); added to `ReadWritePaths` when enabled |
 | `commitPush.home`         | `""` → derived from `user`       | `HOME` for the commit subprocess so git reads that user's `~/.gitconfig` (identity, signingkey) |
@@ -417,6 +445,7 @@ SSE stream flowing.
 | `commit.ts`   | the **only** mutating git path: stage + YubiKey-signed commit (+ push) per directory, multi-dir orchestration (`commitAndPushAll`, aborts on the first signing failure), capability predicates, PIN-via-tmpfs loopback signing (off unless `commitPush.enable`) |
 | `suggest.ts`  | commit-message suggestion for the modal: read the `GIT_COMMIT_MSG` scratchpad, else draft one from the diff via `claude -p` (gated by `commitPush.generateMessage`) |
 | `activity.ts` | heuristic interaction-state + token scraper over the captured TUI (`classifyScreen`/`parseTokens`): thinking vs ready + `↑ N tokens`. Best-effort fallback; hooks override it |
+| `usage.ts`    | live Claude plan-usage: read the OAuth token (read-only), fetch Anthropic's usage endpoint, `parseUsage` into windows, cache + single-flight throttle (`getUsage`) |
 | `sse.ts`      | read-only SSE tail of a session log                                  |
 | `http.ts`     | JSON responses + size-capped JSON body reader                        |
 | `html.ts`     | the inlined single-page UI                                           |
@@ -440,6 +469,7 @@ Offline `deno test` units + integration, wired into `nix flake check` as
 | `commit_test.ts`  | `cleanMessage`/`cleanPin` validation, `commitArgs`/`pushArgs` (no injection), `canCommit`/`canPush` per-operation touch gating; `uniqueDirs` + `aggregateCommit` (multi-dir verdict: clean-skip, signing-abort, push-fail) |
 | `suggest_test.ts` | `cleanSuggestion` (CRLF/trim) + `joinDiffsForPrompt` (only-changed-repos, labeled by path) |
 | `activity_test.ts`| `parseTokens` (k/M scaling) + `classifyScreen` (thinking via `esc to interrupt`, ready via prompt/auto-mode, token scrape) |
+| `usage_test.ts`   | `parseUsage` (window order/labels, clamp, `used_percentage`/epoch-seconds shape, `extra_usage` gating, brace-fallback, non-object → null) + `normResetsAt` (epoch s/ms vs ISO) |
 
 Run locally: `cd app && deno test --allow-read --allow-write --allow-run --allow-env --no-lock test/`.
 Tests **must stay import-free** (use `./assert.ts`, never `jsr:`/`npm:`/`@std`) so
@@ -456,7 +486,8 @@ commitRequiresTouch, pushRequiresTouch}` plus the resolved launcher pins
 `@NAME@` substituted), `extraEnv` (extra env-var names to propagate), `requireTLS`
 (reject non-TLS), `sessionNamePrefix`, `maxLogBytes` (per-session log cap),
 `seedClaudeOnboarding` (seed `.claude.json` onboarding/trust), `claudeTheme`
-(the seeded theme), and `commitPush` (global `{enable, gpgProgram, home,
+(the seeded theme), `usageEnabled` / `usageRefreshSec` (the live usage panel +
+its refresh cadence), and `commitPush` (global `{enable, gpgProgram, home,
 gnupgHome, generateMessage}`). The Claude config dir itself is selected by the module via
 `CLAUDE_CONFIG_DIR` (default `<stateDir>/.claude`), not this file.
 
@@ -478,6 +509,7 @@ gnupgHome, generateMessage}`). The Claude config dir itself is selected by the m
 | `DELETE /api/claude-auth/login`       | yes  | abort an in-flight login                  |
 | `POST /api/claude-auth/code`          | yes  | submit the pasted authorization code (`{code}`) |
 | `GET /api/presets`                    | yes  | the launch presets (from programs.vibe.presets) |
+| `GET /api/usage`                      | yes  | live Claude plan-usage snapshot (cached/throttled): `{enabled, available, stale, fetchedAt, subscriptionType?, snapshot?: {windows[], extraEnabled}}` (see [Usage panel](#usage-panel)) |
 | `GET /api/sessions`                   | yes  | list sessions, each enriched with per-preset `canCommit` / `canPush` / `commitBranch` |
 | `POST /api/sessions`                  | yes  | spawn a session for a preset (`{preset}`) |
 | `GET /api/sessions/:id/suggest-message` | yes | a suggested commit message to pre-fill the modal — `{message, source}`, `source` ∈ `scratchpad` (`GIT_COMMIT_MSG`) / `generated` (`claude -p`) / `none`. Empty when commit isn't available for the preset |

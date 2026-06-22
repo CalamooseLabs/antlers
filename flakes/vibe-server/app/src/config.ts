@@ -78,6 +78,12 @@ export interface ServerConfig {
   // doesn't prompt to pick one. One of Claude Code's theme names, e.g. "dark",
   // "light", "dark-daltonized", "light-daltonized", "dark-ansi", "light-ansi".
   claudeTheme: string;
+  // Show the live Claude plan-usage panel (the same data `/usage` shows), fetched
+  // from Anthropic's OAuth usage endpoint read-only and cached server-side.
+  usageEnabled: boolean;
+  // Seconds between server-side usage refreshes; floored at 180s in usage.ts to
+  // respect the endpoint's rate limiting. Browsers poll the cached value faster.
+  usageRefreshSec: number;
   // YubiKey-signed "Commit & Push" feature (off by default). See above.
   commitPush: CommitPushConfig;
 }
@@ -96,6 +102,8 @@ export const DEFAULTS: ServerConfig = {
   pty: true,
   seedClaudeOnboarding: true,
   claudeTheme: "dark",
+  usageEnabled: true,
+  usageRefreshSec: 300,
   commitPush: {
     enable: false,
     gpgProgram: "",

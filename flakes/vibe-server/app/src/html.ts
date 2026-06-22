@@ -91,6 +91,21 @@ export const INDEX_HTML = `<!DOCTYPE html>
   .authstatus { min-height: 20px; margin-top: 6px; color: #8b949e; }
   .authstatus.err { color: #ff7b72; }
   .authstatus.ok { color: #56d364; }
+  /* ---- claude plan-usage panel ---- */
+  #usagePanel { margin: 0 0 14px; border: 1px solid #21262d; border-radius: 8px;
+    padding: 10px 14px; background: #0f141b; }
+  #usagePanel .uhead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  #usagePanel .utitle { color: #8b949e; font-weight: 600; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+  #usagePanel .unote { color: #8b949e; font-size: 11px; }
+  #usagePanel .unote.stale { color: #d29922; }
+  .usage-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 4px 0; }
+  .usage-row .usage-label { flex: 0 0 132px; color: #c9d1d9; }
+  .usagebar { flex: 1 1 120px; background: #21262d; border-radius: 6px; height: 8px; overflow: hidden; }
+  .usagefill { height: 100%; width: 0; border-radius: 6px; background: #2ea043; transition: width .4s ease; }
+  .usagefill.warn { background: #d29922; }
+  .usagefill.crit { background: #f85149; }
+  .usage-pct { flex: 0 0 auto; min-width: 42px; text-align: right; color: #c9d1d9; font-variant-numeric: tabular-nums; }
+  .usage-reset { flex: 0 0 130px; text-align: right; color: #8b949e; font-size: 12px; }
   #login { max-width: 360px; margin: 12vh auto; text-align: center; }
   #login h1 { letter-spacing: 2px; }
   #login .row { justify-content: center; margin-top: 14px; }
@@ -174,6 +189,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
   </header>
   <main>
     <div id="authBanner" class="hidden"></div>
+    <div id="usagePanel" class="hidden"></div>
     <div class="row">
       <select id="preset"></select>
       <button class="primary" onclick="startSession()">Start session</button>
@@ -272,6 +288,9 @@ export const INDEX_HTML = `<!DOCTYPE html>
 <script>
 let es = null;
 let pwRequired = true; // set from /api/auth-mode on load; false = passwordless
+let usagePoll = null;          // interval re-fetching the cached usage snapshot
+let usageTick = null;          // 1s interval re-rendering reset countdowns locally
+let usageResetEls = [];        // [{ el, resetsAt }] countdown spans the tick updates
 
 async function api(path, opts) {
   const r = await fetch(path, { headers: { "content-type": "application/json" }, ...opts });
@@ -288,6 +307,7 @@ async function login() {
 
 async function logout() {
   await api("/api/logout", { method: "POST" });
+  stopUsage();
   closeLog();
   closeDiff();
   closeCommit();
@@ -307,6 +327,7 @@ function show() {
   loadPresets();
   refresh();
   checkAuth();
+  startUsage();
 }
 
 async function loadPresets() {
@@ -674,6 +695,130 @@ function closeAuth() {
 
 function authBackdrop(ev) {
   if (ev.target && ev.target.id === "authModal") closeAuth();
+}
+
+// ===== claude plan-usage panel =====
+// The server caches/throttles the actual endpoint; the browser just polls that
+// cache (cheap) and ticks the reset countdowns locally each second.
+
+function usageFillClass(pct) {
+  if (pct >= 90) return "usagefill crit";
+  if (pct >= 75) return "usagefill warn";
+  return "usagefill";
+}
+
+function fmtUntil(ms) {
+  const d = ms - Date.now();
+  if (!(d > 0)) return "resets now";
+  const s = Math.floor(d / 1000);
+  const days = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (days) return "resets in " + days + "d " + h + "h";
+  if (h) return "resets in " + h + "h " + m + "m";
+  if (m) return "resets in " + m + "m";
+  return "resets in <1m";
+}
+
+function fmtAgo(ms) {
+  if (typeof ms !== "number") return "just now";
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return s + "s ago";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m ago";
+  return Math.floor(m / 60) + "h ago";
+}
+
+function renderUsage(state) {
+  const panel = document.getElementById("usagePanel");
+  usageResetEls = [];
+  if (!state || !state.enabled) { panel.className = "hidden"; panel.innerHTML = ""; return; }
+  panel.className = "";
+  panel.innerHTML = "";
+
+  const head = document.createElement("div");
+  head.className = "uhead";
+  const title = document.createElement("span");
+  title.className = "utitle";
+  title.textContent = "Claude usage" + (state.subscriptionType ? " · " + state.subscriptionType : "");
+  head.appendChild(title);
+  const note = document.createElement("span");
+  note.className = "unote" + (state.stale ? " stale" : "");
+  const wins = (state.snapshot && state.snapshot.windows) || [];
+  if (state.stale) note.textContent = (state.error || "showing last known") + " · " + fmtAgo(state.fetchedAt);
+  else if (!state.available && state.error) note.textContent = state.error;
+  else if (state.fetchedAt) note.textContent = "updated " + fmtAgo(state.fetchedAt);
+  head.appendChild(note);
+  panel.appendChild(head);
+
+  if (!wins.length) {
+    if (state.available || !state.error) {
+      const p = document.createElement("div");
+      p.className = "muted";
+      p.textContent = "No usage data yet.";
+      panel.appendChild(p);
+    }
+    return;
+  }
+
+  for (const w of wins) {
+    const row = document.createElement("div");
+    row.className = "usage-row";
+    const label = document.createElement("span");
+    label.className = "usage-label";
+    label.textContent = w.label;
+    const bar = document.createElement("div");
+    bar.className = "usagebar";
+    const fill = document.createElement("div");
+    const pct = Math.max(0, Math.min(100, Number(w.utilization) || 0));
+    fill.className = usageFillClass(pct);
+    fill.style.width = pct + "%";
+    bar.appendChild(fill);
+    const pctEl = document.createElement("span");
+    pctEl.className = "usage-pct";
+    pctEl.textContent = Math.round(pct) + "%";
+    const reset = document.createElement("span");
+    reset.className = "usage-reset";
+    if (typeof w.resetsAt === "number") {
+      reset.textContent = fmtUntil(w.resetsAt);
+      usageResetEls.push({ el: reset, resetsAt: w.resetsAt });
+    }
+    row.appendChild(label);
+    row.appendChild(bar);
+    row.appendChild(pctEl);
+    row.appendChild(reset);
+    panel.appendChild(row);
+  }
+}
+
+function tickUsage() {
+  for (const r of usageResetEls) r.el.textContent = fmtUntil(r.resetsAt);
+}
+
+async function checkUsage() {
+  try {
+    const r = await api("/api/usage");
+    if (r.status === 401) return logout();
+    if (!r.ok) return;
+    const state = await r.json();
+    renderUsage(state);
+    if (state && state.enabled === false) stopUsage(); // disabled server-side — stop polling
+  } catch (e) { /* transient; the next tick retries */ }
+}
+
+function startUsage() {
+  checkUsage();
+  if (!usagePoll) {
+    usagePoll = setInterval(() => {
+      if (!document.getElementById("app").classList.contains("hidden")) checkUsage();
+    }, 20000);
+  }
+  if (!usageTick) usageTick = setInterval(tickUsage, 1000);
+}
+
+function stopUsage() {
+  if (usagePoll) { clearInterval(usagePoll); usagePoll = null; }
+  if (usageTick) { clearInterval(usageTick); usageTick = null; }
 }
 
 function openLog(s) {
