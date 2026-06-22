@@ -148,6 +148,37 @@ isolate_target() {
   done
 }
 
+# Map an OpenPGP capability field (any combination of s/e/a) to ONE card slot +
+# label with a fixed precedence (Signature=1, Encryption=2, Authentication=3),
+# and flag whether the subkey carries more than one capability (gpg then offers
+# several slots and the single number would be wrong). Echoes "slot:label:amb".
+# Both the diagnosis label and the keytocard hint derive from this, so they can
+# never disagree.
+cap_slot_label() {
+  local cap="$1" slot label n=0
+  case "$cap" in
+    *s*) slot=1 label="Signature" ;;
+    *e*) slot=2 label="Encryption" ;;
+    *a*) slot=3 label="Authentication" ;;
+    *) slot=0 label="other" ;;
+  esac
+  case "$cap" in *s*) n=$((n + 1)) ;; esac
+  case "$cap" in *e*) n=$((n + 1)) ;; esac
+  case "$cap" in *a*) n=$((n + 1)) ;; esac
+  if [ "$n" -gt 1 ]; then echo "$slot:$label:yes"; else echo "$slot:$label:no"; fi
+}
+
+# Fail closed unless EXACTLY the target Yubikey (nothing else) is connected,
+# re-checked immediately before each write: isolate_target's snapshot can go
+# stale if the source is re-inserted during a touch/PIN wait.
+assert_target_alone() {
+  local present
+  mapfile -t present < <(card_serials)
+  if [ "${#present[@]}" -ne 1 ] || [ "${present[0]:-}" != "$TARGET" ]; then
+    die "Card set changed (expected only target SN $TARGET, saw: ${present[*]:-none}). Aborting before the write."
+  fi
+}
+
 for t in ykman gpg; do
   have "$t" || die "$t not found on PATH."
 done
@@ -267,20 +298,12 @@ gpg_step() {
             kind="real"
           fi
         fi
-        # human label for capability
-        local clabel="other"
-        case "$cap" in
-          *s*) clabel="Signature" ;;
-        esac
-        case "$cap" in
-          *e*) clabel="Encryption" ;;
-        esac
-        case "$cap" in
-          *a*) clabel="Authentication" ;;
-        esac
-        echo "  subkey key $keyidx  [$clabel]  $kid  ->  $kind"
+        # Label via the shared helper so it always agrees with the keytocard hint.
+        local label
+        label="$(cap_slot_label "$cap" | cut -d: -f2)"
+        echo "  subkey key $keyidx  [$label]  $kid  ->  $kind"
         if [ "$kind" = "real" ]; then
-          plan+=("$keyidx:$cap:$clabel")
+          plan+=("$keyidx:$cap")
         fi
         ;;
     esac
@@ -340,19 +363,21 @@ gpg_step() {
   echo
   echo "In the gpg editor that opens, type EXACTLY these lines (admin PIN = card admin PIN):"
   hr
-  local p idx capf clab slot
+  local p idx capf csl slot clab amb
   for p in "${plan[@]}"; do
     idx="${p%%:*}"
-    capf="$(echo "$p" | cut -d: -f2)"
-    clab="$(echo "$p" | cut -d: -f3)"
-    slot=1
-    case "$capf" in
-      *e*) slot=2 ;;
-      *a*) slot=3 ;;
-      *s*) slot=1 ;;
-    esac
+    capf="${p#*:}"
+    csl="$(cap_slot_label "$capf")"
+    slot="$(echo "$csl" | cut -d: -f1)"
+    clab="$(echo "$csl" | cut -d: -f2)"
+    amb="$(echo "$csl" | cut -d: -f3)"
     echo "  key $idx"
-    echo "  keytocard      # then choose ($slot) $clab key, if asked"
+    if [ "$amb" = "yes" ]; then
+      echo "  keytocard      # AMBIGUOUS subkey (caps=$capf): gpg lists several slots —"
+      echo "                 # pick the one matching its role (Signature=1 / Encryption=2 / Authentication=3)"
+    else
+      echo "  keytocard      # then choose ($slot) $clab key, if asked"
+    fi
     echo "  key $idx       # deselect before the next one"
   done
   echo "  save"
@@ -361,6 +386,7 @@ gpg_step() {
     echo "Skipping the GPG write. Re-run when ready."
     return 0
   }
+  assert_target_alone
   gpg --expert --edit-key "$GPG_KEY_ID" || echo "gpg --edit-key exited non-zero." >&2
 
   # Touch policy is not auto-copied (parsing it is brittle and setting the wrong
@@ -397,16 +423,26 @@ fido2_step() {
   # shellcheck disable=SC2064
   trap "rm -rf '$outdir'" RETURN
 
+  mkdir -p "$HOME/.ssh"
+  chmod 700 "$HOME/.ssh"
+
   isolate_target "$TARGET"
+  assert_target_alone
   echo "Generating a NEW resident key on the target (touch + PIN when prompted)…"
   if ssh-keygen -t ed25519-sk -O resident -O application="$SSH_FIDO2_APPLICATION" \
     -C "yubikey-clone backup SN$TARGET" -N "" -f "$outdir/$SSH_BACKUP_KEY_NAME"; then
     local pub="$outdir/$SSH_BACKUP_KEY_NAME.pub"
-    install -m 600 "$outdir/$SSH_BACKUP_KEY_NAME" "$HOME/.ssh/$SSH_BACKUP_KEY_NAME" 2>/dev/null || true
-    install -m 644 "$pub" "$HOME/.ssh/$SSH_BACKUP_KEY_NAME.pub" 2>/dev/null || true
     echo
-    echo "New FIDO2 SSH public key (saved to ~/.ssh/$SSH_BACKUP_KEY_NAME.pub):"
+    echo "New FIDO2 SSH public key:"
     sed 's/^/  /' "$pub"
+    # Persist to ~/.ssh and only claim success if the writes actually landed.
+    if install -m 600 "$outdir/$SSH_BACKUP_KEY_NAME" "$HOME/.ssh/$SSH_BACKUP_KEY_NAME" &&
+      install -m 644 "$pub" "$HOME/.ssh/$SSH_BACKUP_KEY_NAME.pub"; then
+      echo "Saved to ~/.ssh/$SSH_BACKUP_KEY_NAME (+ .pub)."
+    else
+      echo "WARNING: could not write to ~/.ssh — the on-disk handle was NOT saved." >&2
+      note "the resident key still lives ON the Yubikey; re-extract later with: (cd ~/.ssh && ssh-keygen -K)"
+    fi
     echo
     echo "Register it so the spare can log into the installer + this user:"
     note "add as            $CONFIG_PATH/iso/public_keys/$SSH_BACKUP_KEY_NAME.pub"
@@ -439,6 +475,7 @@ age_step() {
   }
 
   isolate_target "$TARGET"
+  assert_target_alone
   local args=(--generate --serial "$TARGET" --pin-policy "$AGE_PIN_POLICY" --touch-policy "$AGE_TOUCH_POLICY")
   if [ -n "$AGE_SLOT" ]; then args+=(--slot "$AGE_SLOT"); fi
   echo "Generating (pin-policy=$AGE_PIN_POLICY touch-policy=$AGE_TOUCH_POLICY)…"

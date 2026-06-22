@@ -23,7 +23,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
   button:hover { background: #30363d; }
   button.primary { background: #238636; border-color: #2ea043; color: #fff; }
   button.danger { background: #6e2222; border-color: #b62324; color: #fff; }
-  main { padding: 20px; max-width: 1100px; margin: 0 auto; }
+  main { padding: 20px; max-width: 1200px; margin: 0 auto; }
   select, input { font: inherit; background: #0d1117; color: #c9d1d9;
     border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px; }
   table { width: 100%; border-collapse: collapse; margin-top: 16px; }
