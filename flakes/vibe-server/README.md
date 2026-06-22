@@ -148,6 +148,40 @@ opt out per-run with `VIBE_NO_REGISTER=1`. Manual sessions are *not* persisted
 across a vibe-server restart (they keep running; they just re-register on rerun),
 and the reaper retires them ~90s after their heartbeats stop.
 
+## Session status & activity
+
+Each session row carries two independent signals plus a token count:
+
+- **A colored dot (far left) — the process lifecycle.** 🟢 green = running · 🟡
+  yellow = booting (the startup window between spawn and first output) or
+  terminating · 🔴 red = failed · ⚪ gray outline = exited.
+- **A status pill — the AI interaction state** while running: **ready** (waiting for
+  your input), **thinking** (the model is working), or **completed** (a turn just
+  finished). For a non-running session the pill shows the process status instead.
+- **A live token count** (`↑ N tokens`) when one is known, and a per-row **Details**
+  button — a modal listing preset, status, state, tokens, model, effort,
+  directories, branch, created-at, pid, and the launch command.
+
+The interaction state comes from two sources (hooks preferred):
+
+1. **Claude Code hooks (authoritative).** The launcher bakes `UserPromptSubmit` →
+   thinking, `Stop` → completed, and `Notification` (idle) → ready hooks into the
+   session's `settings.json`. They fire **locally even for `--remote-control`
+   sessions**, and POST to a loopback callback (`POST /api/session-state`, gated by
+   the same loopback-peer + discovery-token as `/api/register`). vibe-server injects
+   `VIBE_STATE_URL` / `VIBE_STATE_TOKEN` / `VIBE_SESSION_ID` into each spawned
+   session's env so the hook — a bundled, curl-only `vibe-report-state` script — can
+   reach it. It no-ops for interactive / hand-run `vibe` (no env injected), so those
+   sessions are unaffected.
+2. **Output scrape (fallback).** Until a hook reports, vibe-server infers
+   thinking-vs-ready from the captured terminal (the TUI's `esc to interrupt` /
+   `✻ …` spinner vs an idle `❯` prompt) and reads the `↑ N tokens` count. This is a
+   best-effort heuristic over Claude Code's undocumented TUI, so hooks override it;
+   it can't tell **completed** from **ready** (only the `Stop` hook can).
+
+Both update on the table's ~3s poll. Re-adopted sessions (after a service restart)
+keep their last-known state until a hook fires again — there's no live PTY to scrape.
+
 ## Commit & Push
 
 > **Off by default** (`commitPush.enable = false`). This is the **only** feature
@@ -156,11 +190,14 @@ and the reaper retires them ~90s after their heartbeats stop.
 > whole section first.
 
 When enabled, each running **server-spawned** session grows a **Commit & Push**
-button. It opens a modal with a commit-message box and a **YubiKey PIN** field;
-on submit the server (in the session's working dir) runs `git add -A`, then
-`git commit -S` (a real OpenPGP signature by *your* key — no AI/“Co-Authored-By”
-trailer), then optionally `git push`. It's a remote analogue of the `gcommit`
-flow: the human still authorizes each commit by entering the card PIN.
+button. It opens a modal with a commit-message box (pre-filled with a suggested
+message — see below), a **YubiKey PIN** field, a
+*Push after committing* toggle, and — for a preset that spans more than one
+directory — an *Apply to all directories* toggle. On submit the server runs, in
+each selected directory, `git add -A`, then `git commit -S` (a real OpenPGP
+signature by *your* key — no AI/“Co-Authored-By” trailer), then optionally
+`git push`. It's a remote analogue of the `gcommit` flow: the human still
+authorizes each commit by entering the card PIN.
 
 **How the PIN reaches the card.** The PIN you type is written to a `0600` file on
 **tmpfs** (`/run/vibe`, never persistent disk), and git is run with
@@ -169,6 +206,31 @@ wrapper feeds it to gpg via `--pinentry-mode loopback --passphrase-file` for **o
 signing attempt** (never retried — a wrong PIN counts toward the card's 3-strike
 lockout), and the file is deleted immediately after. The PIN never touches argv,
 the captured log, or disk.
+
+**All directories in a preset.** A preset can span several directories (the first
+is the session's working dir; the rest are the launcher's `claude --add-dir`'d
+repos). With *Apply to all directories* checked — the default for a multi-dir
+preset — the commit + push runs in **every** directory the preset lists, each an
+independent repo, with the same message and PIN; uncheck it to act only on the
+session's working dir. Directories are committed in order and the run **stops at
+the first signing failure**: a wrong PIN is one strike toward the card's 3-strike
+lockout, so vibe-server never feeds it to a second card. A directory that is
+clean (or isn't a git repo) is skipped, not treated as an error; a per-directory
+push failure is reported but doesn't stop the rest. The modal reports how many
+directories committed. (Every preset directory is already in the unit's
+`ReadWritePaths`, so no extra wiring is needed.)
+
+**Suggested commit message.** When the modal opens it pre-fills the message box
+(without ever clobbering text you've already typed). Two sources, in order: (1)
+the **`GIT_COMMIT_MSG`** scratchpad at the session's working-dir root — the same
+file the `gcommit` CLI reads and signs `-F` — if the in-session Claude wrote one
+(for a multi-dir preset, the first directory that has one wins); (2) otherwise,
+when `commitPush.generateMessage` is on (the default), a one-shot `claude -p`
+**drafts** a message from the combined diff, reusing the service's Claude login.
+Both are only *suggestions* — review and edit before committing. The draft path
+costs tokens, so set `commitPush.generateMessage = false` to offer **only** the
+scratchpad (no model call); the scratchpad is always offered regardless. Served
+read-only by `GET /api/sessions/:id/suggest-message` (`{message, source}`).
 
 **Target branch (per preset).** Each preset's `branch` (default `null`) decides where
 its commits land: `null` commits on whatever branch the session is on — never
@@ -257,6 +319,7 @@ services.vibe-server = {
 | `commitPush.enable`       | `false`                          | master switch for the web **Commit & Push** button (see [Commit & Push](#commit--push)). Off by default; the one feature that lets the UI *mutate* repos. The per-preset `branch` / `pushRemote` / `commitRequiresTouch` / `pushRequiresTouch` live on `programs.vibe.presets.<name>` |
 | `commitPush.gnupgHome`    | `null` → `<signing home>/.gnupg` | `GNUPGHOME` for the signing subprocess (card config); added to `ReadWritePaths` when enabled |
 | `commitPush.home`         | `""` → derived from `user`       | `HOME` for the commit subprocess so git reads that user's `~/.gitconfig` (identity, signingkey) |
+| `commitPush.generateMessage` | `true`                        | when the commit modal opens with no `GIT_COMMIT_MSG` scratchpad, draft a suggested message from the diff via a one-shot `claude -p` (reuses the service's Claude login). `false` = offer only the scratchpad (no model call / token spend); the scratchpad is always offered |
 
 ### Example: production behind a TLS reverse proxy
 
@@ -351,7 +414,9 @@ SSE stream flowing.
 | `sessions.ts` | spawn, kill, snapshot/recover, login-URL scan, reaper; external (manually-run `vibe`) session register/heartbeat/deregister + the discovery token |
 | `presets.ts`  | the launch presets (from programs.vibe.presets): `listPresets` + `resolvePreset` (config-defined; no runtime add/remove) |
 | `diff.ts`     | read-only git working-tree diff (tracked + untracked) for the Diff modal |
-| `commit.ts`   | the **only** mutating git path: stage + YubiKey-signed commit (+ push), capability predicates, PIN-via-tmpfs loopback signing (off unless `commitPush.enable`) |
+| `commit.ts`   | the **only** mutating git path: stage + YubiKey-signed commit (+ push) per directory, multi-dir orchestration (`commitAndPushAll`, aborts on the first signing failure), capability predicates, PIN-via-tmpfs loopback signing (off unless `commitPush.enable`) |
+| `suggest.ts`  | commit-message suggestion for the modal: read the `GIT_COMMIT_MSG` scratchpad, else draft one from the diff via `claude -p` (gated by `commitPush.generateMessage`) |
+| `activity.ts` | heuristic interaction-state + token scraper over the captured TUI (`classifyScreen`/`parseTokens`): thinking vs ready + `↑ N tokens`. Best-effort fallback; hooks override it |
 | `sse.ts`      | read-only SSE tail of a session log                                  |
 | `http.ts`     | JSON responses + size-capped JSON body reader                        |
 | `html.ts`     | the inlined single-page UI                                           |
@@ -368,11 +433,13 @@ Offline `deno test` units + integration, wired into `nix flake check` as
 | `assert.ts`       | tiny zero-import assert helpers (keep tests import-free, see below)     |
 | `util_test.ts`    | `b64url` round-trip, `isValidName`, `isError`                          |
 | `auth_test.ts`    | cookie HMAC sign/verify + tamper/key-rotation, `passwordRequired`, `checkPassword`, login rate-limit |
-| `claude_test.ts`  | `extractLoginUrl` (OAuth URL out of OSC-8 escapes), `parseAuthStatus`, `mergeOnboarding`, `extractLoginError` |
+| `claude_test.ts`  | `extractLoginUrl` (OAuth URL out of OSC-8 escapes), `parseAuthStatus`, `mergeOnboarding`, `extractLoginError`; `commitMessagePrompt` (no AI trailers) + `cleanGeneratedMessage` (strip fences/trailers) |
 | `sessions_test.ts`| `shQuote` (shell-injection safety), `substitute` (`@DIR@`/`@NAME@`)    |
 | `paths_test.ts`   | `normalizeAbs`/`withinRoot` (browse-root bounding, no `..` escape), `sanitizeName`, `uniqueName`, `basenameOf`, `isLoopbackIp` |
 | `diff_test.ts`    | `gitDiff` against a temp repo: not-a-repo / clean / tracked change / untracked file / `.gitignore` exclusion |
-| `commit_test.ts`  | `cleanMessage`/`cleanPin` validation, `commitArgs`/`pushArgs` (no injection), `canCommit`/`canPush` per-operation touch gating |
+| `commit_test.ts`  | `cleanMessage`/`cleanPin` validation, `commitArgs`/`pushArgs` (no injection), `canCommit`/`canPush` per-operation touch gating; `uniqueDirs` + `aggregateCommit` (multi-dir verdict: clean-skip, signing-abort, push-fail) |
+| `suggest_test.ts` | `cleanSuggestion` (CRLF/trim) + `joinDiffsForPrompt` (only-changed-repos, labeled by path) |
+| `activity_test.ts`| `parseTokens` (k/M scaling) + `classifyScreen` (thinking via `esc to interrupt`, ready via prompt/auto-mode, token scrape) |
 
 Run locally: `cd app && deno test --allow-read --allow-write --allow-run --allow-env --no-lock test/`.
 Tests **must stay import-free** (use `./assert.ts`, never `jsr:`/`npm:`/`@std`) so
@@ -383,12 +450,14 @@ they run offline and don't perturb the build's empty deno-cache FOD.
 Read from `$VIBE_CONFIG` (default `/etc/vibe/config.json`), written by the NixOS
 module: `port`, `hostname`, `stateDir`, `passwordFile`, `presets` (from
 `programs.vibe.presets` — each `{name, directories, branch, pushRemote,
-commitRequiresTouch, pushRequiresTouch}`), `sessionCommand` (`@PRESET@` / `@DIR@` /
+commitRequiresTouch, pushRequiresTouch}` plus the resolved launcher pins
+`{model, effort, ultracode, permissionMode}` shown in the Details view),
+`sessionCommand` (`@PRESET@` / `@DIR@` /
 `@NAME@` substituted), `extraEnv` (extra env-var names to propagate), `requireTLS`
 (reject non-TLS), `sessionNamePrefix`, `maxLogBytes` (per-session log cap),
 `seedClaudeOnboarding` (seed `.claude.json` onboarding/trust), `claudeTheme`
 (the seeded theme), and `commitPush` (global `{enable, gpgProgram, home,
-gnupgHome}`). The Claude config dir itself is selected by the module via
+gnupgHome, generateMessage}`). The Claude config dir itself is selected by the module via
 `CLAUDE_CONFIG_DIR` (default `<stateDir>/.claude`), not this file.
 
 ## HTTP endpoints
@@ -402,6 +471,7 @@ gnupgHome}`). The Claude config dir itself is selected by the module via
 | `POST /api/register`                  | token | a local `vibe` self-registers (`{token,name,dir,pid}` → `{id,token}`); loopback peer only |
 | `PUT /api/register`                   | token | external-session heartbeat (`{id,token}`); loopback only |
 | `DELETE /api/register`                | token | external-session deregister (`{id,token}`); loopback only |
+| `POST /api/session-state`             | token | a session's Claude Code hook reports its interaction state (`{id,token,state,tokens?}`, state ∈ ready/thinking/completed); loopback peer + discovery token only |
 | `GET /api/me`                         | yes  | cookie check                              |
 | `GET /api/claude-auth`                | yes  | Claude account auth status + in-flight login state |
 | `POST /api/claude-auth/login`         | yes  | start (or rejoin) `claude auth login`; returns the OAuth URL |
@@ -410,7 +480,8 @@ gnupgHome}`). The Claude config dir itself is selected by the module via
 | `GET /api/presets`                    | yes  | the launch presets (from programs.vibe.presets) |
 | `GET /api/sessions`                   | yes  | list sessions, each enriched with per-preset `canCommit` / `canPush` / `commitBranch` |
 | `POST /api/sessions`                  | yes  | spawn a session for a preset (`{preset}`) |
-| `POST /api/sessions/:id/commit-push`  | yes  | stage + YubiKey-signed commit (+ optional push) of the session's tree (`{message,pin,push}`); 403 if disabled/touch-gated, 409 for external / preset-gone (see [Commit & Push](#commit--push)) |
+| `GET /api/sessions/:id/suggest-message` | yes | a suggested commit message to pre-fill the modal — `{message, source}`, `source` ∈ `scratchpad` (`GIT_COMMIT_MSG`) / `generated` (`claude -p`) / `none`. Empty when commit isn't available for the preset |
+| `POST /api/sessions/:id/commit-push`  | yes  | stage + YubiKey-signed commit (+ optional push) of the session's tree(s) (`{message,pin,push,applyAll}`; `applyAll` commits every preset directory, aborting on the first signing failure); returns per-directory `results[]`; 403 if disabled/touch-gated, 409 for external / preset-gone (see [Commit & Push](#commit--push)) |
 | `DELETE /api/sessions/:id`            | yes  | kill a session                            |
 | `GET /api/sessions/:id/logs`          | yes  | SSE stream of the captured log            |
 | `GET /api/sessions/:id/logs/download` | yes  | download the captured log (attachment)    |

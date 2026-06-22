@@ -3,9 +3,12 @@
 
 import { b64url, isError, log } from "./util.ts";
 import { buildEnv, seedTrust } from "./claude.ts";
+import { ActivityScraper, type InteractionState } from "./activity.ts";
 import type { PresetConfig, ServerConfig } from "./config.ts";
 
-export type Status = "running" | "terminating" | "exited" | "failed";
+// Process lifecycle. "booting" is the startup window between spawn and the first
+// output (Claude Code coming up); it becomes "running" once output flows.
+export type Status = "booting" | "running" | "terminating" | "exited" | "failed";
 
 export interface SessionInfo {
   id: string;
@@ -16,6 +19,18 @@ export interface SessionInfo {
   name: string;
   pid: number;
   status: Status;
+  // The AI INTERACTION state (distinct from the process `status`): is the model
+  // thinking, did it just finish a turn, or is it waiting for input. Set by the
+  // output scraper (heuristic) and/or by Claude Code hooks (authoritative). Absent
+  // until first known.
+  state?: InteractionState;
+  // True once a hook has reported state. Hooks are authoritative — they alone emit
+  // "completed" — so the moment one speaks, the heuristic scraper stops touching
+  // `state` (otherwise it would clobber a fresh "completed" with "ready" within a
+  // poll, hiding it). The scraper drives state only until the first hook fires.
+  stateFromHook?: boolean;
+  // Latest token count scraped from the session's status line ("↑ N tokens").
+  tokens?: number;
   startedAt: number;
   exitedAt?: number;
   exitCode?: number;
@@ -64,6 +79,20 @@ export function getSession(id: string): Session | undefined {
 
 export function sessionCount(): number {
   return sessions.size;
+}
+
+// Authoritatively set a server-owned session's interaction state (+ optional token
+// count) — called from the loopback callback a Claude Code hook hits. Overrides the
+// heuristic scraper. Ignores unknown / external sessions. Returns whether it applied.
+export function setSessionState(id: string, state: InteractionState, tokens?: number): boolean {
+  const s = sessions.get(id);
+  if (!s || s.info.external) return false;
+  s.info.state = state;
+  s.info.stateFromHook = true; // hooks now own state; the scraper backs off (see pump)
+  if (typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0) {
+    s.info.tokens = Math.round(tokens);
+  }
+  return true;
 }
 
 export function substitute(cmd: string[], vars: Record<string, string>): string[] {
@@ -148,7 +177,19 @@ export async function spawnSession(config: ServerConfig, preset: PresetConfig): 
     // TERM gives the PTY a sane terminal type; an allowlisted TERM overrides it.
     // VIBE_MANAGED tells the `vibe` launcher this session is already tracked by
     // the server, so it skips self-registration (POST /api/register).
-    env: { TERM: "xterm-256color", VIBE_MANAGED: "1", ...buildEnv(config) },
+    // VIBE_STATE_* let the session's Claude Code hooks report interaction state back
+    // over loopback (POST /api/session-state); the report script no-ops without them,
+    // so interactive/hand-run sessions are unaffected. These names aren't in the
+    // default claude env allowlist, so the buildEnv spread normally can't clobber them
+    // (an operator who adds one to extraEnv would override it — don't).
+    env: {
+      TERM: "xterm-256color",
+      VIBE_MANAGED: "1",
+      VIBE_STATE_URL: `http://127.0.0.1:${config.port}/api/session-state`,
+      VIBE_STATE_TOKEN: regToken,
+      VIBE_SESSION_ID: id,
+      ...buildEnv(config),
+    },
     stdin: "null",
     stdout: "piped",
     stderr: "piped",
@@ -170,7 +211,7 @@ export async function spawnSession(config: ServerConfig, preset: PresetConfig): 
     path: cwd,
     name,
     pid: child.pid,
-    status: "running",
+    status: "booting", // → "running" on first output (see the pump below)
     startedAt: Date.now(),
     command: resolved.join(" "),
   };
@@ -211,13 +252,30 @@ export async function spawnSession(config: ServerConfig, preset: PresetConfig): 
     } catch { /* log closed */ }
   };
 
-  const pump = async (stream: ReadableStream<Uint8Array>) => {
+  // Heuristic interaction-state + token scraper, fed from the PTY output (stdout).
+  // Best-effort: hooks override it when wired. The first output also flips the
+  // session "booting" → "running".
+  const activity = new ActivityScraper();
+  const pump = async (stream: ReadableStream<Uint8Array>, scrape: boolean) => {
     for await (const chunk of stream) {
+      if (info.status === "booting") info.status = "running";
       scan(chunk);
+      if (scrape) {
+        activity.push(chunk);
+        // Hooks are authoritative: once one has reported (stateFromHook), the
+        // scraper must NOT touch `state` — else it would overwrite a fresh
+        // "completed" with "ready" on the next eval and the user would never see it.
+        // Tokens have no hook source, so keep scraping them regardless.
+        if (!info.stateFromHook && activity.state && info.state !== activity.state) {
+          info.state = activity.state;
+        }
+        if (activity.tokens !== undefined && info.tokens !== activity.tokens) info.tokens = activity.tokens;
+      }
       await writeLog(chunk);
     }
   };
-  const pumps = Promise.all([pump(child.stdout), pump(child.stderr)]);
+  // Only the PTY (stdout) carries the TUI; stderr is `script`'s own diagnostics.
+  const pumps = Promise.all([pump(child.stdout, true), pump(child.stderr, false)]);
 
   child.status.then((st) => {
     // A non-zero exit within the first couple of seconds almost always means the

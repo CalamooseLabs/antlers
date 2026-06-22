@@ -16,6 +16,14 @@ export interface PresetConfig {
   pushRemote: string; // "" = the branch's configured upstream / origin
   commitRequiresTouch: boolean;
   pushRequiresTouch: boolean;
+  // The launcher pins this preset resolves to (from programs.vibe.presets, with
+  // nulls inherited from the globals). Informational only — vibe-server shows them
+  // in the session Details view; the actual pinning happens in the launcher binary.
+  // "" = unpinned / unknown.
+  model: string;
+  effort: string;
+  ultracode: boolean;
+  permissionMode: string;
 }
 
 // Global wiring for the "Commit & Push" feature (off by default). The per-preset
@@ -31,6 +39,11 @@ export interface CommitPushConfig {
   home: string;
   // GNUPGHOME for the signing subprocess (the card's config dir). "" = inherit.
   gnupgHome: string;
+  // When the commit modal opens with no GIT_COMMIT_MSG scratchpad present, draft a
+  // suggested message from the diff via a one-shot `claude -p` (reusing the
+  // service's Claude auth). false = only the scratchpad is offered (no model call,
+  // no token spend). The scratchpad is always read regardless of this flag.
+  generateMessage: boolean;
 }
 
 export interface ServerConfig {
@@ -88,6 +101,7 @@ export const DEFAULTS: ServerConfig = {
     gpgProgram: "",
     home: "",
     gnupgHome: "",
+    generateMessage: true,
   },
 };
 

@@ -33,6 +33,22 @@ export const INDEX_HTML = `<!DOCTYPE html>
   .running { background: #133a1b; color: #56d364; }
   .exited { background: #21262d; color: #8b949e; }
   .failed { background: #4a1d1d; color: #ff7b72; }
+  .booting { background: #3a2d12; color: #d29922; }
+  /* interaction-state pills (shown while running) */
+  .ready { background: #133a1b; color: #56d364; }
+  .thinking { background: #3a2d12; color: #d29922; }
+  .completed { background: #12253a; color: #58a6ff; }
+  /* far-left process-status dot */
+  .dotcell { width: 16px; padding-right: 0; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; }
+  .dot-running { background: #2ea043; }
+  .dot-booting, .dot-terminating { background: #d29922; }
+  .dot-failed { background: #f85149; }
+  .dot-exited { background: transparent; border: 1px solid #6e7681; }
+  .toktag { color: #8b949e; font-size: 12px; margin-left: 6px; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
+  .kv dt { color: #8b949e; }
+  .kv dd { margin: 0; color: #c9d1d9; word-break: break-word; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   a.loginlink { color: #d29922; text-decoration: none; border: 1px solid #9e6a03;
     background: #3a2d12; padding: 5px 10px; border-radius: 6px; }
@@ -166,7 +182,7 @@ export const INDEX_HTML = `<!DOCTYPE html>
 
     <table>
       <thead>
-        <tr><th>Session</th><th>Directory</th><th>Status</th><th>Started</th><th></th></tr>
+        <tr><th></th><th>Session</th><th>Directory</th><th>Status</th><th>Started</th><th></th></tr>
       </thead>
       <tbody id="sessions"></tbody>
     </table>
@@ -191,6 +207,18 @@ export const INDEX_HTML = `<!DOCTYPE html>
           <button onclick="closeDiff()" aria-label="Close diff">✕</button>
         </div>
         <div class="dialog-body" id="diffBody"></div>
+      </div>
+    </div>
+
+    <div id="detailsModal" class="backdrop hidden" role="dialog" aria-modal="true"
+         aria-labelledby="detailsTitle" tabindex="-1" onclick="detailsBackdrop(event)">
+      <div class="dialog" onclick="event.stopPropagation()">
+        <div class="dialog-head">
+          <h2 id="detailsTitle">Details</h2>
+          <span class="spacer"></span>
+          <button onclick="closeDetails()" aria-label="Close details">✕</button>
+        </div>
+        <div class="dialog-body"><dl class="kv" id="detailsBody"></dl></div>
       </div>
     </div>
 
@@ -220,11 +248,15 @@ export const INDEX_HTML = `<!DOCTYPE html>
             <h3>Commit message</h3>
             <textarea id="commitMsg" rows="4" placeholder="Subject line&#10;&#10;Optional body"
                       autocomplete="off" style="width:100%;box-sizing:border-box;resize:vertical"></textarea>
+            <div class="meta" id="commitSuggestNote" style="display:none;margin-top:4px"></div>
             <h3 style="margin-top:12px">YubiKey PIN</h3>
             <input id="commitPin" type="password" placeholder="OpenPGP card PIN"
                    autocomplete="off" style="width:100%;box-sizing:border-box" />
             <label id="commitPushRow" class="row" style="margin-top:10px">
               <input id="commitPush" type="checkbox" /> <span class="muted">Push after committing</span>
+            </label>
+            <label id="commitAllRow" class="row" style="margin-top:10px;display:none">
+              <input id="commitAll" type="checkbox" /> <span class="muted" id="commitAllLabel">Apply to all directories in this preset</span>
             </label>
             <div class="row" style="margin-top:12px">
               <button class="primary" id="commitSubmit" onclick="submitCommit()">Commit &amp; Push</button>
@@ -259,6 +291,7 @@ async function logout() {
   closeLog();
   closeDiff();
   closeCommit();
+  closeDetails();
   document.getElementById("app").classList.add("hidden");
   // Passwordless mode has nothing to sign out to — re-run the boot decision,
   // which signs back in automatically. (The Sign out button is hidden there.)
@@ -328,10 +361,21 @@ function fmtDur(ms) {
 }
 
 function uptimeStr(s) {
-  if (s.status === "running" || s.status === "terminating") return "  (" + fmtDur(Date.now() - s.startedAt) + ")";
+  if (s.status === "running" || s.status === "terminating" || s.status === "booting") return "  (" + fmtDur(Date.now() - s.startedAt) + ")";
   if (s.exitedAt) return "  (ran " + fmtDur(s.exitedAt - s.startedAt) + ")";
   return "";
 }
+
+function fmtTokens(n) {
+  if (typeof n !== "number" || !(n > 0)) return "";
+  if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\\.0$/, "") + "M";
+  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\\.0$/, "") + "k";
+  return String(n);
+}
+
+// process status → far-left dot class; whitelist so only known classes are emitted.
+const DOT_CLASSES = { running: 1, booting: 1, terminating: 1, failed: 1, exited: 1 };
+const STATE_CLASSES = { ready: 1, thinking: 1, completed: 1 };
 
 async function copyText(text, btn) {
   try {
@@ -367,16 +411,26 @@ async function refresh() {
   tb.innerHTML = "";
   if (!sessions.length) {
     const tr = document.createElement("tr");
-    tr.innerHTML = '<td colspan="5" class="muted">No sessions yet.</td>';
+    tr.innerHTML = '<td colspan="6" class="muted">No sessions yet.</td>';
     tb.appendChild(tr);
   }
   for (const s of sessions) {
     const tr = document.createElement("tr");
     const code = (s.exitCode === undefined || s.exitCode === null) ? "" : " (" + s.exitCode + ")";
+    // Far-left dot = process status; the Status cell = interaction state while
+    // running (ready/thinking/completed), else the process status word.
+    const dotClass = "dot-" + (DOT_CLASSES[s.status] ? s.status : "exited");
+    const running = s.status === "running";
+    const state = running && STATE_CLASSES[s.state] ? s.state : null;
+    const pillClass = state ? state : s.status;
+    const pillText = state ? state : (s.status + code);
+    const tok = fmtTokens(s.tokens);
+    const tokTag = tok ? '<span class="toktag">' + tok + ' tok</span>' : '';
     tr.innerHTML =
+      '<td class="dotcell"><span class="dot ' + dotClass + '" title="' + s.status + '"></span></td>' +
       '<td class="nmcell"></td>' +
       '<td class="muted dircell"></td>' +
-      '<td><span class="pill ' + s.status + '">' + s.status + code + '</span></td>' +
+      '<td><span class="pill ' + pillClass + '">' + pillText + '</span>' + tokTag + '</td>' +
       '<td class="muted">' + fmtTime(s.startedAt) + uptimeStr(s) + '</td>' +
       '<td class="row actions"></td>';
     // CRITICAL: s.path is attacker-influenced for external (self-registered)
@@ -420,6 +474,11 @@ async function refresh() {
     diffBtn.setAttribute("aria-label", "View git diff for " + s.name);
     diffBtn.onclick = () => openDiff(s);
     actions.appendChild(diffBtn);
+    const detBtn = document.createElement("button");
+    detBtn.textContent = "Details";
+    detBtn.setAttribute("aria-label", "Session details for " + s.name);
+    detBtn.onclick = () => openDetails(s);
+    actions.appendChild(detBtn);
     // Commit & Push — only on running, server-owned sessions, only when the
     // feature is enabled and commit isn't touch-gated (server re-checks anyway).
     if (s.canCommit && s.status === "running" && !s.external) {
@@ -691,6 +750,61 @@ function diffBackdrop(ev) {
   // Close only when the click is on the backdrop itself, not a bubbled child.
   if (ev.target && ev.target.id === "diffModal") closeDiff();
 }
+
+// ===== details modal =====
+let detailsLastFocus = null;
+
+// Append a key/value row. Values go through textContent (s.path/command are
+// attacker-influenced for external sessions — never innerHTML).
+function detailRow(dl, label, value, mono) {
+  const dt = document.createElement("dt");
+  dt.textContent = label;
+  const dd = document.createElement("dd");
+  if (mono) {
+    const c = document.createElement("code");
+    c.textContent = value;
+    dd.appendChild(c);
+  } else {
+    dd.textContent = value;
+  }
+  dl.appendChild(dt);
+  dl.appendChild(dd);
+}
+
+function openDetails(s) {
+  detailsLastFocus = document.activeElement;
+  const modal = document.getElementById("detailsModal");
+  document.getElementById("detailsTitle").textContent = "Details — " + s.name;
+  const dl = document.getElementById("detailsBody");
+  dl.innerHTML = "";
+  if (s.preset) detailRow(dl, "Preset", s.preset);
+  const code = (s.exitCode === undefined || s.exitCode === null) ? "" : " (exit " + s.exitCode + ")";
+  detailRow(dl, "Status", s.status + code);
+  detailRow(dl, "State", s.status === "running" ? (s.state || "ready") : "—");
+  const tok = fmtTokens(s.tokens);
+  detailRow(dl, "Tokens", tok ? tok + " tok" : "—");
+  if (s.model) detailRow(dl, "Model", s.model);
+  if (s.effort) detailRow(dl, "Effort", s.effort);
+  detailRow(dl, "Directory", s.path, true);
+  const extra = (s.directories || []).filter((d) => d !== s.path);
+  for (const d of extra) detailRow(dl, "+ dir", d, true);
+  if (s.commitBranch) detailRow(dl, "Branch", s.commitBranch);
+  detailRow(dl, "Created", new Date(s.startedAt).toLocaleString());
+  detailRow(dl, "PID", String(s.pid));
+  if (s.command) detailRow(dl, "Command", s.command, true);
+  modal.classList.remove("hidden");
+  modal.focus();
+}
+
+function closeDetails() {
+  const modal = document.getElementById("detailsModal");
+  if (modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  if (detailsLastFocus && detailsLastFocus.focus) detailsLastFocus.focus();
+  detailsLastFocus = null;
+}
+
+function detailsBackdrop(ev) { if (ev.target && ev.target.id === "detailsModal") closeDetails(); }
 
 function setDiffState(cls, msg) {
   const body = document.getElementById("diffBody");
@@ -968,6 +1082,17 @@ function openCommit(s) {
   const pushRow = document.getElementById("commitPushRow");
   pushRow.style.display = canPush ? "" : "none";
   document.getElementById("commitPush").checked = canPush;
+  // "Apply to all directories" — only shown when the preset spans more than one.
+  // Default ON: committing a multi-dir session is meant to cover every directory;
+  // the user can uncheck to limit it to the session's working dir.
+  const dirs = s.directories || [];
+  const multi = dirs.length > 1;
+  document.getElementById("commitAllRow").style.display = multi ? "" : "none";
+  document.getElementById("commitAll").checked = multi;
+  document.getElementById("commitAllLabel").textContent = "Apply to all " + dirs.length + " directories in this preset";
+  const sNote = document.getElementById("commitSuggestNote");
+  sNote.style.display = "none";
+  sNote.textContent = "";
   const submit = document.getElementById("commitSubmit");
   submit.textContent = canPush ? "Commit & Push" : "Commit";
   // Re-arm in case a previous submit left it disabled after a stale response.
@@ -976,6 +1101,41 @@ function openCommit(s) {
   modal.classList.remove("hidden");
   modal.focus();
   document.getElementById("commitMsg").focus();
+  // Offer a suggested message (gcommit scratchpad, else a generated draft). Async:
+  // fills only if the field is still empty and this same modal is still open.
+  fillSuggestedMessage(s);
+}
+
+// Fetch a suggested commit message and pre-fill the (still-empty) textarea. Never
+// clobbers what the user typed while the request was in flight, and bails if the
+// modal closed or switched sessions.
+async function fillSuggestedMessage(s) {
+  const id = s.id;
+  const ta = document.getElementById("commitMsg");
+  const note = document.getElementById("commitSuggestNote");
+  note.textContent = "Looking for a suggested message…";
+  note.style.display = "";
+  let d = null;
+  try {
+    const r = await api("/api/sessions/" + id + "/suggest-message");
+    if (!commitSession || commitSession.id !== id) return;
+    if (!r.ok) { note.style.display = "none"; return; }
+    d = await r.json().catch(() => null);
+  } catch (e) {
+    if (commitSession && commitSession.id === id) note.style.display = "none";
+    return;
+  }
+  if (!commitSession || commitSession.id !== id) return;
+  if (ta.value.trim()) { note.style.display = "none"; return; }
+  if (d && d.message) {
+    ta.value = d.message;
+    note.textContent = d.source === "scratchpad"
+      ? "Pre-filled from GIT_COMMIT_MSG — review and edit before committing."
+      : "Drafted from your changes — review and edit before committing.";
+    note.style.display = "";
+  } else {
+    note.style.display = "none";
+  }
 }
 
 function closeCommit() {
@@ -986,6 +1146,9 @@ function closeCommit() {
   // Never leave the typed PIN sitting in the DOM after the modal closes.
   document.getElementById("commitPin").value = "";
   document.getElementById("commitMsg").value = "";
+  const note = document.getElementById("commitSuggestNote");
+  note.style.display = "none";
+  note.textContent = "";
   if (commitLastFocus && commitLastFocus.focus) commitLastFocus.focus();
   commitLastFocus = null;
 }
@@ -1009,13 +1172,15 @@ async function submitCommit() {
   const pin = document.getElementById("commitPin").value;
   if (!pin) { setCommitStatusMsg("err", "Enter your card PIN."); return; }
   const push = !!commitSession.canPush && document.getElementById("commitPush").checked;
+  const applyAll = (commitSession.directories || []).length > 1 && document.getElementById("commitAll").checked;
   const btn = document.getElementById("commitSubmit");
   btn.disabled = true;
-  setCommitStatusMsg("", push ? "Committing & pushing… (touch your key if it blinks)" : "Committing…");
+  const verb = push ? "Committing & pushing" : "Committing";
+  setCommitStatusMsg("", verb + (applyAll ? " all directories" : "") + "… (touch your key if it blinks)");
   try {
     const r = await api("/api/sessions/" + id + "/commit-push", {
       method: "POST",
-      body: JSON.stringify({ message: msg, pin: pin, push: push })
+      body: JSON.stringify({ message: msg, pin: pin, push: push, applyAll: applyAll })
     });
     if (stale()) return;
     if (r.status === 401) { closeCommit(); return logout(); }
@@ -1023,15 +1188,25 @@ async function submitCommit() {
     if (stale()) return;
     if (r.ok && d.ok) {
       document.getElementById("commitPin").value = ""; // clear the PIN on success
-      let m = "Committed";
-      if (d.sha) m += " " + d.sha;
+      const done = (d.results || []).filter((x) => x.committed);
+      let m;
+      if (done.length > 1) {
+        m = "Committed in " + done.length + " directories";
+      } else {
+        m = "Committed";
+        if (done[0] && done[0].sha) m += " " + done[0].sha;
+      }
       if (d.pushed) m += " and pushed";
       setCommitStatusMsg("ok", m + ".");
       setTimeout(() => { closeCommit(); refresh(); }, 1400);
     } else if (d.committed) {
-      // The commit landed but a later push failed — keep the modal open with detail.
+      // A commit landed but a later step failed (a push, or a subsequent
+      // directory) — keep the modal open with the detail, noting any dirs that
+      // did commit before the failure.
       document.getElementById("commitPin").value = "";
-      setCommitStatusMsg("err", d.error || "Committed, but the push failed.");
+      const n = (d.results || []).filter((x) => x.committed).length;
+      const prefix = n > 1 ? "Committed in " + n + " directories, then a later step failed: " : "";
+      setCommitStatusMsg("err", prefix + (d.error || "Committed, but a later step failed."));
     } else {
       setCommitStatusMsg("err", d.error || ("Commit failed (HTTP " + r.status + ")."));
     }
@@ -1050,6 +1225,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!document.getElementById("authModal").classList.contains("hidden")) { closeAuth(); return; }
   if (!document.getElementById("commitModal").classList.contains("hidden")) { closeCommit(); return; }
+  if (!document.getElementById("detailsModal").classList.contains("hidden")) { closeDetails(); return; }
   if (!document.getElementById("diffModal").classList.contains("hidden")) closeDiff();
 });
 
@@ -1061,6 +1237,7 @@ setInterval(() => {
   if (!document.getElementById("diffModal").classList.contains("hidden")) return;
   if (!document.getElementById("authModal").classList.contains("hidden")) return;
   if (!document.getElementById("commitModal").classList.contains("hidden")) return;
+  if (!document.getElementById("detailsModal").classList.contains("hidden")) return;
   refresh();
 }, 3000);
 

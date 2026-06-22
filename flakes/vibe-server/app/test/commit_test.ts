@@ -1,7 +1,8 @@
-import { canCommit, canPush, checkoutArgs, cleanMessage, cleanPin, commitArgs, commitPushEnabled, pushArgs, validBranch } from "../src/commit.ts";
+import { aggregateCommit, canCommit, canPush, checkoutArgs, cleanMessage, cleanPin, commitArgs, commitPushEnabled, pushArgs, uniqueDirs, validBranch } from "../src/commit.ts";
+import type { CommitPushResult } from "../src/commit.ts";
 import { DEFAULTS } from "../src/config.ts";
 import type { CommitPushConfig, PresetConfig, ServerConfig } from "../src/config.ts";
-import { assert, assertEquals } from "./assert.ts";
+import { assert, assertEquals, assertStringIncludes } from "./assert.ts";
 
 // Build a ServerConfig whose (global) commitPush is the given partial.
 function cfg(cp: Partial<CommitPushConfig>): ServerConfig {
@@ -10,7 +11,7 @@ function cfg(cp: Partial<CommitPushConfig>): ServerConfig {
 
 // Build a PresetConfig (the per-preset commit/touch fields live here now).
 function preset(p: Partial<PresetConfig>): PresetConfig {
-  return { name: "p", directories: ["/x"], branch: "", pushRemote: "", commitRequiresTouch: false, pushRequiresTouch: false, ...p };
+  return { name: "p", directories: ["/x"], branch: "", pushRemote: "", commitRequiresTouch: false, pushRequiresTouch: false, model: "", effort: "", ultracode: false, permissionMode: "", ...p };
 }
 
 Deno.test("cleanMessage trims and rejects empty / whitespace-only", () => {
@@ -103,4 +104,65 @@ Deno.test("capabilities: per-preset touch gating (feature enabled)", () => {
   // pushRequiresTouch on the preset → commit stays, push off.
   assertEquals(canCommit(c, preset({ pushRequiresTouch: true })), true);
   assertEquals(canPush(c, preset({ pushRequiresTouch: true })), false);
+});
+
+// ---- multi-directory commit (uniqueDirs + aggregateCommit) ----
+
+// Build one per-directory result; defaults are a benign "nothing happened".
+function r(path: string, p: Partial<CommitPushResult>): { path: string } & CommitPushResult {
+  return { path, ok: false, committed: false, pushed: false, stage: "check", ...p };
+}
+
+Deno.test("uniqueDirs de-duplicates, preserving first-seen order", () => {
+  assertEquals(uniqueDirs(["/a", "/b", "/a", "/c", "/b"]), ["/a", "/b", "/c"]);
+  assertEquals(uniqueDirs([]), []);
+  assertEquals(uniqueDirs(["/only"]), ["/only"]);
+});
+
+Deno.test("aggregateCommit: all dirs committed (and pushed) ⇒ ok", () => {
+  const a = aggregateCommit([
+    r("/a", { ok: true, committed: true, pushed: true, stage: "done" }),
+    r("/b", { ok: true, committed: true, pushed: true, stage: "done" }),
+  ], false, 2);
+  assertEquals(a, { ok: true, committed: true, pushed: true, error: undefined });
+});
+
+Deno.test("aggregateCommit: a clean/non-repo dir is a benign skip, not a failure", () => {
+  const a = aggregateCommit([
+    r("/clean", { skipped: true, error: "Nothing to commit — the working tree is clean." }),
+    r("/work", { ok: true, committed: true, stage: "done" }),
+  ], false, 2);
+  assertEquals(a.ok, true);
+  assertEquals(a.committed, true);
+});
+
+Deno.test("aggregateCommit: every dir clean ⇒ not ok, nothing committed", () => {
+  const multi = aggregateCommit([r("/a", { skipped: true }), r("/b", { skipped: true })], false, 2);
+  assertEquals(multi.ok, false);
+  assertEquals(multi.committed, false);
+  assertStringIncludes(multi.error ?? "", "all directories are clean");
+  // Single-dir phrasing differs (matches the original single-dir message).
+  const one = aggregateCommit([r("/a", { skipped: true })], false, 1);
+  assertStringIncludes(one.error ?? "", "the working tree is clean");
+});
+
+Deno.test("aggregateCommit: a signing abort surfaces the PIN error + the skip note", () => {
+  // The loop stopped at the commit (signing) stage after one dir, with 2 more left.
+  const a = aggregateCommit([r("/secret/repo", { stage: "commit", error: "gpg: signing failed: Bad PIN" })], true, 3);
+  assertEquals(a.ok, false);
+  assertEquals(a.committed, false);
+  assertStringIncludes(a.error ?? "", "Bad PIN");
+  assertStringIncludes(a.error ?? "", "skipped 2 more");
+});
+
+Deno.test("aggregateCommit: commit landed but push failed ⇒ committed, not ok", () => {
+  const a = aggregateCommit([
+    r("/srv/app", { ok: true, committed: true, pushed: true, stage: "done" }),
+    r("/srv/lib", { committed: true, stage: "push", error: "Committed, but the push failed: rejected" }),
+  ], false, 2);
+  assertEquals(a.committed, true);
+  assertEquals(a.ok, false);
+  // Multi-dir errors are prefixed with the offending directory's basename.
+  assertStringIncludes(a.error ?? "", "lib:");
+  assertStringIncludes(a.error ?? "", "push failed");
 });

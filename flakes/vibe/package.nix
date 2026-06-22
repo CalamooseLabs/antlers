@@ -66,19 +66,50 @@
   # the top-level defaults by the caller (the programs.vibe module).
   presets ? {},
 }: let
+  # Report this session's interaction state to a local vibe-server, IF one injected
+  # the callback env (VIBE_STATE_URL/TOKEN/SESSION_ID — server-spawned sessions
+  # only). A no-op otherwise, so interactive / hand-run `vibe` is unaffected; always
+  # best-effort (never fails a hook). curl is bundled so it needs nothing on PATH.
+  reportState = writeShellApplication {
+    name = "vibe-report-state";
+    runtimeInputs = [curl];
+    text = ''
+      [ -n "''${VIBE_STATE_URL:-}" ] || exit 0
+      curl -fsS -m 5 -X POST "''${VIBE_STATE_URL}" \
+        -H 'content-type: application/json' \
+        --data-binary "{\"id\":\"''${VIBE_SESSION_ID:-}\",\"token\":\"''${VIBE_STATE_TOKEN:-}\",\"state\":\"$1\"}" \
+        >/dev/null 2>&1 || true
+    '';
+  };
+
+  # Claude Code hooks that map turn lifecycle → vibe-server interaction state:
+  # UserPromptSubmit → thinking, Stop → completed, Notification (idle/waiting) →
+  # ready. Hooks fire LOCALLY even for --remote-control sessions, so this works for
+  # the browser-driven sessions vibe-server spawns.
+  stateHooks = {
+    UserPromptSubmit = [{hooks = [{type = "command"; command = "${reportState}/bin/vibe-report-state thinking";}];}];
+    Stop = [{hooks = [{type = "command"; command = "${reportState}/bin/vibe-report-state completed";}];}];
+    Notification = [{hooks = [{type = "command"; command = "${reportState}/bin/vibe-report-state ready";}];}];
+  };
+
   mkSettings = {
     model,
     effort,
     ultracode,
     permissions,
-  }:
-    (lib.optionalAttrs (model != null) {inherit model;})
-    // (lib.optionalAttrs (effort != null) {effortLevel = effort;})
-    # ultracode is a Claude Code settings.json toggle (xhigh effort + dynamic
-    # workflow orchestration), orthogonal to effortLevel — delivered via --settings.
-    // (lib.optionalAttrs ultracode {ultracode = true;})
-    // (lib.optionalAttrs (permissions != {}) {inherit permissions;})
-    // extraSettings;
+  }: let
+    base =
+      (lib.optionalAttrs (model != null) {inherit model;})
+      // (lib.optionalAttrs (effort != null) {effortLevel = effort;})
+      # ultracode is a Claude Code settings.json toggle (xhigh effort + dynamic
+      # workflow orchestration), orthogonal to effortLevel — delivered via --settings.
+      // (lib.optionalAttrs ultracode {ultracode = true;})
+      // (lib.optionalAttrs (permissions != {}) {inherit permissions;});
+    merged = base // extraSettings;
+  in
+    # Bake the state-reporting hooks; an operator's extraSettings.hooks override
+    # per-event (shallow merge, so their event wins; others keep reporting).
+    merged // {hooks = stateHooks // (merged.hooks or {});};
 
   settings = mkSettings {inherit model effort ultracode permissions;};
 

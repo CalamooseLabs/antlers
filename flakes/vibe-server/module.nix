@@ -123,12 +123,28 @@ with lib; let
     # Presets (from programs.vibe.presets) — the server needs each one's dirs +
     # per-preset commit settings; the launcher pins are baked into the launcher.
     presets =
-      mapAttrsToList (name: p: {
+      mapAttrsToList (name: p: let
+        rp = resolvedPresets.${name}; # resolved launcher pins (model/effort/…)
+      in {
         inherit name;
         inherit (p) directories pushRemote commitRequiresTouch pushRequiresTouch;
         branch =
           if p.branch != null
           then p.branch
+          else "";
+        # Informational pins for the session Details view (null → "").
+        model =
+          if rp.model != null
+          then rp.model
+          else "";
+        effort =
+          if rp.effort != null
+          then rp.effort
+          else "";
+        ultracode = rp.ultracode == true;
+        permissionMode =
+          if rp.permissionMode != null
+          then rp.permissionMode
           else "";
       })
       vibePresets;
@@ -151,6 +167,7 @@ with lib; let
         if cp.enable
         then gnupgHomePath
         else "";
+      inherit (cp) generateMessage;
     };
   });
 
@@ -367,6 +384,19 @@ in {
         control which branch a preset commits to and whether a touch gates it. See the
         README.
       '';
+
+      generateMessage = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          When the Commit & Push modal opens with no `GIT_COMMIT_MSG` scratchpad in
+          the working tree, draft a suggested commit message from the diff with a
+          one-shot `claude -p` (reusing the service's Claude auth). Set false to only
+          ever offer the scratchpad message (no model call, no token spend). The
+          `GIT_COMMIT_MSG` scratchpad — the same file the `gcommit` CLI reads — is
+          always offered regardless of this option.
+        '';
+      };
 
       gnupgHome = mkOption {
         type = types.nullOr types.str;

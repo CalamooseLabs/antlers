@@ -21,6 +21,7 @@ import {
   registerExternal,
   registerTokenMatches,
   sessionCount,
+  setSessionState,
   spawnSession,
 } from "./sessions.ts";
 import { listPresets, resolvePreset } from "./presets.ts";
@@ -34,7 +35,8 @@ import {
 import { streamLog } from "./sse.ts";
 import { renderLog } from "./term.ts";
 import { gitDiffMulti } from "./diff.ts";
-import { canCommit, canPush, cleanMessage, cleanPin, commitAndPush } from "./commit.ts";
+import { canCommit, canPush, cleanMessage, cleanPin, commitAndPushAll } from "./commit.ts";
+import { suggestCommitMessage } from "./suggest.ts";
 import { json, readJsonLimited } from "./http.ts";
 import { INDEX_HTML } from "./html.ts";
 import { isLoopbackIp, isValidName } from "./util.ts";
@@ -132,6 +134,26 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     return json({ error: "Method not allowed" }, 405);
   }
 
+  // ---- loopback interaction-state callback (a Claude Code hook in a server-spawned
+  // session reports thinking/completed/ready). Gated exactly like /api/register:
+  // loopback peer + the discovery token. NOT cookie-gated — the session has no
+  // cookie; it reads the token + its own id from its (server-injected) env. ----
+  if (path === "/api/session-state" && method === "POST") {
+    if (!isLoopbackIp(peerIp)) return json({ error: "Forbidden" }, 403);
+    const body: Record<string, unknown> = await readJsonLimited(req).catch(() => ({}));
+    if (typeof body.token !== "string" || !registerTokenMatches(body.token)) {
+      return json({ error: "Unauthorized" }, 401);
+    }
+    if (typeof body.id !== "string") return json({ error: "Invalid id" }, 400);
+    const state = body.state;
+    if (state !== "ready" && state !== "thinking" && state !== "completed") {
+      return json({ error: "Invalid state" }, 400);
+    }
+    const tokens = typeof body.tokens === "number" ? body.tokens : undefined;
+    const ok = setSessionState(body.id, state, tokens);
+    return json({ ok }, ok ? 200 : 404);
+  }
+
   // Everything below requires authentication.
   if (!await isAuthed(req)) return json({ error: "Unauthorized" }, 401);
 
@@ -177,6 +199,12 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
         canCommit: p ? canCommit(config, p) : false,
         canPush: p ? canPush(config, p) : false,
         commitBranch: p ? p.branch : "",
+        // The preset's full directory list (config-derived) so the commit modal can
+        // offer "apply to all N directories" for a multi-dir session.
+        directories: p ? p.directories : [],
+        // Resolved launcher pins, for the session Details view.
+        model: p ? p.model : "",
+        effort: p ? p.effort : "",
       };
     });
     return json({ sessions });
@@ -292,7 +320,21 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     return json(await gitDiffMulti(dirs));
   }
 
-  // Stage + YubiKey-signed commit (+ optional push) of a session's working tree.
+  // Suggest a commit message to pre-fill the modal: the gcommit GIT_COMMIT_MSG
+  // scratchpad if the session wrote one, else a `claude -p` draft from the diff
+  // (when commitPush.generateMessage is on). Read-only; only offered when commit
+  // is actually available for the preset. A failure is a soft empty suggestion.
+  const sug = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/suggest-message$/);
+  if (sug && method === "GET") {
+    const s = getSession(sug[1]);
+    if (!s) return json({ error: "Not found" }, 404);
+    const preset = s.info.external ? undefined : resolvePreset(config, s.info.preset ?? "");
+    if (!preset || !canCommit(config, preset)) return json({ message: "", source: "none" });
+    const dirs = preset.directories.length ? preset.directories : [s.info.path];
+    return json(await suggestCommitMessage(config, dirs));
+  }
+
+  // Stage + YubiKey-signed commit (+ optional push) of a session's working tree(s).
   // The ONE mutating git route — guarded hard: the session must be server-owned
   // (external → 409, like Kill — never mutate a tree managed from someone's own
   // terminal) and still preset-backed; the feature must be enabled and the preset
@@ -312,9 +354,14 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     if (!pin) return json({ error: "A valid card PIN is required" }, 400);
     // Push only when the client asked AND the preset permits it (push touch-gate).
     const doPush = body.push === true && canPush(config, preset);
-    const result = await commitAndPush(config, preset, s.info.path, message, pin, doPush);
+    // "Apply to all": commit every directory the preset spans (de-duplicated),
+    // else just the session's working dir. Same message + PIN; aborts on the first
+    // signing failure to protect the card. (Every preset dir is already in the
+    // unit's ReadWritePaths, so writing to them is permitted.)
+    const dirs = body.applyAll === true && preset.directories.length ? preset.directories : [s.info.path];
+    const result = await commitAndPushAll(config, preset, dirs, message, pin, doPush);
     // 200 once a commit landed (even if a later push failed — the result carries
-    // the details); 400 only when nothing was committed.
+    // the per-directory details); 400 only when nothing was committed.
     return json(result, result.committed ? 200 : 400);
   }
 

@@ -189,6 +189,74 @@ export async function claudeAuthStatus(config: ServerConfig): Promise<ClaudeAuth
   }
 }
 
+// ---- commit-message drafting (one-shot `claude -p`) ----
+
+const GEN_TIMEOUT_MS = 60_000; // a short non-interactive generation
+const MAX_GEN_DIFF_BYTES = 100_000; // bound the diff fed to claude (argv + tokens)
+const MAX_MESSAGE_BYTES = 64 * 1024; // commit-message cap (mirrors commit.ts)
+
+// Pure: the prompt asking for a human-style commit message. Mirrors the
+// gcommit / vibe-shell convention — a concise imperative subject + optional body,
+// and explicitly NO "Generated with Claude Code" / "Co-Authored-By" trailers
+// (these commits must read as the human author's own work).
+export function commitMessagePrompt(diff: string): string {
+  return [
+    "Write a git commit message for the following staged changes.",
+    "Use a concise, imperative subject line (<= 72 chars); if useful, add a blank",
+    "line and a short body explaining the what and why. Output ONLY the commit",
+    "message text — no code fences, no preamble or sign-off, and absolutely NO",
+    '"Generated with Claude Code" or "Co-Authored-By" trailers.',
+    "",
+    "Changes (git diff):",
+    diff,
+  ].join("\n");
+}
+
+// Pure: clean the model's raw stdout into a usable commit message — strip a
+// wrapping ```code fence```, drop any stray AI/co-author trailer it added anyway,
+// trim, and reject anything over the message cap.
+export function cleanGeneratedMessage(raw: string): string {
+  let t = raw.replace(/\r\n/g, "\n").trim();
+  const fence = t.match(/^```[^\n]*\n([\s\S]*?)\n?```$/);
+  if (fence) t = fence[1].trim();
+  t = t
+    .split("\n")
+    .filter((l) => !/^\s*(Co-Authored-By:|(\u{1F916}\s*)?Generated with )/iu.test(l))
+    .join("\n")
+    .trim();
+  if (new TextEncoder().encode(t).length > MAX_MESSAGE_BYTES) return "";
+  return t;
+}
+
+// Draft a commit message from a diff with a one-shot, non-interactive `claude -p`.
+// Reuses the service's Claude auth/config dir (same env as a session). Returns
+// null on any failure/timeout so the caller can fall back to no suggestion. The
+// diff travels on argv (capped) — claude -p reads its prompt there, same as the
+// existing `claude auth status` spawn.
+export async function generateCommitMessage(config: ServerConfig, diff: string): Promise<string | null> {
+  const clipped = diff.length > MAX_GEN_DIFF_BYTES ? diff.slice(0, MAX_GEN_DIFF_BYTES) : diff;
+  if (!clipped.trim()) return null;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), GEN_TIMEOUT_MS);
+  try {
+    const out = await new Deno.Command("claude", {
+      args: ["-p", commitMessagePrompt(clipped)],
+      env: buildEnv(config),
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+      signal: ac.signal,
+    }).output();
+    if (!out.success) return null;
+    const msg = cleanGeneratedMessage(new TextDecoder().decode(out.stdout));
+    return msg || null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ---- interactive login flow (URL + paste-back code over a PTY) ----
 
 export type LoginPhase = "idle" | "starting" | "awaiting_code" | "exchanging" | "done" | "error";

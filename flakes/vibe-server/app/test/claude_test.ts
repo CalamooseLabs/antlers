@@ -1,5 +1,5 @@
-import { extractLoginError, extractLoginUrl, mergeOnboarding, parseAuthStatus } from "../src/claude.ts";
-import { assert, assertEquals } from "./assert.ts";
+import { cleanGeneratedMessage, commitMessagePrompt, extractLoginError, extractLoginUrl, mergeOnboarding, parseAuthStatus } from "../src/claude.ts";
+import { assert, assertEquals, assertStringIncludes } from "./assert.ts";
 
 // A realistic `claude auth login` capture: the URL appears inside an OSC-8
 // terminal-hyperlink escape (ESC ] 8 ; ; <uri> ST <text> ...), then again as the
@@ -88,4 +88,32 @@ Deno.test("extractLoginError reads the failure line out of ANSI-laden output", (
   const text = "\x1b[2mPaste code here > \x1b[0mLogin failed: Request failed with status code 400\r\n";
   assertEquals(extractLoginError(text), "Login failed: Request failed with status code 400");
   assertEquals(extractLoginError("all good, no failure here"), undefined);
+});
+
+// ---- commit-message drafting (claude -p prompt + output cleaning) ----
+
+Deno.test("commitMessagePrompt embeds the diff and forbids AI/co-author trailers", () => {
+  const p = commitMessagePrompt("diff --git a/x b/x\n+hello");
+  assertStringIncludes(p, "diff --git a/x b/x");
+  assertStringIncludes(p, "imperative subject");
+  // The convention: no "Generated with Claude Code" / "Co-Authored-By" trailers.
+  assertStringIncludes(p, "Co-Authored-By");
+  assertStringIncludes(p, "Generated with Claude Code");
+});
+
+Deno.test("cleanGeneratedMessage strips code fences, trailers, and trims", () => {
+  // A bare message passes through.
+  assertEquals(cleanGeneratedMessage("  Fix the parser\n\nHandle empty input.  "), "Fix the parser\n\nHandle empty input.");
+  // A wrapping ```fence``` is removed.
+  assertEquals(cleanGeneratedMessage("```\nAdd retries\n```"), "Add retries");
+  assertEquals(cleanGeneratedMessage("```text\nAdd retries\n```"), "Add retries");
+  // CRLF is normalized.
+  assertEquals(cleanGeneratedMessage("subject\r\n\r\nbody"), "subject\n\nbody");
+  // Stray AI / co-author trailers the model may add anyway are dropped.
+  assertEquals(
+    cleanGeneratedMessage("Refactor auth\n\n\u{1F916} Generated with Claude Code\nCo-Authored-By: Claude <noreply@anthropic.com>"),
+    "Refactor auth",
+  );
+  // Empty / whitespace-only ⇒ "".
+  assertEquals(cleanGeneratedMessage("   \n\t "), "");
 });

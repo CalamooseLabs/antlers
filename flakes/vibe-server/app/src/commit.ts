@@ -21,7 +21,7 @@
 // ZERO external imports (Deno APIs + local ./*.ts only).
 
 import type { PresetConfig, ServerConfig } from "./config.ts";
-import { isError, log } from "./util.ts";
+import { basenameOf, isError, log } from "./util.ts";
 
 const COMMIT_TIMEOUT_MS = 90_000; // commit incl. card PIN verify + sign
 const PUSH_TIMEOUT_MS = 180_000; // push to a (possibly slow) remote
@@ -125,6 +125,10 @@ export interface CommitPushResult {
   // How far we got, for the UI: where it stopped (or "done").
   stage: "check" | "branch" | "stage" | "commit" | "push" | "done";
   error?: string; // human-facing message (git/gpg stderr on failure)
+  // A benign no-op: the dir was clean or not a git work tree, so nothing was
+  // committed but nothing failed either. Lets the multi-dir aggregator skip an
+  // --add-dir'd path that simply had no changes without reporting it as an error.
+  skipped?: boolean;
 }
 
 interface GitOut {
@@ -204,6 +208,7 @@ export async function commitAndPush(
   const inside = await gitw(cwd, ["rev-parse", "--is-inside-work-tree"], commitEnv(config), COMMIT_TIMEOUT_MS);
   if (inside.code !== 0 || inside.stdout.trim() !== "true") {
     res.error = "Not a git working tree.";
+    res.skipped = true; // an --add-dir'd path that isn't a repo is a benign skip
     return res;
   }
 
@@ -217,6 +222,7 @@ export async function commitAndPush(
   }
   if (status.stdout.trim() === "") {
     res.error = "Nothing to commit — the working tree is clean.";
+    res.skipped = true;
     return res;
   }
 
@@ -256,6 +262,7 @@ export async function commitAndPush(
   const staged = await gitw(cwd, ["diff", "--cached", "--quiet"], commitEnv(config), COMMIT_TIMEOUT_MS);
   if (staged.code === 0) {
     res.error = "Nothing to commit — the working tree is clean.";
+    res.skipped = true;
     return res;
   }
 
@@ -310,4 +317,107 @@ export async function commitAndPush(
   res.stage = "done";
   res.ok = true;
   return res;
+}
+
+// ---- multi-directory commit & push ----
+//
+// A preset can span several directories (the first is the session cwd, the rest
+// are the launcher's `claude --add-dir`'d repos). "Apply to all" commits/pushes
+// each one with the SAME message and PIN. Each directory is an independent repo,
+// so we just run commitAndPush per dir — but with one hard rule: STOP on the
+// first SIGNING failure. A wrong PIN is one strike against the OpenPGP card's
+// 3-strike lockout; feeding it to N cards in a loop could lock the card in a
+// single request, so the moment a commit fails at the signing stage we abort the
+// rest. A clean / non-repo dir is a benign skip; a per-dir push failure is
+// recorded but doesn't stop the others (the commit already landed).
+
+export interface MultiCommitResult {
+  ok: boolean; // every dir with changes committed (and pushed, if asked) cleanly
+  committed: boolean; // at least one dir produced a commit
+  pushed: boolean; // at least one dir pushed
+  error?: string; // a single human-facing summary for the status line
+  results: Array<{ path: string } & CommitPushResult>;
+}
+
+// De-duplicate directories, preserving first-seen order (a preset may list the
+// same path twice; the diff viewer collapses dupes the same way).
+export function uniqueDirs(dirs: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const d of dirs) {
+    if (!seen.has(d)) {
+      seen.add(d);
+      out.push(d);
+    }
+  }
+  return out;
+}
+
+// Pure: roll per-directory results into one verdict + summary message. `aborted`
+// means the loop stopped early on a signing failure; `totalDirs` is how many were
+// requested (so we can note how many were skipped to protect the card).
+export function aggregateCommit(
+  results: Array<{ path: string } & CommitPushResult>,
+  aborted: boolean,
+  totalDirs: number,
+): { ok: boolean; committed: boolean; pushed: boolean; error?: string } {
+  const committed = results.some((r) => r.committed);
+  const pushed = results.some((r) => r.pushed);
+  // A "fail" is a hard problem (signing, branch/add error, or a post-commit push
+  // failure); a "skip" (clean / non-repo) is benign and not counted as failure.
+  const fails = results.filter((r) => !r.ok && !r.skipped);
+  const successes = results.filter((r) => r.ok);
+  const multi = totalDirs > 1;
+
+  if (aborted) {
+    const sign = results.find((r) => !r.committed && r.stage === "commit");
+    let error = sign?.error ?? "Signing failed.";
+    const skipped = totalDirs - results.length;
+    if (skipped > 0) {
+      error += ` Stopped — skipped ${skipped} more director${skipped === 1 ? "y" : "ies"} so a wrong PIN can't lock the card.`;
+    }
+    return { ok: false, committed, pushed, error };
+  }
+  if (fails.length > 0) {
+    const f = fails[0];
+    let error = (multi ? basenameOf(f.path) + ": " : "") + (f.error ?? "failed");
+    if (fails.length > 1) error += ` (+${fails.length - 1} more)`;
+    return { ok: false, committed, pushed, error };
+  }
+  if (successes.length === 0) {
+    return {
+      ok: false,
+      committed,
+      pushed,
+      error: multi ? "Nothing to commit — all directories are clean." : "Nothing to commit — the working tree is clean.",
+    };
+  }
+  return { ok: true, committed, pushed };
+}
+
+// Run commitAndPush across every (de-duplicated) directory, aborting on the first
+// signing failure (card-lockout protection). Never throws across the route boundary.
+export async function commitAndPushAll(
+  config: ServerConfig,
+  preset: PresetConfig,
+  dirs: string[],
+  message: string,
+  pin: string,
+  doPush: boolean,
+): Promise<MultiCommitResult> {
+  const uniq = uniqueDirs(dirs);
+  const results: Array<{ path: string } & CommitPushResult> = [];
+  let aborted = false;
+  for (const dir of uniq) {
+    const r = await commitAndPush(config, preset, dir, message, pin, doPush);
+    results.push({ path: dir, ...r });
+    // Stopped at the signing stage with nothing committed ⇒ the card rejected the
+    // PIN (or signing is misconfigured). Do NOT try the next repo's card.
+    if (!r.committed && r.stage === "commit") {
+      aborted = true;
+      break;
+    }
+  }
+  const agg = aggregateCommit(results, aborted, uniq.length);
+  return { ...agg, results };
 }
