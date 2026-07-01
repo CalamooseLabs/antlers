@@ -48,7 +48,7 @@
     '';
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-p/D1IASUGuU6AKYlbQXMXJ0czMegF0hROFgMxRkBeOI=";
+    outputHash = "sha256-Ut0nrA0+re7q5gJ3NcXCAAAiqsfIJevEiami5CyFGr0=";
   };
 
   # denort runtime that `deno compile` needs for the target triple.
