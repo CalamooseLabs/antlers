@@ -70,6 +70,15 @@ export interface ServerConfig {
   // --remote-control` doesn't fall into headless `--print` mode. Disable only for
   // a genuinely non-interactive sessionCommand.
   pty: boolean;
+  // PTY window size (rows × cols) applied via `stty` before the command runs.
+  // `claude --remote-control` is a full-screen TUI that repaints a viewport sized
+  // to the terminal; `script`'s pipe-backed PTY otherwise reports 0×0, so
+  // Claude/Ink falls back to ~80×24 and clips longer output to the last screenful.
+  // A taller PTY renders more of each message into the captured screen. 0 = leave
+  // the PTY at its default size. Only meaningful when `pty` is true. Rows beyond the
+  // emulator grid (term.ts DEFAULT_ROWS) won't all render, so keep ≲120.
+  ptyRows: number;
+  ptyCols: number;
   // Seed the Claude config dir's .claude.json (hasCompletedOnboarding + theme +
   // per-directory trust) so a fresh service user's sessions don't block on the
   // first-run theme picker / workspace-trust dialog. See claude.ts.
@@ -100,6 +109,8 @@ export const DEFAULTS: ServerConfig = {
   sessionNamePrefix: "",
   maxLogBytes: 26214400, // 25 MiB
   pty: true,
+  ptyRows: 50,
+  ptyCols: 120,
   seedClaudeOnboarding: true,
   claudeTheme: "dark",
   usageEnabled: true,

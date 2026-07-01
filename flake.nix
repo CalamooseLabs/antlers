@@ -52,11 +52,18 @@
     # art at build time. package.nix returns a FUNCTION of config, like mkVibeWrapper.
     mkMoosefetch = pkgs.callPackage ./flakes/moosefetch/package.nix {};
     moosefetch = mkMoosefetch {};
+
+    # proton-secrets — headless Proton Pass CLI (`pass-cli`) wrapper + an
+    # agenix-shaped, activation-time secret-decryption NixOS module
+    # (services.proton-secrets). The bundled proton-pass-cli is UNFREE.
+    proton-secrets = pkgs.callPackage ./flakes/proton-secrets/package.nix {};
   in {
     # ---- Buildable packages: `nix build .#zed-editor`, `nix run .#zed-editor` ----
     packages.${system} =
       {
-        inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein moosefetch;
+        inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein moosefetch proton-secrets;
+        # Re-export the raw Proton Pass CLI (binary `pass-cli`) for `nix run .#proton-pass-cli`.
+        proton-pass-cli = pkgs.proton-pass-cli;
         default = zed-editor;
       }
       // scripts;
@@ -97,6 +104,7 @@
         vibe-server = final.callPackage ./flakes/vibe-server/package.nix {};
         fadein = final.callPackage ./flakes/fadein/package.nix {};
         moosefetch = (final.callPackage ./flakes/moosefetch/package.nix {}) {};
+        proton-secrets = final.callPackage ./flakes/proton-secrets/package.nix {};
       }
       // (final.callPackages ./flakes/scripts/package.nix {});
 
@@ -112,6 +120,8 @@
       vibe-server = import ./flakes/vibe-server/module.nix self;
       antlers-scripts = import ./flakes/scripts/module.nix "system";
       moosefetch = import ./flakes/moosefetch/module.nix "system";
+      # services.proton-secrets — activation-time secret decryption from Proton Pass.
+      proton-secrets = import ./flakes/proton-secrets/module.nix self;
     };
 
     # home-manager variants (install into home.packages).
@@ -138,6 +148,10 @@
         moosefetch = {
           type = "app";
           program = "${moosefetch}/bin/moosefetch";
+        };
+        proton-secrets = {
+          type = "app";
+          program = "${proton-secrets}/bin/proton-secrets";
         };
         default = self.apps.${system}.zed-editor;
       }

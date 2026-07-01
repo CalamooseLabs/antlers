@@ -87,9 +87,36 @@
   # ready. Hooks fire LOCALLY even for --remote-control sessions, so this works for
   # the browser-driven sessions vibe-server spawns.
   stateHooks = {
-    UserPromptSubmit = [{hooks = [{type = "command"; command = "${reportState}/bin/vibe-report-state thinking";}];}];
-    Stop = [{hooks = [{type = "command"; command = "${reportState}/bin/vibe-report-state completed";}];}];
-    Notification = [{hooks = [{type = "command"; command = "${reportState}/bin/vibe-report-state ready";}];}];
+    UserPromptSubmit = [
+      {
+        hooks = [
+          {
+            type = "command";
+            command = "${reportState}/bin/vibe-report-state thinking";
+          }
+        ];
+      }
+    ];
+    Stop = [
+      {
+        hooks = [
+          {
+            type = "command";
+            command = "${reportState}/bin/vibe-report-state completed";
+          }
+        ];
+      }
+    ];
+    Notification = [
+      {
+        hooks = [
+          {
+            type = "command";
+            command = "${reportState}/bin/vibe-report-state ready";
+          }
+        ];
+      }
+    ];
   };
 
   mkSettings = {

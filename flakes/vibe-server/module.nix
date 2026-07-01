@@ -150,7 +150,7 @@ with lib; let
       vibePresets;
     sessionCommand = scfg.sessionCommand;
     extraEnv = scfg.extraEnv;
-    inherit (scfg) requireTLS sessionNamePrefix maxLogBytes pty seedClaudeOnboarding claudeTheme;
+    inherit (scfg) requireTLS sessionNamePrefix maxLogBytes pty ptyRows ptyCols seedClaudeOnboarding claudeTheme;
     # Live plan-usage panel (the same data `/usage` shows), fetched read-only.
     usageEnabled = scfg.usage.enable;
     usageRefreshSec = scfg.usage.refreshInterval;
@@ -358,6 +358,18 @@ in {
       type = types.bool;
       default = true;
       description = "Allocate a pseudo-terminal (via util-linux `script`) for each spawned session. Required for interactive `claude --remote-control`: without a TTY, Claude Code falls into headless `--print` mode and exits with \"Input must be provided … when using --print\". Set false only for a genuinely non-interactive `sessionCommand` (e.g. `claude -p …`).";
+    };
+
+    ptyRows = mkOption {
+      type = types.ints.unsigned;
+      default = 50;
+      description = "PTY height (rows) for spawned sessions, applied via `stty` before the command runs (0 = leave the PTY at its default size; only meaningful when `pty` is true). `claude --remote-control` is a full-screen TUI that repaints a viewport sized to the terminal; `script`'s pipe-backed PTY otherwise reports 0×0, so Claude/Ink falls back to ~80×24 and clips longer messages to the last screenful. A taller PTY renders more of each message into the captured log. Keep this ≲120 (the terminal-emulator render grid in term.ts); rows beyond it won't all render.";
+    };
+
+    ptyCols = mkOption {
+      type = types.ints.unsigned;
+      default = 120;
+      description = "PTY width (cols) for spawned sessions, applied via `stty` (0 = leave at default; only meaningful when `pty` is true). Wider gives Claude's TUI more room before wrapping, but very wide lines force horizontal scrolling in the web log view on small screens.";
     };
 
     seedClaudeOnboarding = mkOption {

@@ -342,6 +342,8 @@ services.vibe-server = {
 | `protectHome`             | `null` (auto)                    | systemd `ProtectHome`; auto `false` when a configured dir is under `/home`, else `"tmpfs"` |
 | `enableNixLd`             | `true`                           | enable nix-ld so the compiled Deno binary can run                           |
 | `pty`                     | `true`                           | allocate a PTY per session (via `script`) so interactive `claude --remote-control` doesn't fall into headless `--print` mode; disable only for a non-interactive `sessionCommand` |
+| `ptyRows`                 | `50`                             | PTY height applied via `stty` before the session command (`0` = leave at default). `script`'s pipe PTY reports 0×0, so Claude falls back to ~80×24 and clips longer output to the last screenful; a taller PTY captures more of each message. Keep ≲120 (the terminal render-grid height) |
+| `ptyCols`                 | `120`                            | PTY width applied via `stty` (`0` = leave at default); wider = less wrapping in Claude's TUI, but very wide lines scroll horizontally in the log view on small screens |
 | `usage.enable`            | `true`                           | show the live **Claude usage** panel (5h + weekly windows, read-only — see [Usage panel](#usage-panel)); `false` removes it and makes no outbound usage calls. Subscription/OAuth auth only |
 | `usage.refreshInterval`   | `300`                            | seconds between server-side usage refreshes (floored at 180s in-app — the endpoint is rate-limited). Browsers read the cached value and tick countdowns locally |
 | `commitPush.enable`       | `false`                          | master switch for the web **Commit & Push** button (see [Commit & Push](#commit--push)). Off by default; the one feature that lets the UI *mutate* repos. The per-preset `branch` / `pushRemote` / `commitRequiresTouch` / `pushRequiresTouch` live on `programs.vibe.presets.<name>` |
@@ -446,7 +448,9 @@ SSE stream flowing.
 | `suggest.ts`  | commit-message suggestion for the modal: read the `GIT_COMMIT_MSG` scratchpad, else draft one from the diff via `claude -p` (gated by `commitPush.generateMessage`) |
 | `activity.ts` | heuristic interaction-state + token scraper over the captured TUI (`classifyScreen`/`parseTokens`): thinking vs ready + `↑ N tokens`. Best-effort fallback; hooks override it |
 | `usage.ts`    | live Claude plan-usage: read the OAuth token (read-only), fetch Anthropic's usage endpoint, `parseUsage` into windows, cache + single-flight throttle (`getUsage`) |
-| `sse.ts`      | read-only SSE tail of a session log                                  |
+| `term.ts`     | zero-import VT100/xterm grid emulator that reconstructs the terminal screen from raw PTY output (the terminal-view fallback log) |
+| `transcript.ts` | render Claude's complete JSONL transcript to readable text (`renderRecord`/`renderTranscript`) + locate a session's transcript (`findTranscript`/`mangleProjectDir`) + bounded tail read (`readTail`) — the default, complete session log |
+| `sse.ts`      | read-only SSE of a session log via one self-upgrading stream (`streamSessionLog`): incremental Claude JSONL transcript by default, terminal screen (`term.ts`) as fallback, switching live |
 | `http.ts`     | JSON responses + size-capped JSON body reader                        |
 | `html.ts`     | the inlined single-page UI                                           |
 | `router.ts`   | route table (public login/health + loopback register, then cookie-gated) |
@@ -470,6 +474,8 @@ Offline `deno test` units + integration, wired into `nix flake check` as
 | `suggest_test.ts` | `cleanSuggestion` (CRLF/trim) + `joinDiffsForPrompt` (only-changed-repos, labeled by path) |
 | `activity_test.ts`| `parseTokens` (k/M scaling) + `classifyScreen` (thinking via `esc to interrupt`, ready via prompt/auto-mode, token scrape) |
 | `usage_test.ts`   | `parseUsage` (window order/labels, clamp, `used_percentage`/epoch-seconds shape, `extra_usage` gating, brace-fallback, non-object → null) + `normResetsAt` (epoch s/ms vs ISO) |
+| `term_test.ts`    | the VT/xterm screen emulator: SGR-strip, OSC drop, CR/CHA/CUP positioning, erase, LF-scroll + DECSTBM region, autowrap, alt-screen no-ops, chunk-split escapes + UTF-8, runaway bound |
+| `transcript_test.ts` | `mangleProjectDir`, `summarizeToolInput` per tool, `renderRecord` (user/assistant/tool_use/tool_result, thinking-skip, bookkeeping-skip), `renderTranscript` (parse-error tolerance, blank-collapse, truncation) |
 
 Run locally: `cd app && deno test --allow-read --allow-write --allow-run --allow-env --no-lock test/`.
 Tests **must stay import-free** (use `./assert.ts`, never `jsr:`/`npm:`/`@std`) so
@@ -515,8 +521,8 @@ gnupgHome, generateMessage}`). The Claude config dir itself is selected by the m
 | `GET /api/sessions/:id/suggest-message` | yes | a suggested commit message to pre-fill the modal — `{message, source}`, `source` ∈ `scratchpad` (`GIT_COMMIT_MSG`) / `generated` (`claude -p`) / `none`. Empty when commit isn't available for the preset |
 | `POST /api/sessions/:id/commit-push`  | yes  | stage + YubiKey-signed commit (+ optional push) of the session's tree(s) (`{message,pin,push,applyAll}`; `applyAll` commits every preset directory, aborting on the first signing failure); returns per-directory `results[]`; 403 if disabled/touch-gated, 409 for external / preset-gone (see [Commit & Push](#commit--push)) |
 | `DELETE /api/sessions/:id`            | yes  | kill a session                            |
-| `GET /api/sessions/:id/logs`          | yes  | SSE stream of the captured log            |
-| `GET /api/sessions/:id/logs/download` | yes  | download the captured log (attachment)    |
+| `GET /api/sessions/:id/logs`          | yes  | SSE stream of the session log — Claude's complete JSONL transcript when available, else the terminal screen; `?view=terminal` forces the terminal view |
+| `GET /api/sessions/:id/logs/download` | yes  | download the session log (attachment): the rendered transcript by default, `?view=terminal` the rendered screen, `?raw=1` the raw PTY bytes |
 | `GET /api/sessions/:id/diff`          | yes  | git diff of the session's working dir (JSON) |
 
 ## Behavior notes
@@ -577,6 +583,32 @@ gnupgHome, generateMessage}`). The Claude config dir itself is selected by the m
   **Note:** like the log viewer, this is auth-gated and shows whatever is in the
   working tree — including the contents of *tracked-and-modified* secret files
   (e.g. a committed `.env`); anyone with the shared password can see them.
+- **Session log (transcript-first)** — the log view/download serve **Claude's
+  complete JSONL transcript** by default — the full, append-only conversation Claude
+  writes under its config dir — rendered to readable text (prompts, assistant
+  messages, tool calls + truncated results; thinking and bookkeeping records
+  skipped). This is why the log "continues on": `claude --remote-control` is a
+  full-screen alt-screen TUI that repaints a fixed viewport in place, so the
+  *terminal* capture can only ever reconstruct the last screenful — the transcript
+  has the whole session. One self-upgrading SSE stream serves both: it renders the
+  transcript **incrementally** (only new bytes parsed per tick) and re-resolves the
+  file every tick, so a log opened before the first turn **upgrades** from the
+  terminal screen to the transcript automatically, and a rolled transcript (e.g.
+  `/clear` starts a new session file) is **tracked** — no reconnect needed. The
+  terminal screen is the **fallback** (pre-first-turn, or force it with
+  `?view=terminal`); `?raw=1` gets the raw PTY bytes. A taller PTY
+  (`ptyRows`/`ptyCols`, default 50×120) additionally widens the terminal viewport so
+  even the fallback clips less. Reads are tail-bounded (8 MiB) so a marathon session
+  can't stall the event loop; the live snapshot is capped to 512 KiB at a line
+  boundary (Download serves the full tail). The session→transcript match is by
+  directory + newest-active file (no per-session identity yet), so two sessions
+  sharing one working directory can cross-wire their log views — give concurrent
+  sessions distinct directories, or watch them via Remote Control. **Exposure:** the transcript reflects
+  whatever Claude actually read/ran, so — unlike the Diff view, which excludes
+  `.gitignore`'d files — it can surface a `Read` of a gitignored secret or a secret
+  printed to a command's stdout. It's auth-gated, but in passwordless mode (the
+  default) anyone who can reach the UI gets a cookie; set `passwordFile` or restrict
+  the network when sessions touch secrets.
 - **Presets** — launch targets are config-defined presets (`programs.vibe.presets`,
   shared with the launcher); `GET /api/presets` lists them and `POST /api/sessions
   {preset}` spawns `vibe @<preset>` in the preset's first directory. There is no

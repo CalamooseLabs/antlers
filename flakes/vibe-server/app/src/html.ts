@@ -943,16 +943,16 @@ function openLog(s) {
   meta.appendChild(document.createTextNode(" · "));
   const note = document.createElement("span");
   note.className = "muted";
-  note.textContent = "live terminal view";
+  note.textContent = "live session log";
   meta.appendChild(note);
   const pre = document.getElementById("log");
   pre.textContent = "Connecting…";
   es = new EventSource("/api/sessions/" + s.id + "/logs");
   es.onopen = () => { if (pre.textContent === "Connecting…") pre.textContent = "Connected — waiting for output…"; };
-  // Each event is a full snapshot of the session's current terminal screen
-  // (rendered server-side from the raw PTY output) — REPLACE the view, don't append.
-  // Only re-pin to the bottom if the user was already there, so scrolling up to read
-  // earlier rows isn't yanked back down on every snapshot.
+  // Each event is a full snapshot of the session log (Claude's complete JSONL
+  // transcript when available, otherwise the rendered terminal screen) — REPLACE the
+  // view, don't append. Only re-pin to the bottom if the user was already there, so
+  // scrolling up to read earlier output isn't yanked back down on every snapshot.
   es.onmessage = (ev) => {
     const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
     pre.textContent = ev.data;

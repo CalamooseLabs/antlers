@@ -16,6 +16,7 @@ import {
   canSendInput,
   deregisterExternal,
   getSession,
+  getTranscriptPath,
   heartbeatExternal,
   killSession,
   listSessions,
@@ -34,9 +35,10 @@ import {
   startClaudeLogin,
   submitClaudeCode,
 } from "./claude.ts";
-import { streamLog } from "./sse.ts";
+import { streamSessionLog } from "./sse.ts";
 import { getUsage } from "./usage.ts";
 import { renderLog } from "./term.ts";
+import { readTail, readTranscriptText, renderTranscript } from "./transcript.ts";
 import { gitDiffMulti } from "./diff.ts";
 import { canCommit, canPush, cleanMessage, cleanPin, commitAndPushAll } from "./commit.ts";
 import { suggestCommitMessage } from "./suggest.ts";
@@ -252,7 +254,16 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     if (!s) return json({ error: "Not found" }, 404);
     // External sessions have no captured log — their output is in the user's terminal.
     if (s.info.external) return json({ error: "No captured log" }, 404);
-    return streamLog(s.logPath);
+    // One self-upgrading stream (sse.ts): serves Claude's complete JSONL transcript
+    // (the full, append-only conversation) when one exists, else the terminal screen
+    // (which only ever holds the last viewport), switching automatically as the
+    // transcript appears/rolls. `?view=terminal` forces the terminal view by making
+    // the resolver always report no transcript.
+    const forceTerminal = url.searchParams.get("view") === "terminal";
+    return streamSessionLog(
+      s.logPath,
+      forceTerminal ? () => Promise.resolve(null) : () => getTranscriptPath(s),
+    );
   }
 
   const dl = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/logs\/download$/);
@@ -260,10 +271,11 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     const s = getSession(dl[1]);
     if (!s) return json({ error: "Not found" }, 404);
     if (s.info.external) return json({ error: "No captured log" }, 404);
-    // The captured log is raw PTY output from a full-screen TUI. By default render
-    // it to the readable screen it represents (term.ts); `?raw=1` serves the raw
-    // bytes verbatim for debugging.
+    // By default serve Claude's complete JSONL transcript (the full conversation);
+    // `?view=terminal` serves the rendered terminal screen (term.ts, last viewport
+    // only); `?raw=1` serves the raw PTY bytes verbatim for debugging.
     const raw = url.searchParams.get("raw") === "1";
+    const forceTerminal = url.searchParams.get("view") === "terminal";
     try {
       if (raw) {
         // Raw bytes verbatim: control/escape codes and possibly chunk-split UTF-8,
@@ -276,38 +288,32 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
           },
         });
       }
+      if (!forceTerminal) {
+        const tp = await getTranscriptPath(s);
+        if (tp) {
+          const body = new TextEncoder().encode(renderTranscript(await readTranscriptText(tp)) + "\n");
+          return new Response(body, {
+            headers: {
+              "content-type": "text/plain; charset=utf-8",
+              "content-disposition": `attachment; filename="${s.info.name}.log"`,
+            },
+          });
+        }
+      }
       // Rendered screen. renderLog is fully synchronous (no awaits) and Deno is
       // single-threaded, so emulating a maxed-out (25 MiB) log would freeze the
       // event loop — stalling /healthz, SSE tails, kills. Bound it: a snapshot only
       // reflects the CURRENT screen, and earlier repaints are overwritten, so the
-      // last RENDER_BUDGET bytes reproduce it. (Seeking mid-UTF-8 may clip one lead
-      // byte; TermFilter's streaming decoder drops it — harmless for a tail render.)
-      const RENDER_BUDGET = 1 << 20; // 1 MiB
-      const file = await Deno.open(s.logPath, { read: true });
-      try {
-        const size = (await file.stat()).size;
-        const start = size > RENDER_BUDGET ? size - RENDER_BUDGET : 0;
-        const len = size - start;
-        await file.seek(start, Deno.SeekMode.Start);
-        const bytes = new Uint8Array(len);
-        let off = 0;
-        while (off < len) {
-          const n = await file.read(bytes.subarray(off));
-          if (n === null) break;
-          off += n;
-        }
-        const body = new TextEncoder().encode(renderLog(bytes.subarray(0, off)) + "\n");
-        return new Response(body, {
-          headers: {
-            "content-type": "text/plain; charset=utf-8",
-            "content-disposition": `attachment; filename="${s.info.name}.log"`,
-          },
-        });
-      } finally {
-        try {
-          file.close();
-        } catch { /* ignore */ }
-      }
+      // last 1 MiB reproduces it. (Seeking mid-UTF-8 may clip one lead byte;
+      // TermFilter's streaming decoder drops it — harmless for a tail render.)
+      const bytes = await readTail(s.logPath, 1 << 20);
+      const body = new TextEncoder().encode(renderLog(bytes) + "\n");
+      return new Response(body, {
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "content-disposition": `attachment; filename="${s.info.name}.log"`,
+        },
+      });
     } catch {
       return json({ error: "Not found" }, 404);
     }

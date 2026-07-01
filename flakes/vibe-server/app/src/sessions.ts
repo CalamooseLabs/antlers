@@ -2,8 +2,9 @@
 // across restarts, and a periodic reaper. ZERO external imports.
 
 import { b64url, isError, log } from "./util.ts";
-import { buildEnv, seedTrust } from "./claude.ts";
+import { buildEnv, configDir, seedTrust } from "./claude.ts";
 import { ActivityScraper, type InteractionState } from "./activity.ts";
+import { findTranscript } from "./transcript.ts";
 import type { PresetConfig, ServerConfig } from "./config.ts";
 
 // Process lifecycle. "booting" is the startup window between spawn and the first
@@ -82,6 +83,18 @@ export function listSessions(): SessionInfo[] {
 
 export function getSession(id: string): Session | undefined {
   return sessions.get(id);
+}
+
+// Resolve a server-spawned session's current Claude JSONL transcript path, or null.
+// Re-resolved on every call (NOT cached) so the log view follows the session live:
+// it returns null before the first turn (caller serves the terminal view, then
+// upgrades when the transcript appears) and tracks the newest transcript if the
+// session rolls one (e.g. `/clear` starts a new sessionId.jsonl). External sessions
+// run under the user's own config dir, not ours, so they're skipped (they also have
+// no captured log).
+export async function getTranscriptPath(s: Session): Promise<string | null> {
+  if (s.info.external) return null;
+  return await findTranscript(configDir(), s.info.path, s.info.startedAt);
 }
 
 export function sessionCount(): number {
@@ -174,8 +187,23 @@ export async function spawnSession(config: ServerConfig, preset: PresetConfig): 
   // `script` mirrors the child's output to its stdout (our pipe) and keeps the PTY
   // master open, so the session's stdin doesn't hit EOF. Disable via `pty = false`
   // for a genuinely headless `sessionCommand` (e.g. `claude -p …`).
+  // Size the PTY before the command runs. `claude --remote-control` repaints a
+  // full-screen viewport sized to the terminal; `script`'s pipe-backed PTY reports
+  // 0×0, so Claude/Ink falls back to ~80×24 and clips longer output to the last
+  // screenful. `stty` runs on the -c command's controlling tty (the PTY itself), so
+  // the size is set before claude reads it; errors are swallowed (the size is
+  // best-effort). ptyRows/ptyCols are config integers, so the interpolation can't
+  // inject shell. Each dimension is independent — 0 = leave that one at the default
+  // (e.g. ptyRows alone emits `stty rows N`). Only the `pty` branch reaches `stty`.
+  const ptyCmd = (() => {
+    const cmd = resolved.map(shQuote).join(" ");
+    const dims: string[] = [];
+    if (config.ptyRows > 0) dims.push(`rows ${config.ptyRows}`);
+    if (config.ptyCols > 0) dims.push(`cols ${config.ptyCols}`);
+    return dims.length ? `stty ${dims.join(" ")} 2>/dev/null; ${cmd}` : cmd;
+  })();
   const [setsidBin, ...setsidArgs] = config.pty
-    ? ["setsid", "script", "-q", "-f", "-e", "-c", resolved.map(shQuote).join(" "), "/dev/null"]
+    ? ["setsid", "script", "-q", "-f", "-e", "-c", ptyCmd, "/dev/null"]
     : ["setsid", ...resolved];
 
   const cmd = new Deno.Command(setsidBin, {
