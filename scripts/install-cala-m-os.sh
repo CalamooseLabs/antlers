@@ -17,6 +17,12 @@ if [ -n "$MACHINE_OVERRIDE" ]; then
   echo
 fi
 
+# Always re-check upstream freshness so a re-run picks up newly-pushed commits
+# instead of Nix's cached tarball (tarball-ttl defaults to 1h). This makes the
+# version read + disko fetch below resolve the current default-branch HEAD. Cheap:
+# it re-validates via ETag and only re-downloads when the content actually changed.
+export NIX_CONFIG="tarball-ttl = 0"
+
 # Flake reference used for the version read AND the disko destroy/format/mount.
 FLAKE_REF="${INSTALL_FLAKE_REF:-github:CalamooseLabs/cala-m-os}"
 # Git clone URL written into /mnt/etc/nixos for the minimal install pass.
@@ -46,6 +52,10 @@ echo
 echo "Step Two: Installing Minimal NixOS Configuration"
 mkdir "$MNT_NIXOS_DIR" -p
 git clone "$CLONE_URL" "$MNT_NIXOS_DIR"
+# Bump the cloned repo's flake.lock to the newest upstream inputs (nixpkgs,
+# antlers, etc.) so BOTH install passes build against the latest rather than the
+# committed lock. Trades lock reproducibility for "always the newest of everything".
+nix flake update --flake "$MNT_NIXOS_DIR"
 INITIAL_INSTALL_MODE=1 nixos-install --flake "$MNT_NIXOS_DIR#$HOST_FLAKE" --impure --no-root-password
 echo "Step Two Completed!"
 echo
