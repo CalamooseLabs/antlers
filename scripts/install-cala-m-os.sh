@@ -52,10 +52,6 @@ echo
 echo "Step Two: Installing Minimal NixOS Configuration"
 mkdir "$MNT_NIXOS_DIR" -p
 git clone "$CLONE_URL" "$MNT_NIXOS_DIR"
-# Bump the cloned repo's flake.lock to the newest upstream inputs (nixpkgs,
-# antlers, etc.) so BOTH install passes build against the latest rather than the
-# committed lock. Trades lock reproducibility for "always the newest of everything".
-nix flake update --flake "$MNT_NIXOS_DIR"
 INITIAL_INSTALL_MODE=1 nixos-install --flake "$MNT_NIXOS_DIR#$HOST_FLAKE" --impure --no-root-password
 echo "Step Two Completed!"
 echo
