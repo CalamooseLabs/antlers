@@ -47,6 +47,12 @@
   ungoogled-chromium,
   chromium,
   rpi-imager,
+  gum,
+  pciutils,
+  usbutils,
+  dmidecode,
+  nvme-cli,
+  lshw,
 }: let
   scriptsDir = ../../scripts;
 
@@ -84,6 +90,12 @@ in {
   bridge-internet = mk "bridge-internet" [dnsmasq nftables iproute2 coreutils procps gnugrep gawk];
   flash-iso = mk "flash-iso" [git jq util-linux coreutils nix];
   inherit install-cala-m-os;
+  # Auto-running gum TUI front-end for the ISO. Thin wrapper over
+  # install-cala-m-os: network wait, hardware inspection, host/machine selection
+  # (incl. a generated "self" profile), and an online-secrets login prompt.
+  # Inspection tools are baked here; install-cala-m-os / proton-secrets / disko /
+  # nixos-generate-config / nmtui resolve from the ISO's inherited PATH.
+  cala-installer = mk "cala-installer" [gum pciutils usbutils iproute2 util-linux dmidecode nvme-cli lshw coreutils nix git];
 
   # --- Tier 2: host-coupled, parameterized (defaults reproduce current hosts) ---
   gpg-key-import = mk "gpg-key-import" [gnupg coreutils];
