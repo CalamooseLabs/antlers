@@ -364,9 +364,53 @@ detect_backend() {
     "$1#nixosConfigurations.$HOST.config.calamoose._secretsBackend" 2>/dev/null || echo "none"
 }
 
+# Look for a pre-provisioned PAT before prompting: an explicit PROTON_PASS_PAT_FILE,
+# then a filesystem labeled CALAPAT (written by `flash-iso --with-pat` onto the boot
+# stick). Echoes the PAT on stdout if found.
+discover_pat() {
+  if [ -n "${PROTON_PASS_PAT_FILE:-}" ] && [ -r "${PROTON_PASS_PAT_FILE}" ]; then
+    cat "${PROTON_PASS_PAT_FILE}"
+    return 0
+  fi
+  local dev=""
+  if [ -e /dev/disk/by-label/CALAPAT ]; then
+    dev=$(readlink -f /dev/disk/by-label/CALAPAT 2>/dev/null || true)
+  elif command -v blkid >/dev/null 2>&1; then
+    dev=$(blkid -L CALAPAT 2>/dev/null || true)
+  fi
+  [ -n "$dev" ] || return 1
+  local mp=""
+  mp=$(mktemp -d)
+  local pat=""
+  if mount -o ro "$dev" "$mp" 2>/dev/null; then
+    [ -r "$mp/pat" ] && pat=$(cat "$mp/pat")
+    umount "$mp" 2>/dev/null || true
+  fi
+  rmdir "$mp" 2>/dev/null || true
+  [ -n "$pat" ] || return 1
+  printf '%s' "$pat"
+}
+
 proton_flow() {
   PROTON_DO_SEED=0
   PROTON_PAT=""
+
+  # Non-interactive path: a PAT pre-provisioned on the media (flash-iso --with-pat)
+  # or via PROTON_PASS_PAT_FILE. Verify it mints a session, then skip the prompts.
+  local auto_pat=""
+  auto_pat=$(discover_pat || true)
+  if [ -n "$auto_pat" ]; then
+    info "Found a pre-provisioned Proton Pass PAT — using it (no prompt)."
+    PROTON_PAT="$auto_pat"
+    PROTON_DO_SEED=1
+    if PROTON_PASS_PERSONAL_ACCESS_TOKEN="$auto_pat" proton-secrets login >/dev/null 2>&1 &&
+      proton-secrets status >/dev/null 2>&1; then
+      info "PAT established a live Proton Pass session."
+    else
+      warn "The provisioned PAT did not establish a session — it will still be seeded; verify it is valid."
+    fi
+    return 0
+  fi
 
   gum style --border rounded --padding "1 2" --margin "1 0" --foreground 5 \
     "Host '$HOST' uses ONLINE secrets (Proton Pass)." \

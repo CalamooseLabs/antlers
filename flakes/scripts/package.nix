@@ -53,6 +53,9 @@
   dmidecode,
   nvme-cli,
   lshw,
+  gptfdisk,
+  dosfstools,
+  parted,
 }: let
   scriptsDir = ../../scripts;
 
@@ -88,7 +91,9 @@ in {
   github-repo-puller = mk "github-repo-puller" [git curl jq coreutils];
   chromium-ephemeral = mk "chromium-ephemeral" [ungoogled-chromium coreutils];
   bridge-internet = mk "bridge-internet" [dnsmasq nftables iproute2 coreutils procps gnugrep gawk];
-  flash-iso = mk "flash-iso" [git jq util-linux coreutils nix];
+  # flash-iso gains --with-pat: after dd it carves a CALAPAT FAT partition holding a
+  # Proton PAT (sgdisk/mkfs.vfat/partprobe), which cala-installer auto-detects.
+  flash-iso = mk "flash-iso" [git jq util-linux coreutils nix gnugrep gptfdisk dosfstools parted];
   inherit install-cala-m-os;
   # Auto-running gum TUI front-end for the ISO. Thin wrapper over
   # install-cala-m-os: network wait, hardware inspection, host/machine selection
