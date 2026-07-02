@@ -37,42 +37,94 @@ done
 # dd'd ISO. Store-tool paths are resolved via `command -v` so they work under sudo
 # (which resets PATH). The ISO's own boot partitions are untouched — we only extend
 # the GPT backup header to the true end of the device and carve one new partition.
+_target_parts() {
+  # Sorted list of the target's partition kernel names (e.g. "sdb1").
+  lsblk -rno TYPE,NAME "$1" 2>/dev/null | grep '^part ' | cut -d' ' -f2 | sort || true
+}
+
 add_pat_partition() {
   local target="$1" pat="$2"
-  local sgdisk mkfsvfat partprobe
-  sgdisk=$(command -v sgdisk) || {
-    echo "flash-iso: sgdisk not found" >&2
+  local sfdisk mkfsvfat sgdisk partprobe pttype
+  sfdisk=$(command -v sfdisk) || {
+    echo "flash-iso: sfdisk not found" >&2
     return 1
   }
   mkfsvfat=$(command -v mkfs.vfat) || {
     echo "flash-iso: mkfs.vfat not found" >&2
     return 1
   }
+  sgdisk=$(command -v sgdisk || true)
   partprobe=$(command -v partprobe || true)
 
   echo ""
   echo "Baking the Proton PAT onto a CALAPAT partition on $target..."
+
+  # A desktop may auto-mount the freshly-flashed ISO; unmount everything on the
+  # target so the kernel can re-read the partition table after we edit it.
+  local _p
+  while IFS= read -r _p; do
+    if [ -n "$_p" ]; then sudo umount "$_p" 2>/dev/null || true; fi
+  done < <(lsblk -rno PATH,TYPE "$target" 2>/dev/null | grep ' part$' | cut -d' ' -f1)
   sleep 1
-  sudo "$sgdisk" --move-second-header "$target" >/dev/null
-  sudo "$sgdisk" -n 0:0:+32M -t 0:0700 -c 0:CALAPAT "$target" >/dev/null
+
+  # Remember the existing partitions so we can identify the one we add.
+  local before after newpart
+  before=$(_target_parts "$target")
+
+  # NixOS ISOs are isohybrid MBR ("dos"), not GPT — append an MBR FAT primary in
+  # the free space after the image (sfdisk keeps the existing entries + boot code).
+  # sgdisk is GPT-only and errors "Invalid partition data!" on these, so branch.
+  pttype=$(lsblk -dno PTTYPE "$target" 2>/dev/null | head -1 || true)
+  case "$pttype" in
+    gpt)
+      if [ -z "$sgdisk" ]; then
+        echo "flash-iso: sgdisk needed for a GPT device but not found" >&2
+        return 1
+      fi
+      if ! sudo "$sgdisk" --move-second-header "$target" >/dev/null ||
+        ! sudo "$sgdisk" -n 0:0:+64M -t 0:0700 -c 0:CALAPAT "$target" >/dev/null; then
+        echo "flash-iso: sgdisk failed on $target" >&2
+        return 1
+      fi
+      ;;
+    dos | "")
+      if ! printf ',64M,c\n' | sudo "$sfdisk" --append "$target" >/dev/null; then
+        echo "flash-iso: sfdisk --append failed on $target" >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "flash-iso: unsupported partition table '$pttype' on $target" >&2
+      return 1
+      ;;
+  esac
+
   if [ -n "$partprobe" ]; then sudo "$partprobe" "$target" >/dev/null 2>&1 || true; fi
   sleep 2
 
-  local part=""
-  part=$(lsblk -rno PATH,PARTLABEL "$target" 2>/dev/null | grep -E ' CALAPAT$' | head -1 | cut -d' ' -f1 || true)
-  if [ -z "$part" ]; then
-    echo "flash-iso: could not locate the new CALAPAT partition; PAT not written." >&2
+  after=$(_target_parts "$target")
+  newpart=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | head -1)
+  if [ -z "$newpart" ]; then
+    echo "flash-iso: could not locate the new partition; PAT not written." >&2
     return 1
   fi
+  local part="/dev/$newpart"
 
-  sudo "$mkfsvfat" -n CALAPAT "$part" >/dev/null
+  if ! sudo "$mkfsvfat" -n CALAPAT "$part" >/dev/null; then
+    echo "flash-iso: mkfs.vfat failed on $part" >&2
+    return 1
+  fi
   local mp=""
   mp=$(mktemp -d)
-  sudo mount "$part" "$mp"
+  if ! sudo mount "$part" "$mp"; then
+    echo "flash-iso: could not mount $part" >&2
+    rmdir "$mp" 2>/dev/null || true
+    return 1
+  fi
   printf '%s' "$pat" | sudo tee "$mp/pat" >/dev/null
   sudo umount "$mp"
   rmdir "$mp" 2>/dev/null || true
-  echo "PAT written to CALAPAT — cala-installer on this stick will detect it automatically."
+  echo "PAT written to CALAPAT ($part) — cala-installer on this stick will detect it automatically."
 }
 
 FLASH_ISO_ATTR="${FLASH_ISO_ATTR:-nixosConfigurations.iso.config.system.build.isoImage}"
