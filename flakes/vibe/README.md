@@ -22,6 +22,8 @@ login), not API pay-as-you-go. See [`Auth & billing`](#auth--billing).
 vibe                       # interactive Claude Code with the pinned settings
 vibe @<preset> [args...]   # start a configured preset (see Presets below)
 vibe --remote-control [name]   # same, with Remote Control enabled (drive from claude.ai / mobile)
+vibe ls                    # list this host's vibe-server sessions (see Local session control)
+vibe open [preset|id|name] # open a session in the terminal — start a preset, or attach to one
 vibe --help                # usage + the pinned settings + `claude auth status`
 vibe --show-config         # print the pinned settings.json and exit
 ```
@@ -93,6 +95,33 @@ exit. It needs `curl` (bundled) and read access to that file; everything is
 best-effort, so with no server present `vibe` behaves exactly as before. Sessions
 **spawned by** vibe-server set `VIBE_MANAGED=1` and skip this (they're already
 tracked); set `VIBE_NO_REGISTER=1` to opt a manual run out.
+
+### Local session control (`vibe ls` / `vibe open`)
+
+When a [`vibe-server`](../vibe-server) runs on the same host, two subcommands let
+you manage its sessions straight from the terminal — no browser, no web password:
+
+```sh
+vibe ls                    # STATUS / STATE / NAME / ID / DIR table of every session
+vibe open @antlers         # start a new server session for the `antlers` preset, then watch it
+vibe open antlers-a1b2     # attach to an existing session (by id or name) and watch it
+vibe open                  # with exactly one live session, attach to it; otherwise print `vibe ls`
+```
+
+`vibe open <target>` resolves `<target>` two ways: a **configured preset name**
+starts a fresh Remote Control session on the server (like clicking *Start* in the
+web UI) and then attaches; anything else is looked up as an existing session **id
+or name** and attached. *Attaching* streams that session's **live terminal screen**
+read-only, redrawing as it changes — the same view as the web UI's terminal tab.
+**Ctrl-C detaches**; the session keeps running (drive it from claude.ai / mobile as
+usual), so you can pop in to watch and leave without stopping it.
+
+Both commands talk to the local server over loopback, authenticated with the same
+discovery-file token (`/run/vibe/endpoint.json`) that gates self-registration —
+never the web login — so they work on a passworded server too, but only from the
+host itself. They need `curl` + `jq` (both bundled) and a reachable vibe-server;
+with none present they print a short hint. Point elsewhere with
+`VIBE_SERVER_ENDPOINT`.
 
 ## Auth & billing
 

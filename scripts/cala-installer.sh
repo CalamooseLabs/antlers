@@ -32,8 +32,32 @@ export PROTON_PASS_KEY_PROVIDER="${PROTON_PASS_KEY_PROVIDER:-fs}"
 # read + backend eval below then resolve the current default-branch HEAD.
 export NIX_CONFIG="tarball-ttl = 0"
 
+# ---------------------------------------------------------------------------
+# gum theme — the stock palette (faint grey headers, a 256-colour pink cursor,
+# dark-blue accents) is nearly unreadable on the installer's black VT console
+# (forceTextMode), so pin high-contrast BRIGHT 16-colour ANSI values (0–15 — the
+# only ones the Linux console renders reliably) for every gum widget we use.
+# Exported so `gum choose/confirm/input/spin/pager` pick them up with no per-call
+# flags. 15=bright white · 14=bright cyan · 11=bright yellow · 10=bright green ·
+# 9=bright red · 7=white · 0=black.
+# ---------------------------------------------------------------------------
+export GUM_CHOOSE_HEADER_FOREGROUND=15
+export GUM_CHOOSE_CURSOR_FOREGROUND=14
+export GUM_CHOOSE_SELECTED_FOREGROUND=14
+export GUM_CHOOSE_ITEM_FOREGROUND=7
+export GUM_CONFIRM_PROMPT_FOREGROUND=15
+export GUM_CONFIRM_SELECTED_BACKGROUND=14
+export GUM_CONFIRM_SELECTED_FOREGROUND=0
+export GUM_CONFIRM_UNSELECTED_FOREGROUND=7
+export GUM_INPUT_PROMPT_FOREGROUND=14
+export GUM_INPUT_CURSOR_FOREGROUND=14
+export GUM_SPIN_SPINNER_FOREGROUND=14
+export GUM_SPIN_TITLE_FOREGROUND=7
+export GUM_PAGER_FOREGROUND=7
+
 # Host + machine lists — kept in sync with install-cala-m-os.completion.bash.
-CALA_HOSTS=(ai lanstation devbox ephemeral homelab simple battlestation broadcast openreturn livedata)
+# Hosts are listed alphabetically so the picker reads in name order.
+CALA_HOSTS=(ai battlestation broadcast devbox ephemeral homelab lanstation livedata openreturn simple)
 CALA_MACHINES=(A520M-ITX B760-PLUS B850-MAX FW13-11XXP FW13-12XXP FW16-AMD-AI MS-01 MS-02 TRX50-SAGE ZIMA X-Small Small Medium Large)
 
 # Selection state, filled as we go.
@@ -48,13 +72,13 @@ PROTON_PAT=""
 # Small UI helpers (info/warn/die render to stderr so they never pollute a
 # value captured via $(...) inside a helper).
 # ---------------------------------------------------------------------------
-info() { gum style --foreground 4 "• $*" >&2; }
-warn() { gum style --foreground 3 "! $*" >&2; }
-die()  { gum style --foreground 1 "✗ $*" >&2; exit 1; }
+info() { gum style --foreground 14 "• $*" >&2; }
+warn() { gum style --foreground 11 "! $*" >&2; }
+die()  { gum style --foreground 9 "✗ $*" >&2; exit 1; }
 
 banner() {
   printf '\033c' 2>/dev/null || true
-  gum style --border double --padding "1 3" --margin "1 0" --foreground 6 \
+  gum style --border double --padding "1 3" --margin "1 0" --foreground 14 \
     "Cala-M-OS Installer" "$(uname -srm)"
 }
 
@@ -271,10 +295,10 @@ pick_machine() {
   USE_SELF=0
   local choice=""
   choice=$(gum choose --header "Machine profile for '$HOST':" \
+    "Use the host's default machine" \
     "Auto-detect this machine" \
     "Generate a fresh config for THIS box (self)" \
-    "Pick a predefined machine" \
-    "Use the host's default machine" || true)
+    "Pick a predefined machine" || true)
   case "$choice" in
     "Auto-detect"*) machine_autodetect ;;
     "Generate"*)    prepare_self || die "Failed to prepare a self config." ;;
@@ -510,7 +534,7 @@ proton_flow() {
     return 0
   fi
 
-  gum style --border rounded --padding "1 2" --margin "1 0" --foreground 5 \
+  gum style --border rounded --padding "1 2" --margin "1 0" --foreground 13 \
     "Host '$HOST' uses ONLINE secrets (Proton Pass)." \
     "Set up a session + Personal Access Token so first boot can fetch them."
 
@@ -591,7 +615,27 @@ main() {
   command -v gum >/dev/null 2>&1 || { echo "cala-installer: gum is required" >&2; exit 1; }
   ensure_root "$@"
 
+  # Record the whole session — the gum TUI, every info/warn/die, and the
+  # install-cala-m-os backend's output — into a log so a failed run can be pulled
+  # over SSH afterwards (the physical console can't scroll back). script(1)
+  # (util-linux, a runtimeInput) captures the PTY faithfully: gum renders into the
+  # pseudo-terminal exactly as on the console, whereas teeing stdout would break
+  # gum's TTY detection and mangle the UI. Runs once, as root (after ensure_root so
+  # the log path is writable and only one capture nests); the env guard stops the
+  # re-exec looping. -a append · -q quiet · -e propagate the child's exit code ·
+  # -f flush per write so a live `tail -f $CALA_INSTALLER_LOG` over SSH follows along.
+  CALA_INSTALLER_LOG="${CALA_INSTALLER_LOG:-/var/log/cala-installer.log}"
+  if [ -z "${CALA_INSTALLER_LOGGING:-}" ] && command -v script >/dev/null 2>&1; then
+    export CALA_INSTALLER_LOGGING=1
+    mkdir -p "$(dirname "$CALA_INSTALLER_LOG")" 2>/dev/null || true
+    printf '\n===== cala-installer run: %s =====\n' \
+      "$(date -Is 2>/dev/null || date 2>/dev/null || echo unknown)" >>"$CALA_INSTALLER_LOG" 2>/dev/null || true
+    exec script -q -a -e -f -c "$(printf '%q ' "$0" "$@")" "$CALA_INSTALLER_LOG"
+  fi
+
   banner
+  [ -n "${CALA_INSTALLER_LOGGING:-}" ] &&
+    info "Recording this session to $CALA_INSTALLER_LOG — grab it over SSH if you need to debug."
   wait_for_network
   top_menu
 
@@ -609,7 +653,7 @@ main() {
     do_proton=1
   fi
 
-  gum style --border double --padding "1 2" --margin "1 0" \
+  gum style --border double --padding "1 2" --margin "1 0" --foreground 15 \
     "Install host : $HOST" \
     "Machine      : ${MACHINE:-<host default>}$([ "$USE_SELF" -eq 1 ] && echo "  (freshly generated)")" \
     "Secrets      : $backend"
@@ -629,7 +673,7 @@ main() {
 
   [ "$do_proton" -eq 1 ] && seed_proton_target
 
-  gum style --border rounded --padding "1 2" --margin "1 0" --foreground 2 \
+  gum style --border rounded --padding "1 2" --margin "1 0" --foreground 10 \
     "Cala-M-OS host '$HOST' installed." \
     "Reboot to boot into your new system."
 }

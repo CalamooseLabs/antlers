@@ -148,6 +148,21 @@ opt out per-run with `VIBE_NO_REGISTER=1`. Manual sessions are *not* persisted
 across a vibe-server restart (they keep running; they just re-register on rerun),
 and the reaper retires them ~90s after their heartbeats stop.
 
+## Local CLI (`vibe ls` / `vibe open`)
+
+The `vibe` launcher can drive this server's sessions straight from the terminal on
+the same host — see the [vibe README](../vibe#local-session-control-vibe-ls--vibe-open).
+`vibe ls` lists sessions; `vibe open <preset>` spawns a preset session (then
+attaches); `vibe open <id|name>` attaches to an existing one, streaming its **live
+terminal screen** read-only (Ctrl-C detaches; the session keeps running). These use
+a small loopback CLI API (`GET`/`POST /api/local/sessions`, `GET
+/api/local/sessions/:id/logs`) gated **exactly like `/api/register`** — a loopback
+peer presenting the discovery-file token (`/run/vibe/endpoint.json`) as
+`Authorization: Bearer <token>` — **not** the web cookie, so they need no shared
+password but only work from the host itself. `POST /api/local/sessions` spawns the
+same way the web *Start* button does, so like the passwordless web UI it lets any
+local user who can read the discovery file start a session; keep the host trusted.
+
 ## Session status & activity
 
 Each session row carries two independent signals plus a token count:
@@ -509,6 +524,9 @@ gnupgHome, generateMessage}`). The Claude config dir itself is selected by the m
 | `PUT /api/register`                   | token | external-session heartbeat (`{id,token}`); loopback only |
 | `DELETE /api/register`                | token | external-session deregister (`{id,token}`); loopback only |
 | `POST /api/session-state`             | token | a session's Claude Code hook reports its interaction state (`{id,token,state,tokens?}`, state ∈ ready/thinking/completed); loopback peer + discovery token only |
+| `GET /api/local/sessions`             | token | local CLI (`vibe ls`): list sessions; loopback peer + discovery token via `Authorization: Bearer` (or `x-vibe-token`), not the web cookie |
+| `POST /api/local/sessions`            | token | local CLI (`vibe open <preset>`): spawn a preset session (`{preset}`); loopback + bearer token |
+| `GET /api/local/sessions/:id/logs`    | token | local CLI (`vibe open`): SSE stream of a session's log (`?view=terminal` for the live screen); loopback + bearer token |
 | `GET /api/me`                         | yes  | cookie check                              |
 | `GET /api/claude-auth`                | yes  | Claude account auth status + in-flight login state |
 | `POST /api/claude-auth/login`         | yes  | start (or rejoin) `claude auth login`; returns the OAuth URL |

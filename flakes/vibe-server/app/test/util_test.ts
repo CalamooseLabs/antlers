@@ -1,4 +1,4 @@
-import { b64url, isError, isValidName, unb64url } from "../src/util.ts";
+import { b64url, isError, isValidName, parseBearerToken, unb64url } from "../src/util.ts";
 import { assert, assertEquals } from "./assert.ts";
 
 Deno.test("b64url round-trips arbitrary bytes (url-safe, unpadded)", () => {
@@ -21,6 +21,19 @@ Deno.test("isValidName accepts the directory-name charset only", () => {
   for (const bad of ["", "a b", "a/b", "../x", "a.b", "naughty;rm", "a\nb"]) {
     assert(!isValidName(bad), `should reject ${JSON.stringify(bad)}`);
   }
+});
+
+Deno.test("parseBearerToken pulls the token from an Authorization header", () => {
+  assertEquals(parseBearerToken("Bearer abc123"), "abc123");
+  assertEquals(parseBearerToken("bearer abc123"), "abc123"); // scheme is case-insensitive
+  assertEquals(parseBearerToken("  Bearer   tok-en_9  "), "tok-en_9"); // trims around the token
+  assertEquals(parseBearerToken("Bearer\ttok"), "tok"); // tab between scheme and token
+  // Absent / malformed → empty (so registerTokenMatches("") fails closed).
+  assertEquals(parseBearerToken(null), "");
+  assertEquals(parseBearerToken(""), "");
+  assertEquals(parseBearerToken("Bearer"), "");
+  assertEquals(parseBearerToken("Bearer "), "");
+  assertEquals(parseBearerToken("Basic abc123"), "");
 });
 
 Deno.test("isError narrows only real Errors", () => {

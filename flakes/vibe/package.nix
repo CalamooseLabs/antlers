@@ -179,10 +179,14 @@ in
             '  vibe [claude args...]          interactive Claude Code' \
             '  vibe @<preset> [args...]       start a configured preset (dirs + branch + pins)' \
             '  vibe --remote-control [name]   drive from claude.ai / mobile' \
+            '  vibe ls                        list the local vibe-server sessions' \
+            '  vibe open [preset|id|name]     open a session in the terminal (start a preset, or attach)' \
             '  vibe --show-config             print the pinned settings.json and exit' \
             '  vibe --help                    this help' \
             'Remote Control name defaults to [<prefix>-]<repo>-<YYYYMMDD>' \
             '  (<repo> = basename of the working dir git toplevel); [name] overrides it.' \
+            'vibe ls / vibe open talk to a vibe-server on this host; vibe open watches a' \
+            '  session live in the terminal (Ctrl-C detaches; the session keeps running).' \
             'If a vibe-server runs on this host, the session self-registers so it' \
             '  appears in the web UI (set VIBE_NO_REGISTER=1 to opt out).' \
             'Env overrides: VIBE_MODEL, VIBE_EFFORT, VIBE_ULTRACODE=1,' \
@@ -200,6 +204,174 @@ in
         --show-config)
           jq . "$BAKED_SETTINGS" 2>/dev/null || cat "$BAKED_SETTINGS"
           exit 0
+          ;;
+      esac
+
+      # ---- local session control: `vibe ls` / `vibe open` --------------------
+      # `vibe ls` lists this host's vibe-server sessions; `vibe open <target>`
+      # opens one in the terminal — if <target> names a configured preset it starts
+      # a fresh server session for it, otherwise it attaches to an existing session
+      # by id or name. "Attach" streams the session's LIVE terminal screen read-only
+      # (Ctrl-C detaches; the session keeps running — drive it from claude.ai as
+      # usual). Both talk to the local vibe-server over loopback, authenticated with
+      # the discovery-file token (same gate as self-registration), so no web password
+      # is needed. These short-circuit before any `claude` launch.
+      VIBE_PRESETS_FILE=${presetsFile}
+
+      # Echo "URL<TAB>TOKEN" from the vibe-server discovery file, or fail with a note.
+      _vibe_endpoint() {
+        local f url token
+        f="''${VIBE_SERVER_ENDPOINT:-/run/vibe/endpoint.json}"
+        if [ ! -r "$f" ]; then
+          echo "vibe: no vibe-server discovery file at $f — is services.vibe-server running here?" >&2
+          return 1
+        fi
+        url="$(jq -r '.url // empty' "$f" 2>/dev/null || true)"
+        token="$(jq -r '.token // empty' "$f" 2>/dev/null || true)"
+        if [ -z "$url" ] || [ -z "$token" ]; then
+          echo "vibe: vibe-server discovery file $f is incomplete." >&2
+          return 1
+        fi
+        printf '%s\t%s' "$url" "$token"
+      }
+
+      # curl the loopback CLI API with the bearer token. Usage: _vibe_api METHOD PATH [JSON].
+      _vibe_api() {
+        local method="$1" path="$2" body="''${3:-}" ep url token
+        ep="$(_vibe_endpoint)" || return 1
+        url="''${ep%%$'\t'*}"
+        token="''${ep#*$'\t'}"
+        if [ -n "$body" ]; then
+          curl -fsS -m 15 -X "$method" \
+            -H "authorization: Bearer $token" -H 'content-type: application/json' \
+            --data "$body" "$url$path"
+        else
+          curl -fsS -m 15 -X "$method" -H "authorization: Bearer $token" "$url$path"
+        fi
+      }
+
+      # Stream a session's LIVE terminal screen, redrawing on each SSE snapshot.
+      _vibe_attach() {
+        local id="$1" ep url token
+        ep="$(_vibe_endpoint)" || return 1
+        url="''${ep%%$'\t'*}"
+        token="''${ep#*$'\t'}"
+        printf '\033[2J\033[H'
+        echo "vibe: watching $id — Ctrl-C to detach (the session keeps running)." >&2
+        # Each SSE event (blank-line terminated) is a full screen snapshot; ': …'
+        # keepalive comments are ignored. -N streams unbuffered so redraws are live.
+        curl -Ns -H "authorization: Bearer $token" \
+          "$url/api/local/sessions/$id/logs?view=terminal" | {
+          snap=""
+          have=0
+          while IFS= read -r vline; do
+            case "$vline" in
+              "")
+                if [ "$have" -eq 1 ]; then
+                  printf '\033[2J\033[H%s\n' "$snap"
+                fi
+                snap=""
+                have=0
+                ;;
+              ":"*) : ;;
+              "data: "*)
+                content="''${vline#data: }"
+                if [ "$have" -eq 0 ]; then
+                  snap="$content"
+                  have=1
+                else
+                  snap="$snap"$'\n'"$content"
+                fi
+                ;;
+              *) : ;;
+            esac
+          done
+        } || true
+        printf '\n'
+        echo "vibe: detached from $id." >&2
+      }
+
+      # `vibe ls` — a compact table of the local vibe-server's sessions.
+      _vibe_ls() {
+        local resp n
+        resp="$(_vibe_api GET "/api/local/sessions")" || {
+          echo "vibe: could not reach the local vibe-server." >&2
+          return 1
+        }
+        n="$(printf '%s' "$resp" | jq '.sessions | length' 2>/dev/null || echo 0)"
+        if [ "$n" = 0 ]; then
+          echo "No vibe sessions."
+          return 0
+        fi
+        printf '%-9s %-10s %-28s %-14s %s\n' STATUS STATE NAME ID DIR
+        printf '%s' "$resp" |
+          jq -r '.sessions[] | [.status, (.state // "-"), .name, .id, .path] | @tsv' |
+          while IFS=$'\t' read -r st stt nm sid pth; do
+            printf '%-9s %-10s %-28s %-14s %s\n' "$st" "$stt" "$nm" "$sid" "$pth"
+          done
+      }
+
+      # `vibe open [target]` — start a preset (then attach) or attach to a session.
+      _vibe_open() {
+        local target="''${1:-}" resp id
+        resp="$(_vibe_api GET "/api/local/sessions")" || {
+          echo "vibe: could not reach the local vibe-server." >&2
+          return 1
+        }
+        if [ -z "$target" ]; then
+          # No target: attach if exactly one live session, else list and ask.
+          local live count
+          live="$(printf '%s' "$resp" | jq -c '[.sessions[] | select(.status=="running" or .status=="booting")]')"
+          count="$(printf '%s' "$live" | jq 'length')"
+          if [ "$count" = 1 ]; then
+            _vibe_attach "$(printf '%s' "$live" | jq -r '.[0].id')"
+            return $?
+          fi
+          echo "vibe: name a session (id/name) or a preset to open. Sessions:" >&2
+          _vibe_ls
+          return 1
+        fi
+        # An existing session by id or name → attach.
+        id="$(printf '%s' "$resp" | jq -r --arg t "$target" '[.sessions[] | select(.id==$t or .name==$t)][0].id // empty')"
+        if [ -n "$id" ]; then
+          _vibe_attach "$id"
+          return $?
+        fi
+        # Not a session — a configured preset? Start it on the server, then attach.
+        if jq -e --arg n "$target" 'has($n)' "$VIBE_PRESETS_FILE" >/dev/null 2>&1; then
+          echo "vibe: starting a new '$target' session…" >&2
+          local start ssid
+          start="$(_vibe_api POST "/api/local/sessions" "$(jq -nc --arg p "$target" '{preset:$p}')")" || {
+            echo "vibe: could not start a '$target' session (is vibe-server logged in to Claude?)." >&2
+            return 1
+          }
+          ssid="$(printf '%s' "$start" | jq -r '.session.id // empty')"
+          if [ -z "$ssid" ]; then
+            echo "vibe: server did not return a session id." >&2
+            return 1
+          fi
+          _vibe_attach "$ssid"
+          return $?
+        fi
+        echo "vibe: '$target' is neither a live session nor a known preset." >&2
+        local presets
+        presets="$(jq -r 'keys | join(", ")' "$VIBE_PRESETS_FILE" 2>/dev/null || true)"
+        if [ -n "$presets" ]; then
+          echo "presets: $presets" >&2
+        fi
+        echo "run 'vibe ls' to see sessions." >&2
+        return 1
+      }
+
+      case "''${1:-}" in
+        ls | list | sessions)
+          _vibe_ls
+          exit $?
+          ;;
+        open | attach | watch)
+          shift
+          _vibe_open "''${1:-}"
+          exit $?
           ;;
       esac
 

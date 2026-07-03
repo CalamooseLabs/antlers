@@ -44,7 +44,7 @@ import { canCommit, canPush, cleanMessage, cleanPin, commitAndPushAll } from "./
 import { suggestCommitMessage } from "./suggest.ts";
 import { json, readJsonLimited } from "./http.ts";
 import { INDEX_HTML } from "./html.ts";
-import { isLoopbackIp, isValidName } from "./util.ts";
+import { isLoopbackIp, isValidName, parseBearerToken } from "./util.ts";
 
 // `peerIp` is the RAW socket peer (not x-forwarded-for) — used to confine the
 // local self-registration endpoints to loopback.
@@ -55,6 +55,14 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
   // Mark the cookie Secure only when the request actually arrived over TLS
   // (directly or via a reverse proxy), so plain-HTTP LAN use still works.
   const secure = req.headers.get("x-forwarded-proto") === "https" || url.protocol === "https:";
+
+  // Gate for the local CLI API (`vibe ls` / `vibe open` on this host): a loopback
+  // peer presenting the discovery-file token (Authorization: Bearer <token>, or
+  // x-vibe-token), the SAME secret + loopback rule as /api/register — never the web
+  // cookie, so a local terminal client needs no shared password.
+  const localAuthed = (): boolean =>
+    isLoopbackIp(peerIp) &&
+    registerTokenMatches(parseBearerToken(req.headers.get("authorization")) || (req.headers.get("x-vibe-token") ?? ""));
 
   // When TLS is required, refuse plain-HTTP requests (except the liveness probe
   // and the loopback-only self-registration endpoint, which a local `vibe` always
@@ -157,6 +165,43 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     const tokens = typeof body.tokens === "number" ? body.tokens : undefined;
     const ok = setSessionState(body.id, state, tokens);
     return json({ ok }, ok ? 200 : 404);
+  }
+
+  // ---- local CLI API (a `vibe ls` / `vibe open` on THIS host) ----
+  // Gated by localAuthed (loopback peer + discovery token), NOT the web cookie, so
+  // a local terminal client works without the shared password. It can list the
+  // sessions, spawn a preset, and stream a session's LIVE terminal screen (the
+  // same self-upgrading stream the web UI uses; `vibe open` forces ?view=terminal).
+  if (path === "/api/local/sessions" && method === "GET") {
+    if (!localAuthed()) return json({ error: "Unauthorized" }, 401);
+    return json({ sessions: listSessions() });
+  }
+  if (path === "/api/local/sessions" && method === "POST") {
+    if (!localAuthed()) return json({ error: "Unauthorized" }, 401);
+    const body: Record<string, unknown> = await readJsonLimited(req).catch(() => ({}));
+    const presetName = body.preset;
+    if (typeof presetName !== "string" || !isValidName(presetName)) return json({ error: "Invalid preset" }, 400);
+    const preset = resolvePreset(config, presetName);
+    if (!preset) return json({ error: "Unknown preset" }, 400);
+    try {
+      return json({ session: await spawnSession(config, preset) }, 201);
+    } catch {
+      return json({ error: "Could not start session" }, 400);
+    }
+  }
+  {
+    const llog = path.match(/^\/api\/local\/sessions\/([A-Za-z0-9_-]+)\/logs$/);
+    if (llog && method === "GET") {
+      if (!localAuthed()) return json({ error: "Unauthorized" }, 401);
+      const s = getSession(llog[1]);
+      if (!s) return json({ error: "Not found" }, 404);
+      if (s.info.external) return json({ error: "No captured log" }, 404);
+      const forceTerminal = url.searchParams.get("view") === "terminal";
+      return streamSessionLog(
+        s.logPath,
+        forceTerminal ? () => Promise.resolve(null) : () => getTranscriptPath(s),
+      );
+    }
   }
 
   // Everything below requires authentication.

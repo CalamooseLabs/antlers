@@ -16,6 +16,16 @@ export function isLoopbackIp(ip: string): boolean {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1" || ip.startsWith("127.");
 }
 
+// Extract the token from an `Authorization: Bearer <token>` header value
+// (case-insensitive scheme, surrounding whitespace trimmed). "" when the header
+// is absent or malformed. Gates the loopback CLI API (a local `vibe ls` / `vibe
+// open`) with the discovery-file token, the same secret that gates /api/register.
+export function parseBearerToken(headerValue: string | null): string {
+  if (!headerValue) return "";
+  const m = /^\s*Bearer[ \t]+(\S.*?)\s*$/i.exec(headerValue);
+  return m ? m[1] : "";
+}
+
 // ---- pure path / name helpers (no filesystem access; unit-tested) ----
 
 // Normalize an ABSOLUTE path: resolve "." / ".." segments and collapse duplicate
