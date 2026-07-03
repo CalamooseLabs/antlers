@@ -61,40 +61,104 @@ banner() {
 # ---------------------------------------------------------------------------
 # Network
 # ---------------------------------------------------------------------------
-net_up() {
-  # Prefer NetworkManager's own readiness check when present…
-  if command -v nm-online >/dev/null 2>&1 && nm-online -q -t 5 2>/dev/null; then
+# How long to keep polling for a link before offering the offline menu. Cold-boot
+# DHCP / Wi-Fi association routinely takes several seconds, so poll for a window
+# instead of declaring failure on the very first probe.
+NET_WAIT_SECS="${CALA_NET_WAIT_SECS:-15}"
+
+# Poll for reachability until its deadline elapses, returning 0 the moment the
+# network is up. Runs inside a `gum spin` child (see net_wait), so it is exported
+# and reads its deadline from NET_WAIT_DEADLINE_SECS in the environment. Prefers
+# NetworkManager's own readiness check, then a dependency-free /dev/tcp probe.
+net_poll() {
+  local secs="${NET_WAIT_DEADLINE_SECS:-15}" end
+  end=$((SECONDS + secs))
+  while [ "$SECONDS" -lt "$end" ]; do
+    if command -v nm-online >/dev/null 2>&1 && nm-online -q -t 2 2>/dev/null; then
+      return 0
+    fi
+    timeout 3 bash -c 'exec 3<>/dev/tcp/github.com/443' 2>/dev/null && return 0
+    sleep 1
+  done
+  return 1
+}
+export -f net_poll
+
+# Poll behind a spinner so the screen never looks frozen (the old code blocked on
+# a bare probe with no feedback). Returns 0 as soon as the network is reachable.
+net_wait() {
+  local secs="${1:-$NET_WAIT_SECS}"
+  NET_WAIT_DEADLINE_SECS="$secs" \
+    gum spin --spinner dot --title "Waiting for network (up to ${secs}s)…" -- bash -c 'net_poll'
+}
+
+# True if a pre-provisioned Proton PAT is already on the boot media: a
+# CALAPAT-labeled partition written by `flash-iso --with-pat`, or an explicit
+# PROTON_PASS_PAT_FILE. Cheap presence check only — discover_pat reads it later.
+pat_media_present() {
+  if [ -n "${PROTON_PASS_PAT_FILE:-}" ] && [ -r "${PROTON_PASS_PAT_FILE}" ]; then
     return 0
   fi
-  # …otherwise a dependency-free reachability probe (bash /dev/tcp builtin).
-  timeout 5 bash -c 'exec 3<>/dev/tcp/github.com/443' 2>/dev/null
+  [ -e /dev/disk/by-label/CALAPAT ] && return 0
+  if command -v blkid >/dev/null 2>&1 && [ -n "$(blkid -L CALAPAT 2>/dev/null || true)" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# Announce the good path once online, calling out a pre-provisioned PAT so the
+# user knows the flash-iso partition was picked up and no further steps are needed.
+announce_online() {
+  if pat_media_present; then
+    info "Network is up — detected a pre-provisioned Proton PAT (flash-iso --with-pat); continuing."
+  else
+    info "Network is up."
+  fi
 }
 
 wait_for_network() {
-  local tries=0
-  while ! net_up; do
-    tries=$((tries + 1))
-    warn "No network connection detected yet."
+  # Give the link a real chance to come up before bothering the user (a few
+  # seconds of DHCP/Wi-Fi is normal), showing a spinner the whole time.
+  if net_wait; then
+    announce_online
+    return 0
+  fi
+
+  # Still nothing. Present a single, clean menu shaped like the other screens
+  # (top_menu / inspect_hardware are the same: a while-loop that redraws and
+  # advances only on an explicit choice). The banner is redrawn each pass instead
+  # of stacking "No network…" warnings over a stale prompt, and there is no silent
+  # auto-switch to offline like the old retry counter did — "Continue offline" is
+  # always right there. Resolve the PAT note once (avoids a blkid per redraw).
+  local pat_note=""
+  pat_media_present &&
+    pat_note="A pre-provisioned Proton PAT was found — it will be used automatically once online."
+  while true; do
+    banner
+    [ -n "$pat_note" ] && info "$pat_note"
     local choice=""
-    choice=$(gum choose --header "Network is required to fetch the config:" \
-      "Configure with nmtui" \
+    choice=$(gum choose --header "No network detected yet — it's required to fetch the config:" \
       "Retry" \
+      "Configure networking (nmtui)" \
       "Continue offline (installs will likely fail)" \
       "Drop to a shell" || true)
     case "$choice" in
-      "Configure with nmtui")
-        if command -v nmtui >/dev/null 2>&1; then nmtui; else warn "nmtui unavailable."; fi
+      "Retry")
+        if net_wait; then announce_online; return 0; fi
         ;;
-      "Retry") : ;;
-      "Continue offline"*) warn "Continuing without network."; return 0 ;;
+      "Configure networking"*)
+        # nmtui is interactive and can exit non-zero (e.g. the user backs out);
+        # `|| true` keeps that from tripping `set -e` and aborting the installer.
+        if command -v nmtui >/dev/null 2>&1; then nmtui || true; else warn "nmtui unavailable."; fi
+        if net_wait 5; then announce_online; return 0; fi
+        ;;
+      "Continue offline"*)
+        warn "Continuing without network — remote fetches will likely fail."
+        return 0
+        ;;
       "Drop to a shell" | "") exit 0 ;;
     esac
-    if [ "$tries" -ge 15 ]; then
-      warn "Giving up automatic waiting."
-      return 0
-    fi
   done
-  info "Network is up."
 }
 
 # ---------------------------------------------------------------------------
@@ -465,10 +529,33 @@ seed_proton_target() {
 }
 
 # ---------------------------------------------------------------------------
+# Privilege
+# ---------------------------------------------------------------------------
+# The installer formats disks, mounts /mnt, writes /root + /var/lib, and drives
+# disko / nixos-install — all of which require root. The ISO auto-logs in as the
+# unprivileged `nixos` user (nixpkgs profiles/installation-device.nix), so re-exec
+# under sudo (passwordless for wheel on the installer) when we are not already
+# root. PATH is preserved so the store-resolved tools (install-cala-m-os, disko,
+# proton-secrets, nixos-generate-config, nmtui) still resolve after elevation.
+# --preserve-env also carries the script's override knobs (the ${VAR:-default}
+# values read at call time) across the boundary — add any future override var
+# here. NIX_CONFIG needs no entry: the top-level re-runs under root and re-exports
+# it, so the freshness setting is re-established before any nix eval.
+ensure_root() {
+  [ "$(id -u)" -eq 0 ] && return 0
+  if command -v sudo >/dev/null 2>&1; then
+    info "The installer needs root — re-running under sudo…"
+    exec sudo --preserve-env=PATH,TERM,CALA_NET_WAIT_SECS,PROTON_PASS_SESSION_DIR,PROTON_PASS_KEY_PROVIDER,PROTON_PASS_PAT_FILE,CALA_SELF_CLONE_DIR,INSTALL_FLAKE_REF,INSTALL_CLONE_URL "$0" "$@"
+  fi
+  die "cala-installer must run as root and sudo is unavailable. Re-run with:  sudo cala-installer"
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 main() {
   command -v gum >/dev/null 2>&1 || { echo "cala-installer: gum is required" >&2; exit 1; }
+  ensure_root "$@"
 
   banner
   wait_for_network
