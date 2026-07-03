@@ -430,27 +430,53 @@ detect_backend() {
 
 # Look for a pre-provisioned PAT before prompting: an explicit PROTON_PASS_PAT_FILE,
 # then a filesystem labeled CALAPAT (written by `flash-iso --with-pat` onto the boot
-# stick). Echoes the PAT on stdout if found.
+# stick). Echoes the PAT on stdout if found. Every failure path warns — and warn()
+# writes to stderr, so the captured stdout stays PAT-only. A silent empty return
+# here is exactly what makes a mis-flashed stick impossible to diagnose from the
+# TUI (it just falls through to the manual prompt with no clue why).
 discover_pat() {
   if [ -n "${PROTON_PASS_PAT_FILE:-}" ] && [ -r "${PROTON_PASS_PAT_FILE}" ]; then
     cat "${PROTON_PASS_PAT_FILE}"
     return 0
   fi
+
+  # Resolve the CALAPAT partition. USB enumeration can lag the installer reaching
+  # this point, so settle udev and retry the lookup for a few seconds. blkid is
+  # tried alongside the by-label symlink so a missing/stale /dev/disk/by-label
+  # entry alone never masks a partition that is physically present.
   local dev=""
-  if [ -e /dev/disk/by-label/CALAPAT ]; then
-    dev=$(readlink -f /dev/disk/by-label/CALAPAT 2>/dev/null || true)
-  elif command -v blkid >/dev/null 2>&1; then
-    dev=$(blkid -L CALAPAT 2>/dev/null || true)
+  command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=5 2>/dev/null || true
+  for _ in 1 2 3; do
+    dev=""
+    [ -e /dev/disk/by-label/CALAPAT ] && dev=$(readlink -f /dev/disk/by-label/CALAPAT 2>/dev/null || true)
+    if [ -z "$dev" ] && command -v blkid >/dev/null 2>&1; then
+      dev=$(blkid -L CALAPAT 2>/dev/null || true)
+    fi
+    [ -n "$dev" ] && break
+    sleep 1
+  done
+  if [ -z "$dev" ]; then
+    warn "No CALAPAT-labeled partition found — was the stick flashed with 'flash-iso --with-pat'?"
+    return 1
   fi
-  [ -n "$dev" ] || return 1
-  local mp=""
+
+  local mp="" pat="" err=""
   mp=$(mktemp -d)
-  local pat=""
-  if mount -o ro "$dev" "$mp" 2>/dev/null; then
-    [ -r "$mp/pat" ] && pat=$(cat "$mp/pat")
+  err=$(mktemp)
+  # Auto-detect first (the ISO supports vfat); fall back to an explicit -t vfat so
+  # a mount that cannot probe the type on its own still succeeds.
+  if mount -o ro "$dev" "$mp" 2>"$err" || mount -t vfat -o ro "$dev" "$mp" 2>>"$err"; then
+    if [ -r "$mp/pat" ]; then
+      pat=$(cat "$mp/pat" 2>/dev/null || true)
+    else
+      warn "Mounted $dev (CALAPAT) but it holds no 'pat' file."
+    fi
     umount "$mp" 2>/dev/null || true
+  else
+    warn "Could not mount $dev (CALAPAT): $(tr '\n' ' ' <"$err")"
   fi
   rmdir "$mp" 2>/dev/null || true
+  rm -f "$err" 2>/dev/null || true
   [ -n "$pat" ] || return 1
   printf '%s' "$pat"
 }

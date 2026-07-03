@@ -100,6 +100,9 @@ add_pat_partition() {
   esac
 
   if [ -n "$partprobe" ]; then sudo "$partprobe" "$target" >/dev/null 2>&1 || true; fi
+  # partprobe is asynchronous; settle udev so the new partition node + its label
+  # are present before the before/after diff below picks it out.
+  command -v udevadm >/dev/null 2>&1 && sudo udevadm settle 2>/dev/null || true
   sleep 2
 
   after=$(_target_parts "$target")
@@ -122,9 +125,19 @@ add_pat_partition() {
     return 1
   fi
   printf '%s' "$pat" | sudo tee "$mp/pat" >/dev/null
+  sync
+  # Read it straight back so "written" is not a lie: a full stick, a flaky
+  # controller, or a bad mkfs would otherwise report success with nothing usable
+  # on the partition — the exact silent failure cala-installer then can't explain.
+  local readback=""
+  readback=$(sudo cat "$mp/pat" 2>/dev/null || true)
   sudo umount "$mp"
   rmdir "$mp" 2>/dev/null || true
-  echo "PAT written to CALAPAT ($part) — cala-installer on this stick will detect it automatically."
+  if [ "$readback" != "$pat" ]; then
+    echo "flash-iso: PAT readback from $part did not match what was written; the stick may be bad." >&2
+    return 1
+  fi
+  echo "PAT written and verified on CALAPAT ($part) — cala-installer on this stick will detect it automatically."
 }
 
 FLASH_ISO_ATTR="${FLASH_ISO_ATTR:-nixosConfigurations.iso.config.system.build.isoImage}"
