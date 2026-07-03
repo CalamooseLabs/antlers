@@ -18,7 +18,10 @@ import { isError, log } from "./util.ts";
 // Only these env-var names are propagated into spawned sessions (and the login /
 // status invocations); everything else the daemon holds (stray tokens, DB URLs,
 // …) is dropped so it can't reach Claude Code or its browser-readable logs.
-// config.extraEnv extends this list.
+// config.extraEnv extends this list. NOTE: ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN
+// are listed so API-key deployments still work, but buildEnv further drops them via
+// scrubApiCredsEnv when subscriptionAuth is on (the default) so a stray key/token
+// can't shadow the plan's OAuth login.
 export const ENV_ALLOWLIST = [
   "PATH",
   "HOME",
@@ -46,7 +49,28 @@ export function buildEnv(config: ServerConfig): Record<string, string> {
     const v = Deno.env.get(k);
     if (v !== undefined) env[k] = v;
   }
-  return env;
+  return scrubApiCredsEnv(env, config.subscriptionAuth ?? true);
+}
+
+// Pure: subscription-first — when subscriptionAuth is on, drop a stray
+// ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN so `claude` uses the plan's OAuth login
+// (CLAUDE_CONFIG_DIR/.credentials.json) rather than the key/token. This matters
+// because `claude` checks ANTHROPIC_AUTH_TOKEN AHEAD of the stored claude.ai OAuth,
+// so a stray token shadows the auth-status banner AND session inference even after
+// a good login (a fresh login then appears not to "take effect"); a bare
+// ANTHROPIC_API_KEY only wins headless `claude -p` (the commit-message draft) but
+// is dropped here too so that path stays on the plan. subscriptionAuth=false leaves
+// the env untouched for genuine API-key billing. Mirrors the `vibe` wrapper's drop
+// (flakes/vibe/package.nix) so the service's own spawns match its sessions.
+export function scrubApiCredsEnv(
+  env: Record<string, string>,
+  subscriptionAuth: boolean,
+): Record<string, string> {
+  if (!subscriptionAuth) return env;
+  const out = { ...env };
+  delete out.ANTHROPIC_API_KEY;
+  delete out.ANTHROPIC_AUTH_TOKEN;
+  return out;
 }
 
 // ---- config dir + onboarding/theme/trust seeding ----
@@ -396,6 +420,28 @@ export async function startClaudeLogin(config: ServerConfig): Promise<LoginState
   return { ...login.state };
 }
 
+// Pure: did the pasted code actually establish/refresh the subscription login?
+// A clean exit (code 0) is authoritative — `claude auth login` has no
+// already-logged-in short-circuit, so exit 0 means it cleared and rewrote the
+// OAuth credentials (even a same-account refresh). Otherwise (non-zero / lost exit
+// code) only trust an auth status that shows a REAL claude.ai subscription login
+// AND a CHANGE from the before-snapshot, so we never report success on: a stray
+// API key (authMethod "api_key") / auth token ("oauth_token") that fabricates
+// loggedIn=true, or a FAILED account switch that left the prior OAuth logged in
+// (before/after identity unchanged). That false "Logged in!" is exactly why a new
+// login looked like it "didn't take effect".
+export function loginSucceeded(
+  exitCode: number,
+  before: ClaudeAuthStatus,
+  after: ClaudeAuthStatus,
+): boolean {
+  if (exitCode === 0) return true;
+  if (!after.loggedIn || after.authMethod !== "claude.ai") return false;
+  return !before.loggedIn ||
+    before.email !== after.email ||
+    before.subscriptionType !== after.subscriptionType;
+}
+
 // Write the pasted authorization code into the login PTY and wait for the
 // exchange to finish, then re-check auth status to confirm.
 export async function submitClaudeCode(
@@ -411,6 +457,9 @@ export async function submitClaudeCode(
     return { ok: false, error: "invalid code" };
   }
 
+  // Snapshot the account BEFORE the exchange so a failed switch (prior OAuth still
+  // logged in) or a stray key/token can't be mistaken for a successful new login.
+  const before = await claudeAuthStatus(config);
   login.state.phase = "exchanging";
   try {
     await login.writer.write(new TextEncoder().encode(trimmed + "\n"));
@@ -432,9 +481,11 @@ export async function submitClaudeCode(
   if (exitCode === null) return { ok: false, error: "timed out exchanging code" };
 
   // Trust a clean exit (code 0 = code accepted, creds written) even if a
-  // just-issued status query hasn't caught up yet; otherwise confirm via status.
+  // just-issued status query hasn't caught up yet; otherwise require a real,
+  // CHANGED claude.ai login vs the before-snapshot (loginSucceeded) so a stray
+  // key/token or a failed switch isn't reported as success.
   const status = await claudeAuthStatus(config);
-  if (exitCode === 0 || status.loggedIn) {
+  if (loginSucceeded(exitCode, before, status)) {
     if (current === login) login.state.phase = "done";
     return { ok: true, status };
   }

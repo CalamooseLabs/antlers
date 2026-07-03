@@ -111,7 +111,8 @@ export const INDEX_HTML = `<!DOCTYPE html>
   #authBanner { margin: 0 0 12px; }
   #authBanner.warn { background: #3a2d12; color: #d29922; border: 1px solid #9e6a03;
     border-radius: 6px; padding: 10px 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  #authBanner.ok { color: #8b949e; font-size: 12px; padding: 2px 0; }
+  #authBanner.ok { color: #8b949e; font-size: 12px; padding: 2px 0;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   #authBanner .spacer { flex: 1 1 auto; }
   .authstep { margin: 0 0 18px; }
   .authstep h3 { font-size: 13px; margin: 0 0 8px; color: #8b949e; font-weight: 600; }
@@ -609,6 +610,15 @@ function renderAuthBanner(status) {
     if (status.email) txt += " as " + status.email;
     if (status.subscriptionType) txt += " (" + status.subscriptionType + ")";
     b.appendChild(document.createTextNode(txt));
+    // Steady state for the server is "logged in", so this is the only way to
+    // switch/refresh the account from the UI. claude auth login always clears and
+    // rewrites the OAuth credentials, so re-running it swaps the account.
+    const sp = document.createElement("span"); sp.className = "spacer"; b.appendChild(sp);
+    const relog = document.createElement("button");
+    relog.textContent = "Log in as a different account";
+    relog.setAttribute("aria-label", "Log in to Claude as a different account");
+    relog.onclick = openAuth;
+    b.appendChild(relog);
   } else {
     b.className = "warn";
     const msg = document.createElement("span");
@@ -740,10 +750,13 @@ async function submitCode() {
     const r = await api("/api/claude-auth/code", { method: "POST", body: JSON.stringify({ code: code }) });
     const d = await r.json().catch(() => ({}));
     if (r.ok && d.ok) {
-      setAuthStatusMsg("ok", "Logged in!");
+      // Each running claude reads its credentials at startup, so a login taken
+      // now reaches only NEWLY spawned sessions — surface that so a switched
+      // account doesn't look like it "didn't take effect".
+      setAuthStatusMsg("ok", "Logged in! Restart any running sessions to use this account.");
       stopAuthPoll();
       await checkAuth();
-      setTimeout(() => { closeAuth(); refresh(); }, 1000);
+      setTimeout(() => { closeAuth(); refresh(); }, 1600);
     } else {
       setAuthStatusMsg("err", (d && d.error) ? d.error : "Login failed — try again.");
     }

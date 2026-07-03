@@ -150,7 +150,7 @@ with lib; let
       vibePresets;
     sessionCommand = scfg.sessionCommand;
     extraEnv = scfg.extraEnv;
-    inherit (scfg) requireTLS sessionNamePrefix maxLogBytes pty ptyRows ptyCols seedClaudeOnboarding claudeTheme;
+    inherit (scfg) requireTLS sessionNamePrefix maxLogBytes pty ptyRows ptyCols seedClaudeOnboarding claudeTheme subscriptionAuth;
     # Live plan-usage panel (the same data `/usage` shows), fetched read-only.
     usageEnabled = scfg.usage.enable;
     usageRefreshSec = scfg.usage.refreshInterval;
@@ -307,6 +307,15 @@ in {
       type = types.nullOr types.path;
       default = null;
       description = "Claude config dir holding the subscription OAuth login (in `.credentials.json`). Exported as CLAUDE_CONFIG_DIR and made writable; when null it defaults to `<stateDir>/.claude`. You can authenticate the service user directly from the web UI (the \"Log in to Claude\" banner runs `claude auth login` and stores the login here), pre-seed it (run `claude auth login` once as the service user, or copy a `~/.claude`), or point it at an existing login. This is the recommended auth path for Max/Team/Pro plans — sessions then bill the subscription, not the API.";
+    };
+
+    subscriptionAuth = mkOption {
+      type = types.bool;
+      default =
+        if hasPrograms
+        then pcfg.subscriptionAuth
+        else true;
+      description = "Subscription-first (Max/Team/Pro): drop a stray `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` from the environment of the service's own `claude` invocations (the auth-status banner, the web login flow, the commit-message draft) AND spawned sessions, so they use the plan's OAuth login (from `claudeConfigDir` / CLAUDE_CONFIG_DIR) instead of a stray key/token silently shadowing it. This matters because `claude` checks `ANTHROPIC_AUTH_TOKEN` ahead of the stored OAuth login, so a stray token overrides even a good login and a fresh login appears not to take effect. Defaults to `programs.vibe.subscriptionAuth` when that module is imported. Set false only for genuine API-key billing (see `environmentFile`).";
     };
 
     remoteControl.enable = mkOption {

@@ -285,13 +285,15 @@ in
 
       # Subscription-first auth: vibe targets Claude Code subscription plans
       # (Max/Team/Pro), which authenticate via the OAuth login in ~/.claude /
-      # CLAUDE_CONFIG_DIR. A stray ANTHROPIC_API_KEY would silently bill the API
-      # instead of the plan, so drop it. Opt out (genuine API-key billing) with
-      # subscriptionAuth = false or VIBE_API_KEY_AUTH=1.
+      # CLAUDE_CONFIG_DIR. A stray ANTHROPIC_API_KEY would silently bill the API,
+      # and a stray ANTHROPIC_AUTH_TOKEN is checked AHEAD of the stored OAuth login
+      # (so it overrides even a valid subscription login) — drop both. Opt out
+      # (genuine API-key billing) with subscriptionAuth = false or VIBE_API_KEY_AUTH=1.
       SUBSCRIPTION_AUTH=${lib.boolToString subscriptionAuth}
       [ -n "''${VIBE_API_KEY_AUTH:-}" ] && SUBSCRIPTION_AUTH=false
       if [ "$SUBSCRIPTION_AUTH" = true ]; then
         unset ANTHROPIC_API_KEY
+        unset ANTHROPIC_AUTH_TOKEN
       fi
 
       # Single cleanup for the temp settings dir, the heartbeat loop, and the

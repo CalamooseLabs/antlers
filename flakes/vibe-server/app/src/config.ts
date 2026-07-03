@@ -59,6 +59,15 @@ export interface ServerConfig {
   // Extra environment-variable NAMES to propagate into spawned sessions, on top
   // of the built-in allowlist (see sessions.ts). Everything else is dropped.
   extraEnv: string[];
+  // Subscription-first (Max/Team/Pro): drop a stray ANTHROPIC_API_KEY /
+  // ANTHROPIC_AUTH_TOKEN from the env of the service's OWN `claude` spawns (the
+  // auth-status banner, the interactive web login, the commit-message draft) AND
+  // spawned sessions, so they use the plan's OAuth login (in CLAUDE_CONFIG_DIR/
+  // .credentials.json) instead of a stray key/token shadowing it — an
+  // ANTHROPIC_AUTH_TOKEN otherwise overrides even a good OAuth login, so a fresh
+  // login would appear not to "take effect". Mirrors programs.vibe.subscriptionAuth.
+  // Set false only for genuine API-key billing (environmentFile ANTHROPIC_API_KEY).
+  subscriptionAuth: boolean;
   // Reject plain-HTTP requests (all but /healthz) — set when a TLS reverse proxy
   // fronts the service (it forwards x-forwarded-proto: https).
   requireTLS: boolean;
@@ -105,6 +114,7 @@ export const DEFAULTS: ServerConfig = {
   presets: [],
   sessionCommand: ["vibe", "@PRESET@", "--remote-control", "@NAME@"],
   extraEnv: [],
+  subscriptionAuth: true,
   requireTLS: false,
   sessionNamePrefix: "",
   maxLogBytes: 26214400, // 25 MiB

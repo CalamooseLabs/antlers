@@ -1,4 +1,4 @@
-import { cleanGeneratedMessage, commitMessagePrompt, extractLoginError, extractLoginUrl, mergeOnboarding, parseAuthStatus } from "../src/claude.ts";
+import { cleanGeneratedMessage, commitMessagePrompt, extractLoginError, extractLoginUrl, loginSucceeded, mergeOnboarding, parseAuthStatus, scrubApiCredsEnv } from "../src/claude.ts";
 import { assert, assertEquals, assertStringIncludes } from "./assert.ts";
 
 // A realistic `claude auth login` capture: the URL appears inside an OSC-8
@@ -116,4 +116,78 @@ Deno.test("cleanGeneratedMessage strips code fences, trailers, and trims", () =>
   );
   // Empty / whitespace-only ⇒ "".
   assertEquals(cleanGeneratedMessage("   \n\t "), "");
+});
+
+// ---- loginSucceeded (did a pasted code really (re)establish the subscription login?) ----
+
+Deno.test("loginSucceeded trusts a clean exit (code 0) regardless of before/after", () => {
+  // exit 0 = `claude auth login` cleared + rewrote creds (no short-circuit), incl. a same-account refresh.
+  assertEquals(loginSucceeded(0, { loggedIn: false }, { loggedIn: false }), true);
+  assertEquals(
+    loginSucceeded(0, { loggedIn: true, authMethod: "claude.ai", email: "a@x" }, { loggedIn: true, authMethod: "claude.ai", email: "a@x" }),
+    true,
+  );
+});
+
+Deno.test("loginSucceeded rejects a stray API key / auth token on a non-zero exit", () => {
+  // A stray ANTHROPIC_API_KEY (authMethod "api_key") or ANTHROPIC_AUTH_TOKEN ("oauth_token")
+  // fabricates loggedIn=true without any OAuth exchange — must not read as success.
+  assertEquals(loginSucceeded(-1, { loggedIn: false }, { loggedIn: true, authMethod: "api_key" }), false);
+  assertEquals(loginSucceeded(-1, { loggedIn: false }, { loggedIn: true, authMethod: "oauth_token" }), false);
+  // Not logged in after a failed exchange ⇒ false.
+  assertEquals(loginSucceeded(-1, { loggedIn: false }, { loggedIn: false }), false);
+});
+
+Deno.test("loginSucceeded rejects a failed switch that left the prior account logged in", () => {
+  // Wanted B, exchange failed, A's still-valid claude.ai OAuth keeps loggedIn=true, identity unchanged.
+  const a = { loggedIn: true, authMethod: "claude.ai", email: "a@x", subscriptionType: "team" };
+  assertEquals(loginSucceeded(-1, a, { ...a }), false);
+});
+
+Deno.test("loginSucceeded accepts a real, changed claude.ai login on a non-zero exit", () => {
+  // Logged out ⇒ logged in as claude.ai.
+  assertEquals(
+    loginSucceeded(-1, { loggedIn: false }, { loggedIn: true, authMethod: "claude.ai", email: "b@x" }),
+    true,
+  );
+  // A genuine A→B account switch.
+  assertEquals(
+    loginSucceeded(-1, { loggedIn: true, authMethod: "claude.ai", email: "a@x" }, { loggedIn: true, authMethod: "claude.ai", email: "b@x" }),
+    true,
+  );
+  // Same email but the subscription changed (e.g. team → max) also counts as a change.
+  assertEquals(
+    loginSucceeded(
+      -1,
+      { loggedIn: true, authMethod: "claude.ai", email: "a@x", subscriptionType: "team" },
+      { loggedIn: true, authMethod: "claude.ai", email: "a@x", subscriptionType: "max" },
+    ),
+    true,
+  );
+});
+
+// ---- scrubApiCredsEnv (subscription-first: drop stray API creds from claude's env) ----
+
+Deno.test("scrubApiCredsEnv drops both API creds when subscriptionAuth is on, keeping the rest", () => {
+  const input = { ANTHROPIC_API_KEY: "k", ANTHROPIC_AUTH_TOKEN: "t", PATH: "/x", HOME: "/h" };
+  const out = scrubApiCredsEnv(input, true);
+  assertEquals(out.ANTHROPIC_API_KEY, undefined);
+  assertEquals(out.ANTHROPIC_AUTH_TOKEN, undefined);
+  assertEquals(out.PATH, "/x");
+  assertEquals(out.HOME, "/h");
+  // Must not mutate the caller's env object.
+  assertEquals(input.ANTHROPIC_API_KEY, "k");
+});
+
+Deno.test("scrubApiCredsEnv leaves the env untouched when subscriptionAuth is off", () => {
+  const input = { ANTHROPIC_API_KEY: "k", ANTHROPIC_AUTH_TOKEN: "t", PATH: "/x" };
+  const out = scrubApiCredsEnv(input, false);
+  assertEquals(out.ANTHROPIC_API_KEY, "k");
+  assertEquals(out.ANTHROPIC_AUTH_TOKEN, "t");
+  assertEquals(out.PATH, "/x");
+});
+
+Deno.test("scrubApiCredsEnv is a no-op on an env without the creds", () => {
+  assertEquals(scrubApiCredsEnv({}, true), {});
+  assertEquals(scrubApiCredsEnv({ PATH: "/x", HOME: "/h" }, true), { PATH: "/x", HOME: "/h" });
 });
