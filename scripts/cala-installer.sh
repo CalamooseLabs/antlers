@@ -463,9 +463,17 @@ discover_pat() {
   local mp="" pat="" err=""
   mp=$(mktemp -d)
   err=$(mktemp)
-  # Auto-detect first (the ISO supports vfat); fall back to an explicit -t vfat so
-  # a mount that cannot probe the type on its own still succeeds.
-  if mount -o ro "$dev" "$mp" 2>"$err" || mount -t vfat -o ro "$dev" "$mp" 2>>"$err"; then
+  # The live ISO is booted from this same stick, and the isohybrid layout puts an
+  # iso9660 partition at sector 0 spanning the whole image — so the medium is held
+  # by the WHOLE disk (/dev/sda), not a partition. The kernel's exclusive-claim
+  # rule then refuses a normal open of any partition on it: mounting /dev/sda3
+  # fails EBUSY ("Can't open blockdev"). A loop mount opens the partition
+  # non-exclusively and sidesteps that (the ISO loads the `loop` module). Try a
+  # plain mount first (covers a non-boot-medium stick / PROTON_PASS_PAT_FILE case),
+  # then loop, then an explicit vfat+loop if type probing needs a hand.
+  if mount -o ro "$dev" "$mp" 2>"$err" \
+    || mount -o ro,loop "$dev" "$mp" 2>>"$err" \
+    || mount -t vfat -o ro,loop "$dev" "$mp" 2>>"$err"; then
     if [ -r "$mp/pat" ]; then
       pat=$(cat "$mp/pat" 2>/dev/null || true)
     else
