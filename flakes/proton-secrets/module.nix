@@ -122,7 +122,9 @@ with lib; let
         export PROTON_PASS_PERSONAL_ACCESS_TOKEN
         if ! ${rawCli} test >/dev/null 2>&1; then
           echo '[proton-secrets] establishing session from PAT...'
-          ${rawCli} login || true
+          # pass-cli defaults to web login and ignores the env var; the PAT must
+          # be passed as --pat for a non-interactive (headless) session.
+          ${rawCli} login --pat "$PROTON_PASS_PERSONAL_ACCESS_TOKEN" || true
         fi
       fi
     ''}

@@ -57,8 +57,16 @@ writeShellApplication {
           echo "proton-secrets: already logged in (session at $PROTON_PASS_SESSION_DIR)."
           exit 0
         fi
-        # PAT present -> non-interactive personal-access-token flow; else the
-        # default interactive login (web/device flow, or pass `--interactive`).
+        # `pass-cli login` DEFAULTS TO WEB LOGIN and does NOT read
+        # PROTON_PASS_PERSONAL_ACCESS_TOKEN — a PAT must be handed to it as the
+        # `--pat` flag. So when we have a PAT (from the env, or from the
+        # PROTON_PASS_PAT_FILE loaded above) and the caller passed no explicit
+        # args, log in non-interactively with it. Otherwise fall through to
+        # whatever the caller asked for (`--interactive`, an explicit `--pat …`,
+        # a username) — bare `login` there is still the interactive web flow.
+        if [ "$#" -eq 0 ] && [ -n "''${PROTON_PASS_PERSONAL_ACCESS_TOKEN:-}" ]; then
+          exec pass-cli login --pat "$PROTON_PASS_PERSONAL_ACCESS_TOKEN"
+        fi
         exec pass-cli login "$@"
         ;;
       logout)
