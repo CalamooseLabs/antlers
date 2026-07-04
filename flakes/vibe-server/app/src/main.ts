@@ -25,6 +25,7 @@ import { getSecret, initKey } from "./auth.ts";
 import { seedClaudeConfig } from "./claude.ts";
 import { recoverSessions, saveSnapshot, setRegToken, startReaper } from "./sessions.ts";
 import { handler } from "./router.ts";
+import { runAttach } from "./attach.ts";
 import { b64url, isError, log } from "./util.ts";
 
 // Drop a discovery file a locally-run `vibe` reads to find + authenticate to this
@@ -36,7 +37,14 @@ async function writeEndpointFile(config: ServerConfig, token: string): Promise<v
   const dir = "/run/vibe";
   await Deno.mkdir(dir, { recursive: true }).catch(() => {});
   const file = `${dir}/endpoint.json`;
-  await Deno.writeTextFile(file, JSON.stringify({ url: `http://127.0.0.1:${config.port}`, token }));
+  // `attachBin` is this server's own executable — `vibe open` re-invokes it as
+  // `<attachBin> attach …` for the interactive terminal client (so the client is
+  // always version-matched to the running server, with no extra package to wire).
+  let attachBin = "";
+  try {
+    attachBin = Deno.execPath();
+  } catch { /* leave empty; the CLI falls back to the read-only screen stream */ }
+  await Deno.writeTextFile(file, JSON.stringify({ url: `http://127.0.0.1:${config.port}`, token, attachBin }));
   await Deno.chmod(file, 0o644).catch(() => {});
 }
 
@@ -105,4 +113,13 @@ async function main(): Promise<void> {
   ).finished;
 }
 
-if (import.meta.main) main();
+// `vibe-server attach …` re-invokes this same compiled binary as the interactive
+// terminal client (see attach.ts + writeEndpointFile.attachBin); everything else
+// runs the web service.
+if (import.meta.main) {
+  if (Deno.args[0] === "attach") {
+    runAttach(Deno.args.slice(1));
+  } else {
+    main();
+  }
+}

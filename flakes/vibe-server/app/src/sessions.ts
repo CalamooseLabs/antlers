@@ -4,8 +4,26 @@
 import { b64url, isError, log } from "./util.ts";
 import { buildEnv, configDir, seedTrust } from "./claude.ts";
 import { ActivityScraper, type InteractionState } from "./activity.ts";
-import { findTranscript } from "./transcript.ts";
+import { findTranscript, readTail } from "./transcript.ts";
 import type { PresetConfig, ServerConfig } from "./config.ts";
+
+// A live subscriber to a session's raw PTY output (the interactive terminal
+// attach; see attachSession). `chunk` receives each raw stdout burst verbatim;
+// `end` fires once when the session's streams drain (process gone). Registered
+// only for server-spawned pty sessions with a live pump.
+export interface OutputSub {
+  chunk(bytes: Uint8Array): void;
+  end(): void;
+}
+
+// How much of the raw PTY capture to replay to a freshly-attached client as its
+// first paint, so it sees the session's CURRENT screen immediately rather than a
+// blank one until Claude's next repaint. `claude --remote-control` is a
+// full-screen TUI that repaints its whole viewport with absolute cursor
+// positioning, so the last screenful of raw bytes reproduces the live screen (in
+// colour). A partial leading escape is harmless — the terminal ignores it and the
+// next full repaint corrects everything.
+const ATTACH_REPLAY_BYTES = 256 * 1024;
 
 // Process lifecycle. "booting" is the startup window between spawn and the first
 // output (Claude Code coming up); it becomes "running" once output flows.
@@ -55,9 +73,18 @@ interface Session {
   // sendInput). Present only for server-spawned pty sessions; absent for headless
   // (pty=false) and re-adopted sessions (no child handle → no stdin). Closed on exit.
   inputWriter?: WritableStreamDefaultWriter<Uint8Array>;
-  // Serializes typed-input sends (see sendInput): each message's text+CR writes
-  // chain onto the previous so concurrent sends to one session can't interleave.
+  // Serializes typed-input sends (see sendInput) AND raw interactive keystrokes
+  // (see writeRawInput): every write chains onto the previous so a message send and
+  // a live attach typing into the same session can't interleave their bytes.
   sendChain?: Promise<void>;
+  // Live subscribers to the raw PTY output — the interactive terminal attach
+  // (attachSession). Present only for server-spawned pty sessions with a running
+  // pump; the pump broadcasts each stdout chunk here, and drains fire `end`.
+  outputSubs?: Set<OutputSub>;
+  // Set true (synchronously) once the pump has drained and outputSubs was cleared,
+  // so an attach whose WebSocket opens AFTER the session already exited detects it
+  // and closes instead of subscribing to a set that will never drain again.
+  outputEnded?: boolean;
   // For external (self-registered) sessions: the per-registration token the
   // launcher echoes back on heartbeat/deregister, and the last heartbeat time.
   deregToken?: string;
@@ -247,6 +274,11 @@ export async function spawnSession(config: ServerConfig, preset: PresetConfig): 
   // stdin (accessing child.stdin otherwise throws), so guard on it.
   const inputWriter = config.pty ? child.stdin.getWriter() : undefined;
 
+  // Live subscribers to the raw PTY output, for the interactive terminal attach.
+  // Only meaningful with a pty (there's no captured TUI otherwise); the pump below
+  // broadcasts each stdout burst to them.
+  const outputSubs = new Set<OutputSub>();
+
   const info: SessionInfo = {
     id,
     preset: preset.name,
@@ -312,6 +344,19 @@ export async function spawnSession(config: ServerConfig, preset: PresetConfig): 
           info.state = activity.state;
         }
         if (activity.tokens !== undefined && info.tokens !== activity.tokens) info.tokens = activity.tokens;
+        // Fan the raw stdout out to any interactive attach clients verbatim (only
+        // stdout carries the TUI; stderr is `script`'s own diagnostics). A slow/
+        // broken subscriber must not stall the pump or its peers, so each send is
+        // isolated — a throwing sub is dropped rather than propagated.
+        if (outputSubs.size) {
+          for (const sub of outputSubs) {
+            try {
+              sub.chunk(chunk);
+            } catch {
+              outputSubs.delete(sub);
+            }
+          }
+        }
       }
       await writeLog(chunk);
     }
@@ -338,9 +383,20 @@ export async function spawnSession(config: ServerConfig, preset: PresetConfig): 
     // it may already be errored). Closing sends EOF to `script`, which is harmless
     // post-exit.
     if (inputWriter) inputWriter.close().catch(() => {});
+    // Tell any interactive attach clients the session ended so they detach cleanly,
+    // and flag the end synchronously BEFORE clearing so an attach mid-handshake (its
+    // sub not yet registered) sees it and closes rather than orphaning itself.
+    const self = sessions.get(id);
+    if (self) self.outputEnded = true;
+    for (const sub of outputSubs) {
+      try {
+        sub.end();
+      } catch { /* ignore */ }
+    }
+    outputSubs.clear();
   });
 
-  sessions.set(id, { info, child, logPath, inputWriter });
+  sessions.set(id, { info, child, logPath, inputWriter, outputSubs });
   void saveSnapshot(config.stateDir);
   return info;
 }
@@ -482,6 +538,148 @@ export async function sendInput(
   } catch (e) {
     return { ok: false, code: 500, error: `Could not deliver message: ${isError(e) ? e.message : String(e)}` };
   }
+}
+
+// ---- interactive terminal attach (raw PTY passthrough) ----
+//
+// `vibe open` attaches a real terminal to a running server-spawned session and
+// drives it like a normal `claude` in the terminal: keystrokes flow straight into
+// the PTY (writeRawInput, NOT the sanitized sendInput one-shot path) and the raw
+// PTY output streams back verbatim (attachSession broadcasts the pump's stdout).
+// The transport is a loopback WebSocket, gated by the same discovery-file token as
+// the other /api/local endpoints. Ctrl-C detach lives entirely in the client (it
+// never forwards 0x03); the session keeps running when the client leaves.
+
+// True when a session can be driven by an interactive attach: server-owned,
+// running, and still holding a live PTY (input writer + output fan-out). Excludes
+// external sessions (someone else's terminal) and sessions re-adopted after a
+// restart (no child handle → no stdin / live pump). Surfaced to the CLI as
+// `canInput` so `vibe open` knows whether to attach interactively or fall back to
+// the read-only screen stream.
+export function canAttach(id: string): boolean {
+  const s = sessions.get(id);
+  return !!s && !s.info.external && s.info.status === "running" && !!s.inputWriter && !!s.outputSubs;
+}
+
+// Write RAW bytes into a running session's PTY (the interactive attach's keystroke
+// path). Unlike sendInput, nothing is sanitized or line-submitted — the client's
+// exact key bytes (arrows, escapes, Enter, …) reach Claude Code as typed. Chained
+// onto `sendChain` so a concurrent message-send (sendInput) and live typing can't
+// interleave their writes. Returns false if the session can't take input.
+export async function writeRawInput(id: string, bytes: Uint8Array): Promise<boolean> {
+  const s = sessions.get(id);
+  if (!s || s.info.external || s.info.status !== "running" || !s.inputWriter) return false;
+  if (bytes.length === 0) return true;
+  const writer = s.inputWriter;
+  const run = (s.sendChain ?? Promise.resolve()).then(() => writer.write(bytes));
+  s.sendChain = run.catch(() => {});
+  try {
+    await run;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Upgrade a request to a WebSocket that bridges a real terminal to the session's
+// PTY: on open, replay the last screenful of raw output so the client paints the
+// current screen immediately, then stream live output; inbound binary frames are
+// the client's raw keystrokes, written straight into the PTY. Returns null when the
+// session can't be attached interactively (the route then answers 409 and the CLI
+// falls back to the read-only screen stream). `protocol` is echoed back as the
+// accepted WebSocket subprotocol (the client passes the auth token there, since a
+// WebSocket client can't set request headers).
+export function attachSession(req: Request, id: string, protocol?: string): Response | null {
+  if (!canAttach(id)) return null;
+  const s = sessions.get(id)!;
+  const subs = s.outputSubs!;
+
+  let upgrade: { socket: WebSocket; response: Response };
+  try {
+    upgrade = Deno.upgradeWebSocket(req, protocol ? { protocol } : undefined);
+  } catch {
+    return null; // not a valid WebSocket handshake
+  }
+  const { socket, response } = upgrade;
+  socket.binaryType = "arraybuffer";
+
+  let sub: OutputSub | null = null;
+  const detach = () => {
+    if (sub) {
+      subs.delete(sub);
+      sub = null;
+    }
+  };
+
+  socket.onopen = async () => {
+    // Backpressure guard: if the client can't keep up, drop rather than buffer
+    // unboundedly (Claude's next full repaint re-syncs the screen anyway).
+    const trySend = (bytes: Uint8Array) => {
+      if (socket.readyState === WebSocket.OPEN && socket.bufferedAmount < (1 << 20)) socket.send(bytes);
+    };
+    // Register the subscriber FIRST — before the async readTail below — so a session
+    // that drains DURING the replay await still delivers end() through our sub and
+    // closes the socket, instead of the drain clearing outputSubs before we joined
+    // and leaving us orphaned (client frozen on a dead session). Chunks that arrive
+    // before the replay is sent are queued and flushed right after it, so live output
+    // never races ahead of (or is lost behind) the first paint.
+    let live = false;
+    let ended = false;
+    const queue: Uint8Array[] = [];
+    sub = {
+      chunk: (bytes) => {
+        if (ended) return;
+        if (live) trySend(bytes);
+        else queue.push(bytes);
+      },
+      end: () => {
+        ended = true;
+        try {
+          socket.close(1000, "session ended");
+        } catch { /* already closing */ }
+      },
+    };
+    subs.add(sub);
+    // The pump may have already drained between the pre-upgrade canAttach check and
+    // now (outputSubs cleared without seeing our sub); detect via the sync flag.
+    if (s.outputEnded) {
+      subs.delete(sub);
+      try {
+        socket.close(1000, "session ended");
+      } catch { /* ignore */ }
+      return;
+    }
+    // First paint: clear the client screen, then replay the tail of the raw PTY
+    // capture so the CURRENT screen appears at once (see ATTACH_REPLAY_BYTES).
+    try {
+      trySend(new Uint8Array([0x1b, 0x5b, 0x32, 0x4a, 0x1b, 0x5b, 0x33, 0x4a, 0x1b, 0x5b, 0x48])); // ESC[2J ESC[3J ESC[H
+      const tail = await readTail(s.logPath, ATTACH_REPLAY_BYTES);
+      if (!ended && tail.length) trySend(tail);
+    } catch { /* best-effort first paint */ }
+    // Flush anything captured during the replay, then go live. Synchronous (no await
+    // between the flush and `live = true`), so no chunk can slip in out of order.
+    if (!ended) {
+      for (const b of queue) trySend(b);
+      queue.length = 0;
+      live = true;
+    }
+  };
+
+  socket.onmessage = (e) => {
+    // Inbound frames are the client's raw keystrokes. Fire-and-forget: writeRawInput
+    // serializes writes onto the session's sendChain, so ordering holds without
+    // awaiting here (which would stall the socket's message pump).
+    const data = e.data;
+    if (data instanceof ArrayBuffer) {
+      if (data.byteLength) void writeRawInput(id, new Uint8Array(data));
+    } else if (typeof data === "string" && data.length) {
+      void writeRawInput(id, new TextEncoder().encode(data));
+    }
+  };
+
+  socket.onclose = detach;
+  socket.onerror = detach;
+  return response;
 }
 
 // ---- externally-registered (manually-run `vibe`) sessions ----

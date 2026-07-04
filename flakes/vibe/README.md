@@ -23,7 +23,7 @@ vibe                       # interactive Claude Code with the pinned settings
 vibe @<preset> [args...]   # start a configured preset (see Presets below)
 vibe --remote-control [name]   # same, with Remote Control enabled (drive from claude.ai / mobile)
 vibe ls                    # list this host's vibe-server sessions (see Local session control)
-vibe open [preset|id|name] # open a session in the terminal — start a preset, or attach to one
+vibe open [preset|id|name] # drive a session in the terminal — start a preset, or attach (Ctrl-C detaches)
 vibe --help                # usage + the pinned settings + `claude auth status`
 vibe --show-config         # print the pinned settings.json and exit
 ```
@@ -103,18 +103,29 @@ you manage its sessions straight from the terminal — no browser, no web passwo
 
 ```sh
 vibe ls                    # STATUS / STATE / NAME / ID / DIR table of every session
-vibe open @antlers         # start a new server session for the `antlers` preset, then watch it
-vibe open antlers-a1b2     # attach to an existing session (by id or name) and watch it
+vibe open @antlers         # start a new server session for the `antlers` preset, then attach
+vibe open antlers-a1b2     # attach to an existing session (by id or name)
 vibe open                  # with exactly one live session, attach to it; otherwise print `vibe ls`
 ```
 
 `vibe open <target>` resolves `<target>` two ways: a **configured preset name**
 starts a fresh Remote Control session on the server (like clicking *Start* in the
 web UI) and then attaches; anything else is looked up as an existing session **id
-or name** and attached. *Attaching* streams that session's **live terminal screen**
-read-only, redrawing as it changes — the same view as the web UI's terminal tab.
-**Ctrl-C detaches**; the session keeps running (drive it from claude.ai / mobile as
-usual), so you can pop in to watch and leave without stopping it.
+or name** and attached.
+
+*Attaching* bridges a **real terminal to the session's PTY**: keystrokes drive
+Claude and its output streams back, so it behaves just like running `claude` in
+this terminal — except **Ctrl-C detaches instead of killing** (the session keeps
+running in the background; re-attach later, or drive it from claude.ai / mobile),
+and **Esc interrupts** Claude's current turn. On attach the current screen is
+repainted immediately (a replay of the session's last screenful). The session's
+viewport is fixed at the server's `ptyRows`×`ptyCols` (default 50×120), so for the
+cleanest layout size your terminal similarly (or tune those options). Sessions the
+server can't drive — external (hand-run) `vibe`, or ones re-adopted after a
+vibe-server restart (no live PTY handle) — fall back to a **read-only** live screen
+stream (redrawing as it changes; Ctrl-C detaches). The interactive client is the
+running vibe-server's own binary, which it advertises in the discovery file
+(`attachBin`); older servers without it simply use the read-only stream.
 
 Both commands talk to the local server over loopback, authenticated with the same
 discovery-file token (`/run/vibe/endpoint.json`) that gates self-registration —

@@ -13,6 +13,7 @@ import {
   passwordRequired,
 } from "./auth.ts";
 import {
+  attachSession,
   canSendInput,
   deregisterExternal,
   getSession,
@@ -64,10 +65,14 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
     isLoopbackIp(peerIp) &&
     registerTokenMatches(parseBearerToken(req.headers.get("authorization")) || (req.headers.get("x-vibe-token") ?? ""));
 
-  // When TLS is required, refuse plain-HTTP requests (except the liveness probe
-  // and the loopback-only self-registration endpoint, which a local `vibe` always
-  // reaches over plain HTTP on 127.0.0.1, bypassing any TLS front).
-  if (config.requireTLS && !secure && path !== "/healthz" && path !== "/api/register") {
+  // When TLS is required, refuse plain-HTTP requests (except the liveness probe and
+  // the loopback-only local endpoints — self-registration and the `vibe ls`/`open`
+  // CLI API, which a local `vibe` always reaches over plain HTTP on 127.0.0.1,
+  // bypassing any TLS front).
+  if (
+    config.requireTLS && !secure &&
+    path !== "/healthz" && path !== "/api/register" && !path.startsWith("/api/local/")
+  ) {
     return json({ error: "HTTPS required" }, 426);
   }
 
@@ -174,7 +179,29 @@ export async function handler(req: Request, config: ServerConfig, clientIp: stri
   // same self-upgrading stream the web UI uses; `vibe open` forces ?view=terminal).
   if (path === "/api/local/sessions" && method === "GET") {
     if (!localAuthed()) return json({ error: "Unauthorized" }, 401);
-    return json({ sessions: listSessions() });
+    // `canInput` tells `vibe open` whether a session can be driven by an
+    // interactive attach (server-owned, running, live PTY) or only watched
+    // read-only (external / re-adopted after a restart).
+    return json({ sessions: listSessions().map((s) => ({ ...s, canInput: canSendInput(s.id) })) });
+  }
+  {
+    // Interactive terminal attach (`vibe open`): a loopback WebSocket that bridges a
+    // real terminal to the session's PTY — raw output out, raw keystrokes in. Gated
+    // like the other /api/local endpoints (loopback peer + discovery token), but the
+    // token arrives via the WebSocket subprotocol because a WebSocket client can't
+    // set request headers. Falls back to 409 when the session can't be attached
+    // (external / re-adopted) so the CLI drops to the read-only screen stream.
+    const att = path.match(/^\/api\/local\/sessions\/([A-Za-z0-9_-]+)\/attach$/);
+    if (att && method === "GET") {
+      if (!isLoopbackIp(peerIp)) return json({ error: "Forbidden" }, 403);
+      // The token rides in the WebSocket subprotocol (a WS client can't set request
+      // headers); no query-param fallback, to keep the credential out of the URL.
+      const proto = (req.headers.get("sec-websocket-protocol") ?? "").split(",")[0].trim();
+      if (!registerTokenMatches(proto)) return json({ error: "Unauthorized" }, 401);
+      if (!getSession(att[1])) return json({ error: "Not found" }, 404);
+      const res = attachSession(req, att[1], proto || undefined);
+      return res ?? json({ error: "Interactive attach unavailable for this session" }, 409);
+    }
   }
   if (path === "/api/local/sessions" && method === "POST") {
     if (!localAuthed()) return json({ error: "Unauthorized" }, 401);

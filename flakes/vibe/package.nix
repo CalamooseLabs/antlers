@@ -180,13 +180,15 @@ in
             '  vibe @<preset> [args...]       start a configured preset (dirs + branch + pins)' \
             '  vibe --remote-control [name]   drive from claude.ai / mobile' \
             '  vibe ls                        list the local vibe-server sessions' \
-            '  vibe open [preset|id|name]     open a session in the terminal (start a preset, or attach)' \
+            '  vibe open [preset|id|name]     drive a session in the terminal (start a preset, or attach)' \
             '  vibe --show-config             print the pinned settings.json and exit' \
             '  vibe --help                    this help' \
             'Remote Control name defaults to [<prefix>-]<repo>-<YYYYMMDD>' \
             '  (<repo> = basename of the working dir git toplevel); [name] overrides it.' \
-            'vibe ls / vibe open talk to a vibe-server on this host; vibe open watches a' \
-            '  session live in the terminal (Ctrl-C detaches; the session keeps running).' \
+            'vibe ls / vibe open talk to a vibe-server on this host; vibe open drives a' \
+            '  server-spawned session live in the terminal, just like running claude here' \
+            '  (Ctrl-C detaches and it keeps running; Esc interrupts Claude). It falls back' \
+            '  to a read-only screen for sessions it cannot drive (external / post-restart).' \
             'If a vibe-server runs on this host, the session self-registers so it' \
             '  appears in the web UI (set VIBE_NO_REGISTER=1 to opt out).' \
             'Env overrides: VIBE_MODEL, VIBE_EFFORT, VIBE_ULTRACODE=1,' \
@@ -211,9 +213,13 @@ in
       # `vibe ls` lists this host's vibe-server sessions; `vibe open <target>`
       # opens one in the terminal — if <target> names a configured preset it starts
       # a fresh server session for it, otherwise it attaches to an existing session
-      # by id or name. "Attach" streams the session's LIVE terminal screen read-only
-      # (Ctrl-C detaches; the session keeps running — drive it from claude.ai as
-      # usual). Both talk to the local vibe-server over loopback, authenticated with
+      # by id or name. "Attach" bridges a REAL terminal to the session's PTY (via the
+      # server's compiled attach client): keystrokes drive Claude and its output
+      # streams back, so it behaves just like running `claude` here — except Ctrl-C
+      # DETACHES (the session keeps running in the background) rather than killing it,
+      # and Esc interrupts Claude. Sessions the server can't drive interactively
+      # (external / re-adopted after a restart) fall back to a read-only screen
+      # stream. Both talk to the local vibe-server over loopback, authenticated with
       # the discovery-file token (same gate as self-registration), so no web password
       # is needed. These short-circuit before any `claude` launch.
       VIBE_PRESETS_FILE=${presetsFile}
@@ -250,14 +256,24 @@ in
         fi
       }
 
-      # Stream a session's LIVE terminal screen, redrawing on each SSE snapshot.
-      _vibe_attach() {
+      # Echo the server-advertised attach-client path from the discovery file (the
+      # running vibe-server's own binary; empty when unavailable / older server).
+      _vibe_attachbin() {
+        local f
+        f="''${VIBE_SERVER_ENDPOINT:-/run/vibe/endpoint.json}"
+        [ -r "$f" ] || return 0
+        jq -r '.attachBin // empty' "$f" 2>/dev/null || true
+      }
+
+      # Read-only fallback: stream a session's LIVE terminal screen, redrawing on
+      # each SSE snapshot. Used when interactive attach isn't possible.
+      _vibe_watch() {
         local id="$1" ep url token
         ep="$(_vibe_endpoint)" || return 1
         url="''${ep%%$'\t'*}"
         token="''${ep#*$'\t'}"
         printf '\033[2J\033[H'
-        echo "vibe: watching $id — Ctrl-C to detach (the session keeps running)." >&2
+        echo "vibe: watching $id (read-only) — Ctrl-C to detach (the session keeps running)." >&2
         # Each SSE event (blank-line terminated) is a full screen snapshot; ': …'
         # keepalive comments are ignored. -N streams unbuffered so redraws are live.
         curl -Ns -H "authorization: Bearer $token" \
@@ -289,6 +305,46 @@ in
         } || true
         printf '\n'
         echo "vibe: detached from $id." >&2
+      }
+
+      # Attach to a session in the terminal. With interactive="1" (a session the
+      # server can drive — see canInput) and a TTY, hand off to the server's compiled
+      # attach client for a full two-way terminal (Ctrl-C detaches, session keeps
+      # running). Exit 0 means it attached and finished normally; anything else (no
+      # attach client, couldn't connect, not a tty) falls back to the read-only screen.
+      _vibe_attach() {
+        local id="$1" interactive="''${2:-0}" ep url token attachbin
+        ep="$(_vibe_endpoint)" || return 1
+        url="''${ep%%$'\t'*}"
+        token="''${ep#*$'\t'}"
+        if [ "$interactive" = "1" ] && [ -t 0 ] && [ -t 1 ]; then
+          attachbin="$(_vibe_attachbin)"
+          if [ -n "$attachbin" ] && [ -x "$attachbin" ]; then
+            # Exit 0 = attached then finished (detached / session ended) → done.
+            # Non-zero = never attached (a 409 not-drivable session, a connect error,
+            # or no tty) → fall through to the read-only screen. This MUST stay in an
+            # `if` condition: as a bare command its non-zero exit would trip `set -e`
+            # and abort `vibe open` before the fallback below could run.
+            if "$attachbin" attach --url "$url" --token "$token" "$id"; then
+              return 0
+            fi
+            echo "vibe: interactive attach unavailable — showing the read-only screen." >&2
+          fi
+        fi
+        _vibe_watch "$id"
+      }
+
+      # Poll until a freshly started session can take input (server-owned + running),
+      # so `vibe open <preset>` attaches interactively rather than racing the boot.
+      _vibe_wait_input() {
+        local id="$1" resp ci
+        for _ in $(seq 1 20); do
+          resp="$(_vibe_api GET "/api/local/sessions")" || return 1
+          ci="$(printf '%s' "$resp" | jq -r --arg t "$id" '[.sessions[] | select(.id==$t)][0].canInput // false')"
+          [ "$ci" = "true" ] && return 0
+          sleep 0.3
+        done
+        return 1
       }
 
       # `vibe ls` — a compact table of the local vibe-server's sessions.
@@ -324,7 +380,12 @@ in
           live="$(printf '%s' "$resp" | jq -c '[.sessions[] | select(.status=="running" or .status=="booting")]')"
           count="$(printf '%s' "$live" | jq 'length')"
           if [ "$count" = 1 ]; then
-            _vibe_attach "$(printf '%s' "$live" | jq -r '.[0].id')"
+            local sid ci flag
+            sid="$(printf '%s' "$live" | jq -r '.[0].id')"
+            ci="$(printf '%s' "$live" | jq -r '.[0].canInput // false')"
+            flag=0
+            if [ "$ci" = "true" ]; then flag=1; fi
+            _vibe_attach "$sid" "$flag"
             return $?
           fi
           echo "vibe: name a session (id/name) or a preset to open. Sessions:" >&2
@@ -334,7 +395,11 @@ in
         # An existing session by id or name → attach.
         id="$(printf '%s' "$resp" | jq -r --arg t "$target" '[.sessions[] | select(.id==$t or .name==$t)][0].id // empty')"
         if [ -n "$id" ]; then
-          _vibe_attach "$id"
+          local ci flag
+          ci="$(printf '%s' "$resp" | jq -r --arg t "$target" '[.sessions[] | select(.id==$t or .name==$t)][0].canInput // false')"
+          flag=0
+          if [ "$ci" = "true" ]; then flag=1; fi
+          _vibe_attach "$id" "$flag"
           return $?
         fi
         # Not a session — a configured preset? Start it on the server, then attach.
@@ -350,7 +415,9 @@ in
             echo "vibe: server did not return a session id." >&2
             return 1
           fi
-          _vibe_attach "$ssid"
+          echo "vibe: waiting for the session to come up…" >&2
+          _vibe_wait_input "$ssid" || true
+          _vibe_attach "$ssid" 1
           return $?
         fi
         echo "vibe: '$target' is neither a live session nor a known preset." >&2

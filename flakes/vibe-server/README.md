@@ -138,7 +138,8 @@ also works directly in a terminal — see the [vibe README](../vibe#presets).
 
 A `vibe` you run **by hand** on the same host shows up in the session list too:
 when vibe-server is running it drops a discovery file at `/run/vibe/endpoint.json`
-(URL + token, mode 0644) and the `vibe` launcher reads it and self-registers
+(URL + token + `attachBin` — the server's own binary, used by `vibe open`'s
+interactive attach — mode 0644) and the `vibe` launcher reads it and self-registers
 (`POST /api/register`, gated by a **loopback peer + the token**), heartbeats while
 it runs, and deregisters on exit. Such a session is listed with its directory,
 status and a **Diff** button, but has **no captured-log tail** (its output is in
@@ -153,15 +154,36 @@ and the reaper retires them ~90s after their heartbeats stop.
 The `vibe` launcher can drive this server's sessions straight from the terminal on
 the same host — see the [vibe README](../vibe#local-session-control-vibe-ls--vibe-open).
 `vibe ls` lists sessions; `vibe open <preset>` spawns a preset session (then
-attaches); `vibe open <id|name>` attaches to an existing one, streaming its **live
-terminal screen** read-only (Ctrl-C detaches; the session keeps running). These use
-a small loopback CLI API (`GET`/`POST /api/local/sessions`, `GET
-/api/local/sessions/:id/logs`) gated **exactly like `/api/register`** — a loopback
-peer presenting the discovery-file token (`/run/vibe/endpoint.json`) as
-`Authorization: Bearer <token>` — **not** the web cookie, so they need no shared
+attaches); `vibe open <id|name>` attaches to an existing one.
+
+**Interactive attach.** For a server-spawned session the server can still drive
+(running, with a live PTY), `vibe open` gives a **fully interactive terminal** — a
+loopback WebSocket (`GET /api/local/sessions/:id/attach`) bridges your terminal to
+the session's PTY: keystrokes flow straight into Claude Code and its raw output
+streams back, so it works just like running `claude` here. **Ctrl-C detaches**
+(never forwarded — the session keeps running in the background) and **Esc**
+interrupts Claude. The client is the running vibe-server's own compiled binary,
+re-invoked as `<attachBin> attach …` (advertised in the discovery file, so it's
+always version-matched). The client puts the terminal in raw mode and intercepts
+`0x03` locally, so the detach is a client-side affordance — the byte never reaches
+the PTY. The session's viewport is the fixed `ptyRows`×`ptyCols` (the `script` PTY
+can't be resized live without FFI), so size your terminal to match for the cleanest
+layout. Sessions the server **can't** drive interactively — external (hand-run)
+`vibe`, or ones re-adopted after a restart (no child handle → no stdin) — return
+`409` and the CLI falls back to streaming the **live terminal screen read-only**
+(`GET /api/local/sessions/:id/logs?view=terminal`; Ctrl-C detaches).
+
+These use a small loopback CLI API (`GET`/`POST /api/local/sessions`, `GET
+/api/local/sessions/:id/logs`, `GET /api/local/sessions/:id/attach`) gated
+**exactly like `/api/register`** — a loopback peer presenting the discovery-file
+token (`/run/vibe/endpoint.json`), via `Authorization: Bearer <token>` for the HTTP
+calls and via the **WebSocket subprotocol** for the attach upgrade (a WebSocket
+client can't set request headers) — **not** the web cookie, so they need no shared
 password but only work from the host itself. `POST /api/local/sessions` spawns the
-same way the web *Start* button does, so like the passwordless web UI it lets any
-local user who can read the discovery file start a session; keep the host trusted.
+same way the web *Start* button does, and the attach endpoint feeds **raw
+keystrokes** to Claude Code, so — like the passwordless web UI — any local user who
+can read the discovery file can start and fully drive a session; keep the host
+trusted. (This is the same trust level the spawn endpoint already grants.)
 
 ## Session status & activity
 
@@ -456,7 +478,7 @@ SSE stream flowing.
 | `config.ts`   | `ServerConfig` types, defaults, load from `/etc/vibe/config.json`     |
 | `auth.ts`     | HMAC-signed cookie, constant-time password check, per-IP login throttle |
 | `claude.ts`   | the `claude` CLI + config dir: spawn-env allowlist, `.claude.json` onboarding/theme/trust seeding, `auth status`, the interactive `auth login` flow |
-| `sessions.ts` | spawn, kill, snapshot/recover, login-URL scan, reaper; external (manually-run `vibe`) session register/heartbeat/deregister + the discovery token |
+| `sessions.ts` | spawn, kill, snapshot/recover, login-URL scan, reaper; typed input (`sendInput`) + **raw interactive input** (`writeRawInput`) into the PTY; the interactive-attach WebSocket handler (`attachSession`) + raw-output fan-out (`OutputSub`); external (manually-run `vibe`) session register/heartbeat/deregister + the discovery token |
 | `presets.ts`  | the launch presets (from programs.vibe.presets): `listPresets` + `resolvePreset` (config-defined; no runtime add/remove) |
 | `diff.ts`     | read-only git working-tree diff (tracked + untracked) for the Diff modal |
 | `commit.ts`   | the **only** mutating git path: stage + YubiKey-signed commit (+ push) per directory, multi-dir orchestration (`commitAndPushAll`, aborts on the first signing failure), capability predicates, PIN-via-tmpfs loopback signing (off unless `commitPush.enable`) |
@@ -464,6 +486,7 @@ SSE stream flowing.
 | `activity.ts` | heuristic interaction-state + token scraper over the captured TUI (`classifyScreen`/`parseTokens`): thinking vs ready + `↑ N tokens`. Best-effort fallback; hooks override it |
 | `usage.ts`    | live Claude plan-usage: read the OAuth token (read-only), fetch Anthropic's usage endpoint, `parseUsage` into windows, cache + single-flight throttle (`getUsage`) |
 | `term.ts`     | zero-import VT100/xterm grid emulator that reconstructs the terminal screen from raw PTY output (the terminal-view fallback log) |
+| `attach.ts`   | the interactive terminal **client** (`vibe-server attach …`, re-invoked from the same binary): a loopback WebSocket bridging the local tty to a session's PTY — raw mode, forwards keystrokes, renders raw output, **Ctrl-C detaches** (never forwarded); pure helpers `parseAttachArgs`/`indexOfByte`/`attachWsUrl` |
 | `transcript.ts` | render Claude's complete JSONL transcript to readable text (`renderRecord`/`renderTranscript`) + locate a session's transcript (`findTranscript`/`mangleProjectDir`) + bounded tail read (`readTail`) — the default, complete session log |
 | `sse.ts`      | read-only SSE of a session log via one self-upgrading stream (`streamSessionLog`): incremental Claude JSONL transcript by default, terminal screen (`term.ts`) as fallback, switching live |
 | `http.ts`     | JSON responses + size-capped JSON body reader                        |
@@ -524,9 +547,10 @@ gnupgHome, generateMessage}`). The Claude config dir itself is selected by the m
 | `PUT /api/register`                   | token | external-session heartbeat (`{id,token}`); loopback only |
 | `DELETE /api/register`                | token | external-session deregister (`{id,token}`); loopback only |
 | `POST /api/session-state`             | token | a session's Claude Code hook reports its interaction state (`{id,token,state,tokens?}`, state ∈ ready/thinking/completed); loopback peer + discovery token only |
-| `GET /api/local/sessions`             | token | local CLI (`vibe ls`): list sessions; loopback peer + discovery token via `Authorization: Bearer` (or `x-vibe-token`), not the web cookie |
+| `GET /api/local/sessions`             | token | local CLI (`vibe ls`): list sessions (each with `canInput` — whether it can be driven by an interactive attach); loopback peer + discovery token via `Authorization: Bearer` (or `x-vibe-token`), not the web cookie |
 | `POST /api/local/sessions`            | token | local CLI (`vibe open <preset>`): spawn a preset session (`{preset}`); loopback + bearer token |
-| `GET /api/local/sessions/:id/logs`    | token | local CLI (`vibe open`): SSE stream of a session's log (`?view=terminal` for the live screen); loopback + bearer token |
+| `GET /api/local/sessions/:id/logs`    | token | local CLI (`vibe open` read-only fallback): SSE stream of a session's log (`?view=terminal` for the live screen); loopback + bearer token |
+| `GET /api/local/sessions/:id/attach`  | token | local CLI (`vibe open`): **interactive** WebSocket bridging a terminal to the session's PTY — raw output out, raw keystrokes in; loopback peer + discovery token in the **WebSocket subprotocol**; `409` when the session can't be driven (external / re-adopted) so the CLI falls back to the read-only `…/logs` stream |
 | `GET /api/me`                         | yes  | cookie check                              |
 | `GET /api/claude-auth`                | yes  | Claude account auth status + in-flight login state |
 | `POST /api/claude-auth/login`         | yes  | start (or rejoin) `claude auth login`; returns the OAuth URL |
