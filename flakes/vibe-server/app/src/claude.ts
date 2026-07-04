@@ -343,12 +343,39 @@ export function loginState(): LoginState {
   return current ? { ...current.state } : { phase: "idle" };
 }
 
+// Log the current Claude account out (drops the OAuth credentials from the shared
+// config dir). Best-effort / non-fatal — run before an interactive login so
+// "log in as a different account" can't be short-circuited by an existing login:
+// with an account already signed in, `claude auth login` exits 0 WITHOUT printing
+// an OAuth URL (verified against claude-code 2.1.177), which the UI then surfaces
+// as an instant "success" with no link to follow. An already-logged-out state (or
+// a logout error) is ignored; the login spawn that follows still drives the flow.
+export async function claudeLogout(config: ServerConfig): Promise<void> {
+  try {
+    await new Deno.Command("claude", {
+      args: ["auth", "logout"],
+      env: buildEnv(config),
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+  } catch (e) {
+    log("warn", "claude auth logout failed", { err: isError(e) ? e.message : String(e) });
+  }
+}
+
 // Start `claude auth login` (or return the in-flight one). Spawns it under a PTY
 // (util-linux `script`) with piped stdin so the code can be written back into the
 // PTY; setsid gives it its own process group for a clean kill.
 export async function startClaudeLogin(config: ServerConfig): Promise<LoginState> {
   if (current && isLive(current.state.phase)) return { ...current.state };
   cancelClaudeLogin(); // clear a previous finished attempt
+
+  // Log out any signed-in account FIRST so `claude auth login` always issues a
+  // fresh OAuth URL. When an account is already signed in it exits 0 with no URL
+  // (2.1.177), so the flow would jump straight to "done"/success and the user
+  // could never follow a link to switch accounts.
+  await claudeLogout(config);
 
   const dec = new TextDecoder();
   let child: Deno.ChildProcess;
@@ -421,10 +448,11 @@ export async function startClaudeLogin(config: ServerConfig): Promise<LoginState
 }
 
 // Pure: did the pasted code actually establish/refresh the subscription login?
-// A clean exit (code 0) is authoritative — `claude auth login` has no
-// already-logged-in short-circuit, so exit 0 means it cleared and rewrote the
-// OAuth credentials (even a same-account refresh). Otherwise (non-zero / lost exit
-// code) only trust an auth status that shows a REAL claude.ai subscription login
+// A clean exit (code 0) is authoritative — startClaudeLogin logs the previous
+// account out before the login, so a code exchange always ran; exit 0 means the
+// pasted code was accepted and fresh OAuth credentials were written. Otherwise
+// (non-zero / lost exit code) only trust an auth status that shows a REAL claude.ai
+// subscription login
 // AND a CHANGE from the before-snapshot, so we never report success on: a stray
 // API key (authMethod "api_key") / auth token ("oauth_token") that fabricates
 // loggedIn=true, or a FAILED account switch that left the prior OAuth logged in

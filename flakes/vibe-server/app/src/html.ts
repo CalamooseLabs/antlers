@@ -611,8 +611,10 @@ function renderAuthBanner(status) {
     if (status.subscriptionType) txt += " (" + status.subscriptionType + ")";
     b.appendChild(document.createTextNode(txt));
     // Steady state for the server is "logged in", so this is the only way to
-    // switch/refresh the account from the UI. claude auth login always clears and
-    // rewrites the OAuth credentials, so re-running it swaps the account.
+    // switch/refresh the account from the UI. The server logs the current account
+    // out before starting the login, so it always presents a fresh OAuth link to
+    // sign in as a different account (an already-signed-in claude auth login
+    // otherwise exits with no URL).
     const sp = document.createElement("span"); sp.className = "spacer"; b.appendChild(sp);
     const relog = document.createElement("button");
     relog.textContent = "Log in as a different account";
