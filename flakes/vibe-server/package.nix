@@ -27,10 +27,11 @@
     or (throw "vibe-server: unsupported system ${system}");
 
   # Pre-resolve the Deno module graph as a fixed-output derivation. main.ts has
-  # no external dependencies, but `deno cache` still writes a (deno-version-
-  # specific) cache, so this hash must be refreshed when nixpkgs bumps deno —
-  # like denortZip below. Last updated for deno 2.8.3. Keeping the step means
-  # added deps continue to build (FODs may fetch).
+  # no external dependencies, but `deno cache` still writes a cache keyed by the
+  # app source, so this hash must be refreshed whenever files under ./app change
+  # (and, in principle, on a deno bump — though 2.8.2 and 2.8.3 produce the same
+  # output here). Keeping the step means added deps continue to build (FODs may
+  # fetch).
   denoCache = stdenv.mkDerivation {
     name = "vibe-server-deno-cache";
     inherit src;
@@ -48,7 +49,7 @@
     '';
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-Ut0nrA0+re7q5gJ3NcXCAAAiqsfIJevEiami5CyFGr0=";
+    outputHash = "sha256-eMuGXjUs4vCsX8uLjW3FapHsmbbHsYwaDXsVVN2MSDo=";
   };
 
   # denort runtime that `deno compile` needs for the target triple.
