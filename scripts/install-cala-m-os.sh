@@ -31,6 +31,9 @@ CLONE_URL="${INSTALL_CLONE_URL:-https://github.com/calamooselabs/cala-m-os.git}"
 TARGET_NIXOS_DIR="${INSTALL_TARGET_DIR:-/etc/nixos}"
 # Where the config is mounted during install (under /mnt).
 MNT_NIXOS_DIR="${INSTALL_MNT_DIR:-/mnt/etc/nixos}"
+# Filesystem root disko mounts the target on (parent of $MNT_NIXOS_DIR). The
+# Proton Pass seed lands under here before the first activation (Step Five).
+INSTALL_MNT_ROOT="${INSTALL_MNT_ROOT:-/mnt}"
 # DisplayLink prefetch zip (path is relative to each nixos dir).
 PREFETCH_REL="${INSTALL_PREFETCH_REL:-prefetch/displaylink-620.zip}"
 # Accounts whose passwords are set in Step Five.
@@ -60,6 +63,32 @@ nix-prefetch-url "file://$MNT_NIXOS_DIR/$PREFETCH_REL"
 nixos-enter -- nix-prefetch-url "file://$TARGET_NIXOS_DIR/$PREFETCH_REL"
 echo "Step Three Completed!"
 echo
+# Seed a Proton Pass session/PAT onto the target BEFORE the first activation.
+# Step Five runs `nixos-enter -- chpasswd`, and nixos-enter runs the target's
+# `activate` first. On an online (Proton Pass) host that activation fetches
+# secrets fail-closed; with an empty /var/lib/proton-pass-cli it aborts before
+# the `users` snippet (which creates the declared accounts) and before the
+# /run/current-system symlink — so chpasswd can neither resolve nor find the
+# users (the classic exit 127). Seeding here — after the disk is mounted
+# (Step One) and before Step Five — lets that activation mint a session from
+# the PAT and succeed. Inert unless the installer staged a session/PAT.
+# tmpfiles' `d` rule (created at first boot) is non-destructive to this content.
+if [ "${INSTALL_PROTON_SEED:-0}" = "1" ]; then
+  echo "Seeding Proton Pass session onto the target..."
+  _proton_tgt="$INSTALL_MNT_ROOT/var/lib/proton-pass-cli"
+  _proton_src="${INSTALL_PROTON_SESSION_DIR:-/var/lib/proton-pass-cli}"
+  install -d -m700 "$_proton_tgt"
+  if [ -d "$_proton_src" ]; then
+    cp -a "$_proton_src/." "$_proton_tgt/" 2>/dev/null || true
+  fi
+  if [ -n "${INSTALL_PROTON_PAT_FILE:-}" ] && [ -r "$INSTALL_PROTON_PAT_FILE" ]; then
+    (umask 077; cp -f "$INSTALL_PROTON_PAT_FILE" "$_proton_tgt/pat")
+    chmod 600 "$_proton_tgt/pat"
+  fi
+  chown -R root:root "$_proton_tgt" 2>/dev/null || true
+  echo "Proton Pass session seeded."
+  echo
+fi
 # Persist the machine override so future rebuilds on this box keep
 # targeting the overridden machine (the env var is gone after install).
 if [ -n "$MACHINE_OVERRIDE" ]; then

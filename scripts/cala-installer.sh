@@ -567,6 +567,14 @@ proton_flow() {
 # to these pre-seeded contents.
 seed_proton_target() {
   [ "$PROTON_DO_SEED" -eq 1 ] || return 0
+  # install-cala-m-os now seeds the target BEFORE its first activation (Step Five)
+  # when INSTALL_PROTON_SEED=1. If it did, skip the re-copy: the target's own
+  # activation may have minted a machine-id-bound session that the installer's
+  # (mismatched) session would clobber. The PAT it wrote is already in place.
+  if [ "${INSTALL_PROTON_SEED:-0}" = "1" ]; then
+    info "Proton session/PAT already seeded to the target by the installer backend."
+    return 0
+  fi
   local tgt="/mnt/var/lib/proton-pass-cli"
   install -d -m 700 "$tgt"
 
@@ -659,6 +667,22 @@ main() {
     "Secrets      : $backend"
   gum confirm "Proceed? This ERASES the target disk." || die "Aborted before install."
 
+  # Stage the captured Proton session/PAT so install-cala-m-os can seed the target
+  # BEFORE its first activation (Step Five's nixos-enter runs the new system's
+  # `activate`, which on an online host fetches secrets fail-closed). Seeding only
+  # after the backend returns — as seed_proton_target did — is too late: the
+  # activation has already aborted, taking user creation and passwd setup with it.
+  local proton_pat_file=""
+  if [ "$do_proton" -eq 1 ] && [ "$PROTON_DO_SEED" -eq 1 ]; then
+    export INSTALL_PROTON_SEED=1
+    export INSTALL_PROTON_SESSION_DIR="$PROTON_SESSION_DIR"
+    if [ -n "$PROTON_PAT" ]; then
+      proton_pat_file=$(mktemp) || die "mktemp failed while staging the Proton PAT."
+      (umask 077; printf '%s' "$PROTON_PAT" >"$proton_pat_file")
+      export INSTALL_PROTON_PAT_FILE="$proton_pat_file"
+    fi
+  fi
+
   local rc=0
   if [ "$USE_SELF" -eq 1 ]; then
     INSTALL_FLAKE_REF="$SELF_FLAKE_REF" INSTALL_CLONE_URL="$SELF_FLAKE_REF" \
@@ -668,6 +692,10 @@ main() {
   else
     install-cala-m-os "$HOST" || rc=$?
   fi
+
+  # The backend consumed the staged PAT during its run (Step Five activation);
+  # drop the temp file regardless of outcome.
+  [ -n "$proton_pat_file" ] && rm -f "$proton_pat_file"
 
   [ "$rc" -eq 0 ] || die "install-cala-m-os failed (exit $rc)."
 
