@@ -49,7 +49,29 @@ echo
 echo "Step One: Erasing and Formatting Disk"
 # disko is shipped on the installer ISO's PATH (iso/default.nix systemPackages),
 # so this stays offline-capable rather than fetching disko over the network.
-disko --mode destroy,format,mount --flake "$FLAKE_REF#$HOST_FLAKE" --yes-wipe-all-disks
+# Gate the unattended full wipe behind the host's calamoose.install.wipeAllDisks
+# (default false) so dual-boot / partially-owned machines are never auto-wiped.
+# Distinguish a genuine `false` from an EVAL ERROR (option absent on the ref, host
+# not pushed, network) — otherwise a wipeAllDisks=true host that simply isn't
+# reachable would be told "set it to true" when it already is.
+if ! WIPE_ALL=$(nix eval --impure "$FLAKE_REF#nixosConfigurations.$HOST_FLAKE.config.calamoose.install.wipeAllDisks" 2>/tmp/wipeAllDisks.err); then
+  echo "ERROR: could not evaluate calamoose.install.wipeAllDisks for '$HOST_FLAKE' from '$FLAKE_REF'." >&2
+  echo "  Is the option defined and this host committed/pushed at that ref? nix said:" >&2
+  sed 's/^/    /' /tmp/wipeAllDisks.err >&2
+  exit 1
+fi
+if [ "$WIPE_ALL" = "true" ]; then
+  disko --mode destroy,format,mount --flake "$FLAKE_REF#$HOST_FLAKE" --yes-wipe-all-disks
+elif [ "${INSTALL_SKIP_DISKO:-0}" = "1" ]; then
+  echo "  [install] calamoose.install.wipeAllDisks=false + INSTALL_SKIP_DISKO=1:"
+  echo "  [install] assuming the target is already partitioned and mounted at $INSTALL_MNT_ROOT."
+else
+  echo "ERROR: calamoose.install.wipeAllDisks=false for '$HOST_FLAKE' (the default)." >&2
+  echo "  Refusing to auto-partition — this host may dual-boot or own only some disks." >&2
+  echo "    • If NixOS owns every disk here, set calamoose.install.wipeAllDisks = true and re-run." >&2
+  echo "    • Otherwise partition/mount the target yourself, then re-run with INSTALL_SKIP_DISKO=1." >&2
+  exit 1
+fi
 echo "Step One Completed!"
 echo
 echo "Step Two: Installing Minimal NixOS Configuration"
