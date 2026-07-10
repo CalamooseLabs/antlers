@@ -118,6 +118,64 @@ if [ -n "$MACHINE_OVERRIDE" ]; then
 fi
 echo "Step Four: Building Cala-M-OS"
 nixos-enter -- env MACHINE_OVERRIDE="$MACHINE_OVERRIDE" nixos-rebuild boot --flake "$TARGET_NIXOS_DIR#$HOST_FLAKE" --impure
+
+# Verify the generation Step Four just made the boot default is actually
+# bootable BEFORE telling the user to reboot. An interrupted bootloader
+# install (power blip, OOM kill) can leave a loader entry whose kernel/initrd
+# never finished copying to the ESP, or whose toplevel never fully realized —
+# the next boot then dies in stage-1 with "no usable init" and a blank screen.
+# Catch that here, loudly, while we still have a live installer shell.
+echo "Verifying the new boot entry..."
+_esp="$INSTALL_MNT_ROOT/boot"
+# systemd-boot names entries by CONTENT HASH (nixos-<sha256>.conf), not by
+# generation number, so don't glob — read the entry it will actually boot from
+# loader.conf ("preferred" wins over "default" when boot counting is on; the
+# default may be a nixos-* glob fallback in that mode). The `|| true` keeps a
+# missing/unreadable loader.conf on the diagnostic path below instead of dying
+# silently under set -e/pipefail.
+_default=$(awk '$1 == "preferred" {p = $2} $1 == "default" {d = $2} END {print (p != "" ? p : d)}' "$_esp/loader/loader.conf" 2>/dev/null || true)
+_entry=""
+case $_default in
+"") ;; # no loader.conf / no default recorded — caught below
+*\**)
+  # Boot-counting glob fallback: any matching entry proves the install landed;
+  # pick the newest. (find exits 0 on an existing dir even with zero matches.)
+  if [ -d "$_esp/loader/entries" ]; then
+    _entry=$(find "$_esp/loader/entries" -maxdepth 1 -name "$_default" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n1 | cut -d' ' -f2- || true)
+  fi
+  ;;
+*)
+  _entry="$_esp/loader/entries/$_default"
+  ;;
+esac
+if [ -z "$_entry" ] || [ ! -s "$_entry" ]; then
+  echo "ERROR: systemd-boot has no usable default entry under $_esp (loader.conf default: '${_default:-<none>}')." >&2
+  echo "  The bootloader install did not complete — re-run Step Four:" >&2
+  echo "    nixos-enter -- nixos-rebuild boot --flake $TARGET_NIXOS_DIR#$HOST_FLAKE --impure" >&2
+  exit 1
+fi
+# Every kernel/initrd path the entry references must exist on the ESP, non-empty.
+while read -r _f; do
+  if [ ! -s "$_esp$_f" ]; then
+    echo "ERROR: boot entry $(basename "$_entry") references $_f, which is missing or empty on the ESP." >&2
+    # Remove the bad copy first: the bootloader installer skips ESP files that
+    # already exist, so a re-run would otherwise leave the empty file in place.
+    rm -f "$_esp$_f"
+    echo "  Removed the bad copy; re-run Step Four to re-copy it:" >&2
+    echo "    nixos-enter -- nixos-rebuild boot --flake $TARGET_NIXOS_DIR#$HOST_FLAKE --impure" >&2
+    exit 1
+  fi
+done < <(awk '$1 == "linux" || $1 == "initrd" {print $2}' "$_entry")
+# The init= the entry hands to stage-1 must exist in the target store.
+_init=$(sed -n 's/^options .*init=\([^ ]*\).*/\1/p' "$_entry")
+if [ -z "$_init" ] || [ ! -e "$INSTALL_MNT_ROOT$_init" ]; then
+  echo "ERROR: boot entry $(basename "$_entry") points at init=${_init:-<none>}, which does not exist under $INSTALL_MNT_ROOT." >&2
+  echo "  The system toplevel never fully realized — re-run Step Four:" >&2
+  echo "    nixos-enter -- nixos-rebuild boot --flake $TARGET_NIXOS_DIR#$HOST_FLAKE --impure" >&2
+  exit 1
+fi
+sync
+echo "Boot entry $(basename "$_entry") verified: kernel, initrd, and init all present."
 echo "Step Four Completed!"
 echo
 echo "Step Five: Setting User Passwords"

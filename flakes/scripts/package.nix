@@ -69,7 +69,7 @@
   # so it is bundled like the `antlers` CLI: the script plus its completion under
   # one derivation.
   install-cala-m-os = let
-    app = mk "install-cala-m-os" [git nix util-linux coreutils];
+    app = mk "install-cala-m-os" [git nix util-linux coreutils findutils gawk gnused];
     completion = scriptsDir + "/install-cala-m-os.completion.bash";
   in
     runCommandLocal "install-cala-m-os" {
