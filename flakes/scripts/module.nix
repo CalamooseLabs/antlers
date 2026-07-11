@@ -210,6 +210,39 @@ location: {
                 }
               ];
             }))
+            ++ (optional cfg.yubikey-github-bootstrap.enable (wrap {
+              pkg = "yubikey-github-bootstrap";
+              env = [
+                {
+                  name = "GPG_NAME";
+                  value = cfg.yubikey-github-bootstrap.gpgName;
+                }
+                {
+                  name = "GPG_EMAIL";
+                  value = cfg.yubikey-github-bootstrap.gpgEmail;
+                }
+                {
+                  name = "GPG_ALGO";
+                  value = cfg.yubikey-github-bootstrap.gpgAlgo;
+                }
+                {
+                  name = "GPG_EXPIRE";
+                  value = cfg.yubikey-github-bootstrap.gpgExpire;
+                }
+                {
+                  name = "PROTON_VAULT";
+                  value = cfg.yubikey-github-bootstrap.protonVault;
+                }
+                {
+                  name = "PROTON_ITEM";
+                  value = cfg.yubikey-github-bootstrap.protonItem;
+                }
+                {
+                  name = "CONFIG_PATH";
+                  value = cfg.yubikey-github-bootstrap.configPath;
+                }
+              ];
+            }))
             ++ (optional cfg.bridge-internet.enable (wrap {
               pkg = "bridge-internet";
               env = [
@@ -399,6 +432,15 @@ location: {
               gpgAlgo = strOpt "auto"; # OpenPGP key algorithm; auto => 25519 (fw>=5.2.3) else rsa2048
               gpgExpire = strOpt "0"; # OpenPGP key expiry; 0 => never
               gpgTouch = strOpt "cached"; # signature-key touch policy (ykman openpgp set-touch)
+              configPath = strOpt "/etc/nixos";
+            };
+            yubikey-github-bootstrap = scriptModule {
+              gpgName = strOpt ""; # OpenPGP user-ID name; "" => git user.name / prompt
+              gpgEmail = strOpt ""; # OpenPGP user-ID email; "" => git user.email / prompt
+              gpgAlgo = strOpt "auto"; # OpenPGP key algorithm; auto => 25519 (fw>=5.2.3) else rsa2048
+              gpgExpire = strOpt "0"; # OpenPGP key expiry; 0 => never
+              protonVault = strOpt "Cala-M-OS"; # Proton Pass vault holding the public key
+              protonItem = strOpt "ai-github-gpg.asc"; # Proton Pass item title (field is "secret")
               configPath = strOpt "/etc/nixos";
             };
             bridge-internet = scriptModule {

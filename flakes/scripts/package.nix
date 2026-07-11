@@ -106,6 +106,9 @@ in {
   gpg-key-import = mk "gpg-key-import" [gnupg coreutils];
   # Generate a fresh on-card SSH key (PIV) + OpenPGP signing key on a YubiKey.
   yubikey-provision = mk "yubikey-provision" [yubikey-manager openssh gnupg coreutils gnused];
+  # Provision a YubiKey from scratch with an on-card OpenPGP identity for a GitHub
+  # account (present-but-no-touch), and print the Proton Pass / NixOS / GitHub follow-ups.
+  yubikey-github-bootstrap = mk "yubikey-github-bootstrap" [yubikey-manager gnupg coreutils gnused gawk];
   remote-kvm = mk "remote-kvm" [curl chromium coreutils];
   pi-imager = mk "pi-imager" [rpi-imager];
   # One generic Servarr restore tool; the module instantiates <app>-restore wrappers.

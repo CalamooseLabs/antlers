@@ -160,6 +160,7 @@ is the default while a runtime env var (`CONFIG_PATH=… rebuild-config`) still 
 | `ssh-key-import` | pull the Yubikey FIDO2 resident SSH key into `~/.ssh` + agent |
 | `gpg-key-import` | idempotently import a (Yubikey) GPG public key into your keyring |
 | `yubikey-provision` | import an existing SSH private key into a Yubikey PIV slot (hardware-backed SSH) + a self-signed slot cert |
+| `yubikey-github-bootstrap` | provision a Yubikey from scratch with an on-card OpenPGP identity for a GitHub account (present-but-no-touch) + print the Proton Pass / NixOS / GitHub follow-ups |
 | `github-repo-puller` | clone / fast-forward a configured set of GitHub repos |
 | `chromium-ephemeral` | ungoogled-chromium with a throwaway, deleted-on-exit profile |
 | `bridge-internet` | share the host's internet over an ethernet NIC (dnsmasq + nftables NAT) |
