@@ -1,0 +1,6 @@
+.direnv/
+result
+result/
+build/
+__pycache__/
+doc.json

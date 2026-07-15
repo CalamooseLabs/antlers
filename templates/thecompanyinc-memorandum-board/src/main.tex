@@ -1,0 +1,13 @@
+\documentclass[12pt]{scrartcl}
+\usepackage{import}
+
+% The ONE canonical style (from antlers mkLegalDoc, resolved via TEXINPUTS).
+\input{thecompanyinc-style}
+\subimport{./src}{defined_terms}
+\subimport{./src}{variables}
+
+\title{MEMORANDUM OF ACTION\\OF DIRECTORS}
+\begin{document}
+\maketitle
+\subimport{./src}{content}
+\end{document}

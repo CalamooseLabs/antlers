@@ -113,6 +113,18 @@ nix flake new <path> -t .#article   # or .#section / .#subsection / .#subsubsect
 
 `nkc-report` is the simpler variant — flat `src/content.tex` with `\newtoggle` flags (`confidential`, `showdraft`, `showcomments`) for watermarks/headers, and no nested `templates/` dir.
 
+### The Company, Inc. corporate documents (`thecompanyinc-*`) + `flakes/legal`
+
+A family of 10 corporate-document templates (`thecompanyinc-annual-board-memo`, `-annual-shareholder-memo`, `-authentication-record-book`, `-memorandum-board`, `-memorandum-shareholders`, `-bill-of-sale`, `-ip-license`, `-promissory-note`, `-bylaws-amendment`, `-shareholder-agreement-amendment`) that all share **one** canonical style and **one** wizard, exposed from **`flakes/legal/`** (wired into the root flake like the other packages):
+
+- **`packages.thecompanyinc-style`** — a derivation carrying the single canonical `thecompanyinc-style.tex` (Century Schoolbook, generalized from the master-lease style: `\section`→"ARTICLE \<Roman\>", run-in dotted subsections, defined-term machinery, `\exhibithead`/`\schedulehead`, `\sigline`/`\sigblock`/`\sigpair`/`\fillin`, `zref` footer, `hyperref` last). Editing this one file restyles every corporate doc.
+- **`lib.mkLegalDoc { src; pname?; mainTex? }`** — the shared `latexmk`/`texliveFull` PDF builder; it puts the style dir on `TEXINPUTS`, so a doc's `src/main.tex` loads it with `\input{thecompanyinc-style}` (then `\subimport{./src}{defined_terms}` / `{variables}` / `{content}`). No per-doc `build.nix`.
+- **`lib.docWizard`** (packaged as `thecompanyinc-doc-wizard`) — the shared **`create-doc`/`edit-doc`** commands. The DRY engine lives in `flakes/legal/wizard/` (`render_core.py` = generic formatters + a manifest-driven `derive()`; `create_doc.py` = the wizard). It reads each template's own **`scripts/manifest.py`** (`TITLE`, `INPUTS` [typed fill-ins: text/choice/count/floor/sqft/years/money/money_simple/percent/percent_legal/date/address; `firm=True` seeds `settings.json`, `blank=True` renders a `\fillin` rule], optional `NODES` tree, optional `DEFINED_TERMS`, optional `SUMMARY_FIELDS`), so **one** engine drives all 10. Same UX as `create-lease` (`settings.json` firm defaults > `doc.json` per-instance answers; `--defaults`/`--no-build`/`--save-settings`/`--scaffold`). Most of these docs are flat (`NODES=[]`) — the wizard just fills `src/variables.tex`; the agreements can use the node tree.
+
+Each template dir is **thin**: `flake.nix` (`packages.default = antlers.lib.${system}.mkLegalDoc { src = ./.; }`), `shell.nix` (adds `antlersLib.docWizard` + sets `TEXINPUTS` so texlab resolves the style), `scripts/manifest.py`, `src/{main,content}.tex` (+ generated `variables.tex`/`defined_terms.tex`), `settings.json` (The Company, Inc. firm defaults).
+
+**Legal-folder instances/records** live at `~/02 - Areas/The Company, Inc./legal/<Doc Name>/` — each a self-contained flake that consumes antlers via a **`path:`** input (`antlers.url = "path:/home/hub/01%20-%20Projects/calamooselabs/antlers"`; switch to `github:CalamooseLabs/antlers` + a pinned rev once pushed) and builds its PDF with `mkLegalDoc`. The reusable-doc folders are filled instances of the templates (wizard included); `Bylaws`, `Shareholder Agreement` (+ its Schedule A promissory note), and `Executive Summary` are **static records** (no wizard — `src/variables.tex` holds the real values directly).
+
 ### spreadsheet-pdf template
 
 A different pipeline: `build.nix` drives `sc-im` headlessly via an `expect` heredoc to export `src/main.sc` to Markdown, then `pandoc` renders `main.pdf`. (The heredoc terminator is column-0 *after* Nix `''` strips the common indent — leave it indented in-source.)

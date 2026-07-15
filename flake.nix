@@ -57,6 +57,12 @@
     # agenix-shaped, activation-time secret-decryption NixOS module
     # (services.proton-secrets). The bundled proton-pass-cli is UNFREE.
     proton-secrets = pkgs.callPackage ./flakes/proton-secrets/package.nix {};
+
+    # legal — shared infra for The Company, Inc. legal documents: the ONE canonical
+    # LaTeX style (thecompanyinc-style), the mkLegalDoc PDF builder, and the shared
+    # create-doc/edit-doc wizard (docWizard). Consumed by every `thecompanyinc-*`
+    # template and by the legal-folder PDF builders. Returns an attrset of these.
+    legal = pkgs.callPackage ./flakes/legal/package.nix {};
   in {
     # ---- Buildable packages: `nix build .#zed-editor`, `nix run .#zed-editor` ----
     packages.${system} =
@@ -64,6 +70,9 @@
         inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein moosefetch proton-secrets;
         # Re-export the raw Proton Pass CLI (binary `pass-cli`) for `nix run .#proton-pass-cli`.
         proton-pass-cli = pkgs.proton-pass-cli;
+        # Legal-doc shared infra: the canonical style + the create-doc/edit-doc wizard.
+        thecompanyinc-style = legal.thecompanyinc-style;
+        thecompanyinc-doc-wizard = legal.docWizard;
         default = zed-editor;
       }
       // scripts;
@@ -91,6 +100,9 @@
     #      inputs.antlers.lib.x86_64-linux.mkVibeWrapper { model = "opus"; ... }
     lib.${system} = {
       inherit mkZedWrapper mkVibeWrapper mkMoosefetch scripts;
+      # Legal-doc builders: mkLegalDoc { src; } -> PDF derivation; docWizard -> create-doc/edit-doc;
+      # thecompanyinc-style -> the canonical style derivation (its $out/tex on TEXINPUTS).
+      inherit (legal) mkLegalDoc docWizard thecompanyinc-style;
     };
 
     # ---- Overlay so NixOS / home-manager configs can consume directly ----
@@ -105,6 +117,8 @@
         fadein = final.callPackage ./flakes/fadein/package.nix {};
         moosefetch = (final.callPackage ./flakes/moosefetch/package.nix {}) {};
         proton-secrets = final.callPackage ./flakes/proton-secrets/package.nix {};
+        thecompanyinc-style = (final.callPackage ./flakes/legal/package.nix {}).thecompanyinc-style;
+        thecompanyinc-doc-wizard = (final.callPackage ./flakes/legal/package.nix {}).docWizard;
       }
       // (final.callPackages ./flakes/scripts/package.nix {});
 

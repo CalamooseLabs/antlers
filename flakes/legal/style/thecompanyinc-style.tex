@@ -1,0 +1,208 @@
+% ============================================================================
+% thecompanyinc-style.tex — the ONE canonical style for The Company, Inc. legal
+% documents. Every antlers `thecompanyinc-*` template AND every legal-folder doc
+% \input's THIS file (resolved via TEXINPUTS, injected by antlers' mkLegalDoc),
+% so a single edit here restyles every corporate PDF uniformly. No per-doc copies.
+%
+% Typeface: Century Schoolbook (TeX Gyre Schola) — the U.S. Supreme Court face.
+% Generalized from templates/nkc-master-lease/src/style.tex. Load order in main.tex:
+%   \input{thecompanyinc-style}  ->  \subimport{./src}{defined_terms}
+%   ->  \subimport{./src}{variables}  ->  \subimport{./src}{content}
+% Requires \documentclass{scrartcl} (KOMA-Script).
+% ============================================================================
+
+% ---- Compatible packages --------------------------------------------------
+\usepackage{tocbasic}
+\usepackage[english]{babel}
+\usepackage{scrlayer-scrpage}
+\usepackage{xcolor}
+\usepackage{ulem}
+\usepackage{hanging}
+\usepackage{ifthen}
+\usepackage[totpages]{zref}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{xltabular}
+\usepackage{enumitem}
+
+% ---- Century Schoolbook (the typeface used by the U.S. Supreme Court) ------
+\usepackage[T1]{fontenc}
+\usepackage{tgschola}
+\usepackage{xspace}
+
+% Headings and title in the serif family (Century Schoolbook), not KOMA's sans.
+\addtokomafont{disposition}{\rmfamily}
+
+% ---- Document-wide constants ----------------------------------------------
+% main.tex normally sets \title directly; \documentTitle is a safe fallback.
+\providecommand{\documentTitle}{Document}
+\newcommand{\omitText}{Intentionally Deleted}
+
+% ---- Defined-term machinery -----------------------------------------------
+% \dtregister stores a term's display text; \dtuse renders it in small caps and
+% links back to its definition; \dtdef marks the definition (the anchor).
+% The generated src/defined_terms.tex (\dtregister lines + \<key> uses) is
+% \input by main.tex AFTER this file, so these commands exist when it loads.
+\newcommand{\dtregister}[2]{\expandafter\def\csname dtdisplay@#1\endcsname{#2}}
+\newcommand{\dtuse}[1]{\hyperlink{def:#1}{\textsc{\csname dtdisplay@#1\endcsname}}\xspace}
+\newcommand{\dtdef}[1]{\hypertarget{def:#1}{\textsc{\csname dtdisplay@#1\endcsname}}\xspace}
+
+% ---- Reusable helpers -----------------------------------------------------
+% Centered bold non-section header (e.g. "RECITALS", "WITNESSETH").
+\newcommand{\formaltext}[1]{%
+	\begingroup
+	\centering
+	\normalfont\normalsize\bfseries #1\par
+	\endgroup
+	\vspace{0.5em}
+}
+
+\newcommand{\blankspace}{\ \newline \ }
+
+% Inline fill-in blank (for the many "____" spots in these forms).
+\newcommand{\fillin}[1][2.5cm]{\rule{#1}{0.4pt}}
+
+% A signature rule (default 3in) with an optional caption line beneath it.
+\newcommand{\sigline}[1][3in]{\rule{#1}{0.4pt}}
+% \sigblock{caption} -> a signature rule with a caption typeset below it.
+\newcommand{\sigblock}[1]{%
+	\par\noindent\sigline\par\nobreak\vspace{-0.3em}\noindent #1\par
+}
+
+% Two-up signature row: a full-width rule with two captions beneath it (left/right).
+% Shared by the board/shareholder consents, whose signature grid lists the directors
+% or shareholders two per line above a common signature rule.
+\newcommand{\sigpair}[2]{%
+	\par\vspace{2em}\noindent\rule{\textwidth}{0.4pt}\par\nobreak\vspace{0.2em}%
+	\noindent\makebox[0.5\textwidth][l]{#1}\makebox[0.5\textwidth][l]{#2}\par
+}
+
+% Exhibit / Schedule heading: centered "Exhibit <letter>" + underlined title.
+% Used instead of \section so exhibits stay out of the article numbering and TOC.
+\newcommand{\exhibithead}[2]{%
+	\begingroup
+	\centering
+	\normalfont\large\bfseries Exhibit #1\par
+	\vspace{0.3em}
+	\uline{\uppercase{#2}}\par
+	\endgroup
+	\vspace{1em}
+}
+\newcommand{\schedulehead}[2]{%
+	\begingroup
+	\centering
+	\normalfont\large\bfseries Schedule #1\par
+	\vspace{0.3em}
+	\uline{\uppercase{#2}}\par
+	\endgroup
+	\vspace{1em}
+}
+
+% ---- Title -----------------------------------------------------------------
+% Completely redefine \maketitle to avoid any KOMA errors and center a bold title.
+\makeatletter
+\renewcommand{\maketitle}{%
+	\begingroup
+	\centering
+	\normalfont\large\bfseries\color{black!80}%
+	\@title\par
+	\vspace{0.5em}
+	\endgroup
+}
+\makeatother
+
+% ---- Sections: centered "ARTICLE <Roman>" + underlined uppercase title ------
+\makeatletter
+\renewcommand{\sectionlinesformat}[4]{%
+	\Ifstr{#1}{section}{%
+		\begingroup
+		\centering
+		ARTICLE \Roman{section}\par
+		\vspace{0.3em}%
+		\uline{\uppercase{#4}}\par
+		\endgroup
+	}{%
+		#3#4%
+	}%
+}
+\makeatother
+
+\RedeclareSectionCommand[
+	beforeskip=2ex plus 1ex minus .2ex,
+	afterskip=3ex plus .2ex,
+	font=\normalsize\bfseries
+]{section}
+
+% ---- Page styling ----------------------------------------------------------
+\clearpairofpagestyles
+\cfoot{-- \thepage{} of \ztotpages --}
+
+% ---- Subsections (run-in, underlined, trailing period, dotted numbering) ----
+\makeatletter
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+	{-3.25ex\@plus -1ex \@minus -.2ex}%
+	{-1em}% Negative value makes it run-in
+	{\normalfont\normalsize\bfseries}}
+\makeatother
+\renewcommand{\thesubsection}{\arabic{section}.\arabic{subsection}}
+\let\originalsubsection\subsection
+\renewcommand{\subsection}[1]{%
+	\originalsubsection{\uline{#1}.}%
+}
+
+% ---- Subsubsections (indented run-in) --------------------------------------
+\makeatletter
+\renewcommand\subsubsection{\@startsection{subsubsection}{3}{\parindent}%
+	{-3.25ex\@plus -1ex \@minus -.2ex}%
+	{-1em}%
+	{\normalfont\normalsize\bfseries}}
+\makeatother
+\renewcommand{\thesubsubsection}{\arabic{section}.\arabic{subsection}.\arabic{subsubsection}}
+
+\newlength{\subsubindent}
+\setlength{\subsubindent}{\parindent}
+\let\originalsubsubsection\subsubsection
+\renewcommand{\subsubsection}[1]{%
+	\originalsubsubsection{\uline{#1}.}%
+	\parshape 2 \subsubindent \dimexpr\linewidth-\subsubindent\relax \subsubindent \dimexpr\linewidth-\subsubindent\relax%
+}
+
+% Hand-rolled 4th level.
+\newcounter{subsubsubsection}[subsubsection]
+\renewcommand{\thesubsubsubsection}{\arabic{section}.\arabic{subsection}.\arabic{subsubsection}.\arabic{subsubsubsection}}
+\newcommand{\subsubsubsection}[1]{%
+  \par\vspace{1ex}%
+  \refstepcounter{subsubsubsection}%
+  \noindent\hspace{2\parindent}%
+  \textbf{\thesubsubsubsection~\uline{#1}.}~\ignorespaces%
+  \parshape 2 2\subsubindent \dimexpr\linewidth-2\subsubindent\relax 2\subsubindent \dimexpr\linewidth-2\subsubindent\relax%
+}
+
+% ---- Table of Contents -----------------------------------------------------
+\addto\captionsenglish{%
+  \renewcommand{\contentsname}{Table of Contents}%
+}
+\renewcommand{\thesection}{\Roman{section}}
+\DeclareTOCStyleEntry[
+    entrynumberformat=\articleformat,
+    numwidth=8em
+]{tocline}{section}
+\DeclareTOCStyleEntry[numwidth=3em, numsep=0.5em]{tocline}{subsection}
+\DeclareTOCStyleEntry[numwidth=4em, numsep=0.5em]{tocline}{subsubsection}
+\newcommand{\articleformat}[1]{Article #1}
+\makeatletter
+\renewcommand\tableofcontents{%
+  \begingroup
+  \setlength{\parindent}{0pt}
+  \setlength{\parskip}{0pt}
+  {\centering\Large\bfseries\contentsname\par}
+  \vspace{1em}
+  \@starttoc{toc}%
+  \endgroup
+}
+\makeatother
+
+% ---- hyperref loads LAST (clickable TOC / cross-refs / defined terms) -------
+\usepackage[hidelinks]{hyperref}
