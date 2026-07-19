@@ -22,6 +22,8 @@ there is a single source of truth and no per-package flakes to keep in sync.
 | `vibe/`        | `nixosModules.vibe`                 | NixOS module: `programs.vibe` (the launcher) |
 | `vibe-server/` | `packages.<system>.vibe-server`     | Deno web service behind `services.vibe-server` (source in `vibe-server/app`, compiled with `deno compile`) |
 | `vibe-server/` | `nixosModules.vibe-server`          | NixOS module: `services.vibe-server` (browser session manager; import with `vibe` to inherit its pins) |
+| `cobblemon-overlay/` | `packages.<system>.cobblemon-overlay` | OBS stream-overlay Deno web service for The Cobblemon Initiative — ingests the mod's streamsync pushes (`POST /ingest`, wire protocol v1), tracks hardcore attempts + the cemetery memorial, and serves transparent SSE-live overlay pages with bundled pokesprite box icons; also `overlays.default.cobblemon-overlay` |
+| `cobblemon-overlay/` | `nixosModules.cobblemon-overlay`    | NixOS service module (`services.cobblemon-overlay`) whose `ExecStart` is the package above (hardened unit, LoadCredential-staged ingest token, source-restricted firewall knobs) |
 | `proton-secrets/` | `packages.<system>.proton-secrets` | headless wrapper CLI around Proton Pass `pass-cli` (fixed session dir + `fs` key provider); also `apps.<system>.proton-secrets` + `overlays.default.proton-secrets` |
 | `proton-secrets/` | `packages.<system>.proton-pass-cli` | re-export of nixpkgs' `proton-pass-cli` (UNFREE — needs a paid Proton plan + allowUnfree) |
 | `proton-secrets/` | `nixosModules.proton-secrets`       | NixOS module: `services.proton-secrets` — agenix-shaped, activation-time secret decryption from Proton Pass (`/run/proton-secrets`; needs network + a live session at activation) |

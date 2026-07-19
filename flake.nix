@@ -41,6 +41,12 @@
     unifi-protect-monitor = pkgs.callPackage ./flakes/unifi-protect-monitor/package.nix {};
     unifi-protect-viewer = pkgs.callPackage ./flakes/unifi-protect-monitor/viewer.nix {};
 
+    # cobblemon-overlay — OBS stream-overlay web service for The Cobblemon
+    # Initiative (services.cobblemon-overlay): ingests the mod's streamsync
+    # pushes and serves transparent SSE-live overlay pages, with bundled
+    # pokesprite box icons fetched at build time.
+    cobblemon-overlay = pkgs.callPackage ./flakes/cobblemon-overlay/package.nix {};
+
     # Reusable shell-script collection (rebuild-config, edit-config, *-restore,
     # …). package.nix returns an attrset of writeShellApplication derivations,
     # one per command in ./scripts; see flakes/scripts. The companion
@@ -74,6 +80,7 @@
       {
         inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein moosefetch proton-secrets;
         inherit unifi-protect-monitor unifi-protect-viewer;
+        inherit cobblemon-overlay;
         # Re-export the raw Proton Pass CLI (binary `pass-cli`) for `nix run .#proton-pass-cli`.
         proton-pass-cli = pkgs.proton-pass-cli;
         # Legal-doc shared infra: the canonical style + the create-doc/edit-doc wizard.
@@ -115,6 +122,51 @@
           cd app
           deno test --allow-read --allow-write --allow-net --allow-run --allow-env --no-lock test/
           touch $out
+        '';
+
+      # Offline Deno unit tests for cobblemon-overlay (protocol/ingest/state/
+      # SSE/XSS-escape/sprite-mapping). Zero external imports, so no network.
+      cobblemon-overlay-unit =
+        pkgs.runCommand "cobblemon-overlay-unit" {
+          nativeBuildInputs = [pkgs.deno];
+        } ''
+          cp -r ${./flakes/cobblemon-overlay/app} app
+          chmod -R u+w app
+          export DENO_DIR="$TMPDIR/deno" HOME="$TMPDIR/home"
+          mkdir -p "$DENO_DIR" "$HOME"
+          cd app
+          deno test --allow-read --allow-write --allow-net --no-lock test/
+          touch $out
+        '';
+
+      # Evaluate services.cobblemon-overlay in a container NixOS so a module
+      # regression fails `nix flake check` — forces the systemd unit + the
+      # generated /etc/cobblemon-overlay/config.json (mirrors the
+      # unifi-protect-monitor module check).
+      cobblemon-overlay-module = let
+        sys = nixpkgs.lib.nixosSystem {
+          inherit system;
+          modules = [
+            self.nixosModules.cobblemon-overlay
+            {
+              boot.isContainer = true;
+              system.stateVersion = "24.11";
+              services.cobblemon-overlay = {
+                enable = true;
+                openFirewall = true;
+                localNetworkOnly = true;
+                localNetworkSubnets = ["10.10.10.30/32"];
+                # Exercise the LoadCredential token staging path.
+                tokenFile = "/run/secrets/cobblemon-overlay-token";
+              };
+            }
+          ];
+        };
+      in
+        pkgs.runCommand "cobblemon-overlay-module-eval" {} ''
+          echo "${builtins.toString sys.config.systemd.services.cobblemon-overlay.serviceConfig.ExecStart}" > $out
+          cp ${sys.config.environment.etc."cobblemon-overlay/config.json".source} config.json
+          cat config.json >> $out
         '';
 
       # Evaluate services.unifi-protect-monitor in a container NixOS so a module
@@ -173,6 +225,7 @@
         vibe-server = final.callPackage ./flakes/vibe-server/package.nix {};
         unifi-protect-monitor = final.callPackage ./flakes/unifi-protect-monitor/package.nix {};
         unifi-protect-viewer = final.callPackage ./flakes/unifi-protect-monitor/viewer.nix {};
+        cobblemon-overlay = final.callPackage ./flakes/cobblemon-overlay/package.nix {};
         fadein = final.callPackage ./flakes/fadein/package.nix {};
         moosefetch = (final.callPackage ./flakes/moosefetch/package.nix {}) {};
         proton-secrets = final.callPackage ./flakes/proton-secrets/package.nix {};
@@ -192,6 +245,8 @@
       vibe = import ./flakes/vibe/module.nix self;
       vibe-server = import ./flakes/vibe-server/module.nix self;
       unifi-protect-monitor = import ./flakes/unifi-protect-monitor/module.nix self;
+      # services.cobblemon-overlay — OBS stream overlays for The Cobblemon Initiative.
+      cobblemon-overlay = import ./flakes/cobblemon-overlay/module.nix self;
       antlers-scripts = import ./flakes/scripts/module.nix "system";
       moosefetch = import ./flakes/moosefetch/module.nix "system";
       # services.proton-secrets — activation-time secret decryption from Proton Pass.
