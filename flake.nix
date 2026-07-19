@@ -36,6 +36,11 @@
     vibe = mkVibeWrapper {};
     vibe-server = pkgs.callPackage ./flakes/vibe-server/package.nix {};
 
+    # unifi-protect-monitor — UniFi Protect camera-wall web service (services.unifi-protect-monitor,
+    # a deno-compiled binary run under nix-ld) + the Wayland kiosk viewer (unifi-protect-viewer).
+    unifi-protect-monitor = pkgs.callPackage ./flakes/unifi-protect-monitor/package.nix {};
+    unifi-protect-viewer = pkgs.callPackage ./flakes/unifi-protect-monitor/viewer.nix {};
+
     # Reusable shell-script collection (rebuild-config, edit-config, *-restore,
     # …). package.nix returns an attrset of writeShellApplication derivations,
     # one per command in ./scripts; see flakes/scripts. The companion
@@ -68,6 +73,7 @@
     packages.${system} =
       {
         inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein moosefetch proton-secrets;
+        inherit unifi-protect-monitor unifi-protect-viewer;
         # Re-export the raw Proton Pass CLI (binary `pass-cli`) for `nix run .#proton-pass-cli`.
         proton-pass-cli = pkgs.proton-pass-cli;
         # Legal-doc shared infra: the canonical style + the create-doc/edit-doc wizard.
@@ -82,18 +88,69 @@
     # external imports, so the tests need no network and run in the build sandbox;
     # git backs the gitDiff integration tests. (No `deno fmt` — the TS is
     # hand-formatted; type-checking happens here via `deno test` and at compile.)
-    checks.${system}.vibe-server-unit =
-      pkgs.runCommand "vibe-server-unit" {
-        nativeBuildInputs = [pkgs.deno pkgs.git];
-      } ''
-        cp -r ${./flakes/vibe-server/app} app
-        chmod -R u+w app
-        export DENO_DIR="$TMPDIR/deno" HOME="$TMPDIR/home"
-        mkdir -p "$DENO_DIR" "$HOME"
-        cd app
-        deno test --allow-read --allow-write --allow-run --allow-env --no-lock test/
-        touch $out
-      '';
+    checks.${system} = {
+      vibe-server-unit =
+        pkgs.runCommand "vibe-server-unit" {
+          nativeBuildInputs = [pkgs.deno pkgs.git];
+        } ''
+          cp -r ${./flakes/vibe-server/app} app
+          chmod -R u+w app
+          export DENO_DIR="$TMPDIR/deno" HOME="$TMPDIR/home"
+          mkdir -p "$DENO_DIR" "$HOME"
+          cd app
+          deno test --allow-read --allow-write --allow-run --allow-env --no-lock test/
+          touch $out
+        '';
+
+      # Offline Deno unit/integration tests for unifi-protect-monitor. Zero external
+      # imports, so no network; loopback (the ws.ts integration test) works in the sandbox.
+      unifi-protect-monitor-unit =
+        pkgs.runCommand "unifi-protect-monitor-unit" {
+          nativeBuildInputs = [pkgs.deno];
+        } ''
+          cp -r ${./flakes/unifi-protect-monitor/app} app
+          chmod -R u+w app
+          export DENO_DIR="$TMPDIR/deno" HOME="$TMPDIR/home"
+          mkdir -p "$DENO_DIR" "$HOME"
+          cd app
+          deno test --allow-read --allow-write --allow-net --allow-run --allow-env --no-lock test/
+          touch $out
+        '';
+
+      # Evaluate services.unifi-protect-monitor in a container NixOS so a module
+      # regression fails `nix flake check` — forces the systemd unit + the generated
+      # /etc/unifi-protect-monitor/config.json (mirrors robomoose's module check).
+      unifi-protect-monitor-module = let
+        sys = nixpkgs.lib.nixosSystem {
+          inherit system;
+          modules = [
+            self.nixosModules.unifi-protect-monitor
+            {
+              boot.isContainer = true;
+              system.stateVersion = "24.11";
+              services.unifi-protect-monitor = {
+                enable = true;
+                consoleIP = "192.168.1.1";
+                apiKeyFile = "/run/secrets/protect-api-key";
+                openFirewall = true;
+                localNetworkOnly = true;
+                # Exercise the opt-in recorded-playback path (assertion + secret handling).
+                recordings = {
+                  enable = true;
+                  username = "protect-monitor";
+                  passwordFile = "/run/secrets/protect-local-admin";
+                };
+              };
+            }
+          ];
+        };
+      in
+        pkgs.runCommand "unifi-protect-monitor-module-eval" {} ''
+          echo "${builtins.toString sys.config.systemd.services.unifi-protect-monitor.serviceConfig.ExecStart}" > $out
+          cp ${sys.config.environment.etc."unifi-protect-monitor/config.json".source} config.json
+          cat config.json >> $out
+        '';
+    };
 
     # ---- Parameterized builders for downstream flakes that need custom config ----
     # e.g. inputs.antlers.lib.x86_64-linux.mkZedWrapper { ...zed settings... }
@@ -114,6 +171,8 @@
         lanserver = final.callPackage ./flakes/lanserver/package.nix {};
         vibe = (final.callPackage ./flakes/vibe/package.nix {}) {};
         vibe-server = final.callPackage ./flakes/vibe-server/package.nix {};
+        unifi-protect-monitor = final.callPackage ./flakes/unifi-protect-monitor/package.nix {};
+        unifi-protect-viewer = final.callPackage ./flakes/unifi-protect-monitor/viewer.nix {};
         fadein = final.callPackage ./flakes/fadein/package.nix {};
         moosefetch = (final.callPackage ./flakes/moosefetch/package.nix {}) {};
         proton-secrets = final.callPackage ./flakes/proton-secrets/package.nix {};
@@ -132,6 +191,7 @@
       lanserver = import ./flakes/lanserver/module.nix self;
       vibe = import ./flakes/vibe/module.nix self;
       vibe-server = import ./flakes/vibe-server/module.nix self;
+      unifi-protect-monitor = import ./flakes/unifi-protect-monitor/module.nix self;
       antlers-scripts = import ./flakes/scripts/module.nix "system";
       moosefetch = import ./flakes/moosefetch/module.nix "system";
       # services.proton-secrets — activation-time secret decryption from Proton Pass.
@@ -142,6 +202,8 @@
     homeManagerModules = {
       antlers-scripts = import ./flakes/scripts/module.nix "home";
       moosefetch = import ./flakes/moosefetch/module.nix "home";
+      # programs.unifi-protect-viewer — the Wayland viewer with baked-in server/cameras defaults.
+      unifi-protect-viewer = import ./flakes/unifi-protect-monitor/viewer-module.nix self;
     };
 
     # ---- Explicit `nix run` targets ----
@@ -162,6 +224,10 @@
         moosefetch = {
           type = "app";
           program = "${moosefetch}/bin/moosefetch";
+        };
+        unifi-protect-viewer = {
+          type = "app";
+          program = "${unifi-protect-viewer}/bin/unifi-protect-viewer";
         };
         proton-secrets = {
           type = "app";

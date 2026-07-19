@@ -1,0 +1,19 @@
+{
+  // Zero external imports across the whole app — the module graph is purely local,
+  // so `deno compile` needs no network and the Nix build (../package.nix) runs
+  // offline in the ordinary sandbox with --no-remote (no dep-vendoring FOD), exactly
+  // like antlers' vibe-server / robomoose. `vendor: true` makes an accidental remote
+  // import fail loudly. ffmpeg/ffprobe are spawned as SUBPROCESSES (a Nix runtime
+  // dep), not imported — the "built-in Deno packages only" rule is about the TS graph.
+  "vendor": true,
+  "lock": false,
+  "tasks": {
+    // Local dev against a real console: UPM_CONFIG=./dev.json deno task dev
+    "dev": "deno run --watch --allow-read --allow-write --allow-env --allow-net --allow-run --unsafely-ignore-certificate-errors server/main.ts",
+    // Only the server is type-checked here; viewer/main.ts targets Deno Desktop (2.9),
+    // whose types aren't in the pinned 2.8.x toolchain (see viewer/main.ts).
+    "check": "deno check server/main.ts",
+    "test": "deno test --allow-read --allow-write --allow-env --allow-net --allow-run --no-lock test/",
+    "compile": "deno compile --allow-read --allow-write --allow-run --allow-net --allow-env --unsafely-ignore-certificate-errors --no-remote --output unifi-protect-monitor server/main.ts"
+  }
+}
