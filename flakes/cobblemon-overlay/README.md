@@ -72,10 +72,13 @@ the same document:
 | `session_stop`     | —                                                             |
 
 `pokemon` is `{species, dex, name, level, shiny?}`. Every **newly**-accepted
-`pokemon_lost` appends a memorial entry `{name, species, dex, level, cause,
-attempt, ts}` — the cemetery's data, kept forever. The service also emits a
-synthetic `new_attempt` toast event when it detects a reset (the mod never
-sends it).
+`pokemon_lost` appends a memorial entry `{kind: "pokemon", name, species, dex,
+level, cause, attempt, ts}` and every newly-accepted `whiteout` appends a
+`{kind: "player"}` grave for the trainer (name from the latest snapshot,
+fallback `Trainer`; `cause` = the whiteout reason) — the cemetery/graveyard
+data, kept forever. Entries persisted before `kind` existed load as
+`kind: "pokemon"`. The service also emits a synthetic `new_attempt` toast event
+when it detects a reset (the mod never sends it).
 
 **Auth**: when a token is configured, ingest requires `Authorization: Bearer
 <token>` (or `X-Overlay-Token: <token>`); compared timing-safely. Responses:
@@ -96,7 +99,8 @@ the pages then fall back to text, never a broken card.
 | `POST /ingest`           | mod push endpoint (see above)                               |
 | `GET /events`            | SSE: full `state` on connect (+ `status`), then live `state` / `game` / `status` events, 15s keepalives. **No event replay on connect** — refreshing OBS never re-fires toasts |
 | `GET /overlay/party`     | 6 party cards: sprite, name, Lv, tweened HP bar, shiny ★, faint = grayscale + cross fade-in |
-| `GET /overlay/cemetery`  | the graveyard: rising headstones grouped by attempt plaques, totals header; `?compact=1` = counter only |
+| `GET /overlay/cemetery`  | the graveyard: rising headstones grouped by attempt plaques, totals header; `?compact=1` = counter only; player whiteouts get a distinct darker cross-topped stone |
+| `GET /overlay/graveyard` | mini graveyard **scene**: grass strip, headstones scattered in staggered depth rows with deterministic per-grave jitter (stable across reloads); `?tooltips=1` = cycling nickname bubble (one grave at a time, ~2.5s each), `?max=N` = newest N stones |
 | `GET /overlay/badges`    | badge count + current level cap                             |
 | `GET /overlay/toasts`    | ~6s animated cards: loss=red, capture=green, badge=gold, whiteout=full-width slam, new-attempt banner |
 | `GET /status`            | server-rendered debug page                                  |
@@ -146,6 +150,7 @@ design):
 | party    | `http://127.0.0.1:8082/overlay/party`          | 1000×140       |
 | cemetery | `http://127.0.0.1:8082/overlay/cemetery`       | to taste (intermission scene) |
 | counter  | `http://127.0.0.1:8082/overlay/cemetery?compact=1` | 300×80 corner |
+| graveyard | `http://127.0.0.1:8082/overlay/graveyard`     | 900×230 bottom strip (`?tooltips=1` = cycling name bubble, `?max=N` = newest N) |
 | badges   | `http://127.0.0.1:8082/overlay/badges`         | 320×80         |
 | toasts   | `http://127.0.0.1:8082/overlay/toasts`         | 480×600        |
 

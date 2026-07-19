@@ -1,6 +1,6 @@
 // OverlayState tests: seq dedup, session reset, worldId→attempt banking (and
-// the counter-decrease fallback), memorial append + persistence round-trip,
-// stale-after-restart.
+// the counter-decrease fallback), memorial append (pokemon + player-whiteout
+// graves) + persistence round-trip, stale-after-restart.
 
 import { OverlayState } from "../src/state.ts";
 import { parseMessage } from "../src/protocol.ts";
@@ -47,6 +47,7 @@ Deno.test("dedup: same-session seq replay is dup and never double-appends", () =
   const first = st.apply(e, 1000);
   assert(first.accepted && !first.dup);
   assertEquals(st.view(1000).memorial.length, 1);
+  assertEquals(st.view(1000).memorial[0].kind, "pokemon");
 
   const replay = st.apply(e, 2000); // same session + seq
   assert(replay.dup && !replay.accepted);
@@ -135,6 +136,43 @@ Deno.test("event hints merge into current state between snapshots", () => {
   assertEquals(v.deaths.total, 9, "pokemon_lost deathsTotal hint is applied");
 });
 
+Deno.test("whiteout appends a player-kind grave named from the latest snapshot", () => {
+  const st = mkState();
+  st.apply(snapshot(), 1000); // player: "Cole"
+  const e = msg({ type: "event", event: "whiteout", reason: "forfeit" });
+  const r = st.apply(e, 1500);
+  assert(r.accepted && r.stateChanged);
+  const v = st.view(1500);
+  assertEquals(v.memorial.length, 1);
+  assertEquals(v.memorial[0], {
+    kind: "player",
+    name: "Cole",
+    species: "",
+    dex: 0,
+    level: 0,
+    cause: "forfeit",
+    attempt: 1,
+    ts: 1500,
+  });
+  assertEquals(v.deaths.whiteouts, 1);
+
+  // a dup'd whiteout must NOT double-append the trainer's grave
+  const replay = st.apply(e, 2000);
+  assert(replay.dup && !replay.accepted);
+  assertEquals(st.view(2000).memorial.length, 1, "dup whiteout must not double-append");
+  assertEquals(st.view(2000).deaths.whiteouts, 1);
+});
+
+Deno.test("whiteout before any snapshot falls back to Trainer (+ default reason)", () => {
+  const st = mkState();
+  st.apply(msg({ type: "event", event: "whiteout" }), 1000);
+  const v = st.view(1000);
+  assertEquals(v.memorial.length, 1);
+  assertEquals(v.memorial[0].kind, "player");
+  assertEquals(v.memorial[0].name, "Trainer");
+  assertEquals(v.memorial[0].cause, "faint");
+});
+
 Deno.test("staleness uses server receive time, never the mod's t field", () => {
   const st = mkState();
   // mod clock (t) is wildly in the past; server receives it "now"
@@ -174,6 +212,7 @@ Deno.test("persistence round-trip: memorial + attempt survive, boots stale", asy
     assert(!v.live);
     assertEquals(v.attempt, 2);
     assertEquals(v.memorial.length, 1);
+    assertEquals(v.memorial[0].kind, "pokemon");
     assertEquals(v.memorial[0].name, "Ripley");
     assertEquals(v.memorial[0].cause, "sacrifice");
     assertEquals(v.memorial[0].attempt, 1);
@@ -184,6 +223,39 @@ Deno.test("persistence round-trip: memorial + attempt survive, boots stale", asy
     // session/seq tracking reset: an old seq from before the restart is accepted
     const r = st2.apply(msg({ type: "snapshot", seq: 1, session: "s-1" }), Date.now());
     assert(r.accepted);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("persistence: player graves keep kind; pre-kind entries load as pokemon", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "cobblemon-overlay-test" });
+  try {
+    const st = mkState(dir);
+    st.apply(snapshot(), 1000);
+    st.apply(lost("Vee"), 1500);
+    st.apply(msg({ type: "event", event: "whiteout", reason: "flee" }), 2000);
+    await st.flush();
+
+    // splice in a legacy entry persisted BEFORE "kind" existed (real saved
+    // states on disk look like this)
+    const path = `${dir}/state.json`;
+    const doc = JSON.parse(await Deno.readTextFile(path));
+    doc.memorial.unshift({ name: "OldTimer", species: "rattata", dex: 19, level: 7, cause: "faint", attempt: 1, ts: 500 });
+    await Deno.writeTextFile(path, JSON.stringify(doc));
+
+    const st2 = mkState(dir);
+    await st2.load();
+    const v = st2.view(Date.now());
+    assertEquals(v.memorial.length, 3);
+    assertEquals(v.memorial[0].kind, "pokemon", "entry without kind must load as pokemon");
+    assertEquals(v.memorial[0].name, "OldTimer");
+    assertEquals(v.memorial[1].kind, "pokemon");
+    assertEquals(v.memorial[1].name, "Vee");
+    assertEquals(v.memorial[2].kind, "player", "player grave keeps its kind");
+    assertEquals(v.memorial[2].name, "Cole");
+    assertEquals(v.memorial[2].cause, "flee");
+    assertEquals(v.memorial[2].species, "");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

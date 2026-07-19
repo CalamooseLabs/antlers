@@ -8,7 +8,15 @@ import type { OverlayState } from "./state.ts";
 import type { SseHub } from "./sse.ts";
 import type { SpriteStore } from "./sprites.ts";
 import { handleIngest } from "./ingest.ts";
-import { BADGES_HTML, CEMETERY_HTML, INDEX_HTML, PARTY_HTML, renderStatusPage, TOASTS_HTML } from "./html.ts";
+import {
+  BADGES_HTML,
+  CEMETERY_HTML,
+  INDEX_HTML,
+  PARTY_HTML,
+  renderGraveyardPage,
+  renderStatusPage,
+  TOASTS_HTML,
+} from "./html.ts";
 import { json } from "./util.ts";
 
 export interface Deps {
@@ -63,6 +71,15 @@ export async function handler(req: Request, deps: Deps): Promise<Response> {
   if (path === "/overlay/cemetery") return htmlPage(CEMETERY_HTML);
   if (path === "/overlay/badges") return htmlPage(BADGES_HTML);
   if (path === "/overlay/toasts") return htmlPage(TOASTS_HTML);
+
+  // Server-rendered scene (initial stones baked in; SSE appends the rest).
+  if (path === "/overlay/graveyard") {
+    const maxRaw = url.searchParams.get("max") ?? "";
+    return htmlPage(renderGraveyardPage(deps.state.view(Date.now()), {
+      tooltips: url.searchParams.get("tooltips") === "1",
+      max: /^[0-9]+$/.test(maxRaw) ? parseInt(maxRaw, 10) : 0,
+    }));
+  }
 
   if (path === "/status") {
     return htmlPage(renderStatusPage(deps.state.view(Date.now()), {

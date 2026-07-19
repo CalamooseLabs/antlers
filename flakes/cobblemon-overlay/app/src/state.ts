@@ -10,9 +10,12 @@
 //    and increments `attempt`; a counter DECREASE is the fallback detector for
 //    old-protocol pushes that carry no worldId;
 //  - the MEMORIAL list (the cemetery's data): every NEWLY-accepted pokemon_lost
-//    appends {name, species, dex, level, cause, attempt, ts} — persisted forever
-//    across saves and restarts. Dedup'd events never double-append (the seq gate
-//    runs before any mutation);
+//    appends {kind:"pokemon", name, species, dex, level, cause, attempt, ts} and
+//    every NEWLY-accepted whiteout appends a {kind:"player"} grave for the
+//    TRAINER (name from the latest snapshot, cause = the whiteout reason) —
+//    persisted forever across saves and restarts. Dedup'd events never
+//    double-append (the seq gate runs before any mutation). Entries persisted
+//    before "kind" existed load as kind:"pokemon" (backward compat);
 //  - debounced (~2s) ATOMIC persistence to stateDir/state.json (tmp file +
 //    Deno.rename), flushed on SIGTERM/SIGINT by main.ts; restored on boot with
 //    lastIngestAt = 0, so the overlay is stale until the mod pushes again.
@@ -32,18 +35,24 @@ import {
   type QuestInfo,
   type SnapshotMsg,
   str,
+  type WhiteoutReason,
   type WorldInfo,
   zeroDeaths,
   zeroProgress,
 } from "./protocol.ts";
 import { isError, log } from "./util.ts";
 
+// "pokemon" = a fallen party member (pokemon_lost); "player" = the TRAINER's own
+// grave, appended on every newly-accepted whiteout.
+export type MemorialKind = "pokemon" | "player";
+
 export interface MemorialEntry {
-  name: string; // nickname (falls back to species) — PLAYER CONTROLLED, escape it
-  species: string;
-  dex: number;
-  level: number;
-  cause: LossCause;
+  kind: MemorialKind;
+  name: string; // nickname (falls back to species) / player name — PLAYER CONTROLLED, escape it
+  species: string; // "" for kind:"player"
+  dex: number; // 0 for kind:"player"
+  level: number; // 0 for kind:"player"
+  cause: LossCause | WhiteoutReason; // player graves carry the whiteout reason
   attempt: number;
   ts: number; // server receive time
 }
@@ -215,6 +224,7 @@ export class OverlayState {
       case "pokemon_lost": {
         const p = msg.pokemon!;
         this.#memorial.push({
+          kind: "pokemon",
           name: p.name || p.species,
           species: p.species,
           dex: p.dex,
@@ -231,6 +241,19 @@ export class OverlayState {
         break;
       }
       case "whiteout":
+        // The TRAINER's own headstone: named from the latest snapshot (fallback
+        // "Trainer"), cause = the whiteout reason. The seq gate above already
+        // guarantees a dup'd whiteout can never double-append.
+        this.#memorial.push({
+          kind: "player",
+          name: this.#player || "Trainer",
+          species: "",
+          dex: 0,
+          level: 0,
+          cause: msg.reason ?? "faint",
+          attempt: this.#attempt,
+          ts: receivedAt,
+        });
         this.#deaths.whiteouts += 1;
         stateChanged = true;
         break;
@@ -390,13 +413,27 @@ export class OverlayState {
       this.#worldId = str(doc.worldId) || null;
       this.#campaign = coerceDeaths(doc.campaign);
       this.#memorial = Array.isArray(doc.memorial)
-        ? doc.memorial.flatMap((raw) => {
+        ? doc.memorial.flatMap((raw): MemorialEntry[] => {
           if (typeof raw !== "object" || raw === null) return [];
           const m = raw as Record<string, unknown>;
+          const cause = str(m.cause, "faint");
+          if (str(m.kind) === "player") {
+            return [{
+              kind: "player",
+              name: str(m.name) || "Trainer",
+              species: "",
+              dex: 0,
+              level: 0,
+              cause: (["faint", "flee", "forfeit"].includes(cause) ? cause : "faint") as WhiteoutReason,
+              attempt: Math.max(1, num(m.attempt, 1)),
+              ts: num(m.ts),
+            }];
+          }
+          // no/unknown "kind" = a pre-"kind" persisted entry → pokemon grave
           const species = str(m.species);
           if (!species) return [];
-          const cause = str(m.cause, "faint");
           return [{
+            kind: "pokemon",
             name: str(m.name) || species,
             species,
             dex: num(m.dex),
