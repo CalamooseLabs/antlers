@@ -316,11 +316,11 @@ in {
   config = mkIf (cfg.enable && cfg.secrets != {}) (mkMerge [
     {
       assertions =
-        (mapAttrsToList (name: s: {
+        mapAttrsToList (name: s: {
           assertion = s.reference != null || (s.vaultName != null && s.itemTitle != null);
           message = "services.proton-secrets.secrets.\"${name}\": set `reference` (pass://…) or both `vaultName` and `itemTitle`.";
         })
-        cfg.secrets);
+        cfg.secrets;
 
       environment.systemPackages = [cfg.package];
 
