@@ -100,7 +100,7 @@ the pages then fall back to text, never a broken card.
 | `GET /events`            | SSE: full `state` on connect (+ `status`), then live `state` / `game` / `status` events, 15s keepalives. **No event replay on connect** — refreshing OBS never re-fires toasts |
 | `GET /overlay/party`     | 6 party cards: sprite, name, Lv, tweened HP bar, shiny ★, faint = grayscale + cross fade-in |
 | `GET /overlay/cemetery`  | the graveyard: rising headstones grouped by attempt plaques, totals header; `?compact=1` = counter only; player whiteouts get a distinct darker cross-topped stone |
-| `GET /overlay/graveyard` | mini graveyard **scene**: grass strip, headstones scattered in staggered depth rows with deterministic per-grave jitter (stable across reloads); `?tooltips=1` = cycling nickname bubble (one grave at a time, ~2.5s each), `?max=N` = newest N stones |
+| `GET /overlay/graveyard` | retro pixel graveyard **scene** (GBA-look): stepped hill silhouettes, dithered grass band, drifting blocky fog (two bands behind the stones, one in front); sprite-sized stones in staggered depth rows with deterministic per-grave jitter (stable across reloads) — gray pixel headstone by default, a cheap wooden stake + crooked plank sign for sacrifices, a taller dark cross-topped slab for player whiteouts (no text on stones); `?tooltips=1` = cycling pixel bubble with nickname + cause of death (one grave at a time, ~2.5s each), `?max=N` = newest N stones |
 | `GET /overlay/badges`    | badge count + current level cap                             |
 | `GET /overlay/toasts`    | ~6s animated cards: loss=red, capture=green, badge=gold, whiteout=full-width slam, new-attempt banner |
 | `GET /status`            | server-rendered debug page                                  |
@@ -150,7 +150,7 @@ design):
 | party    | `http://127.0.0.1:8082/overlay/party`          | 1000×140       |
 | cemetery | `http://127.0.0.1:8082/overlay/cemetery`       | to taste (intermission scene) |
 | counter  | `http://127.0.0.1:8082/overlay/cemetery?compact=1` | 300×80 corner |
-| graveyard | `http://127.0.0.1:8082/overlay/graveyard`     | 900×230 bottom strip (`?tooltips=1` = cycling name bubble, `?max=N` = newest N) |
+| graveyard | `http://127.0.0.1:8082/overlay/graveyard`     | 900×230 bottom strip, pixel scene (`?tooltips=1` = cycling name + cause bubble, `?max=N` = newest N) |
 | badges   | `http://127.0.0.1:8082/overlay/badges`         | 320×80         |
 | toasts   | `http://127.0.0.1:8082/overlay/toasts`         | 480×600        |
 

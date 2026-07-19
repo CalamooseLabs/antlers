@@ -165,10 +165,11 @@ function mon(name: string, species: string, dex: number, ts: number): MemorialEn
   return { kind: "pokemon", name, species, dex, level: 11, cause: "faint", attempt: 1, ts };
 }
 
-Deno.test("graveyard renders both stone kinds, keeps the shell conventions", () => {
+Deno.test("graveyard renders all three stone variants, keeps the shell conventions", () => {
   const html = renderGraveyardPage(
     graveyardView([
       mon("Vee", "eevee", 133, 1111),
+      { kind: "pokemon", name: "Marty", species: "magikarp", dex: 129, level: 7, cause: "sacrifice", attempt: 1, ts: 1500 },
       { kind: "player", name: "Cole", species: "", dex: 0, level: 0, cause: "forfeit", attempt: 1, ts: 2222 },
     ]),
     { tooltips: false, max: 0 },
@@ -178,14 +179,62 @@ Deno.test("graveyard renders both stone kinds, keeps the shell conventions", () 
   assert(!html.includes("innerHTML"), "player strings must go through textContent/escapeHtml");
   assertStringIncludes(html, "@keyframes rise"); // new graves use the rise animation
   assertStringIncludes(html, `class="grave settled`); // …but pre-rendered ones don't replay it
-  assertStringIncludes(html, "/sprites/eevee.png?dex=133"); // pokemon stones keep the mini sprite
-  assert(!html.includes("Vee"), "pokemon stones show no visible name by default");
-  assertStringIncludes(html, `class="stone player"`); // the distinct trainer stone
-  assertStringIncludes(html, ">Cole<"); // …is labeled with the player name
-  assertStringIncludes(html, "whiteout · forfeit"); // …and the whiteout reason
+  // default: gray pixel headstone with the sprite as the face of the grave
+  assertStringIncludes(html, `<div class="stone"><img class="gsprite"`);
+  assertStringIncludes(html, "/sprites/eevee.png?dex=133");
+  // sacrifice: wooden stake with the sprite small on the plank sign
+  assertStringIncludes(html, `class="stone stake"`);
+  assertStringIncludes(html, `<div class="plank"><img class="gsprite"`);
+  assertStringIncludes(html, "/sprites/magikarp.png?dex=129");
+  // player: dark slab + pixel cross, no text at all
+  assertStringIncludes(html, `<div class="stone player"><div class="pcross"></div></div>`);
+  assert(!html.includes("Cole"), "the trainer stone carries no text");
+  // no text on any stone without ?tooltips=1
+  assert(!html.includes("Vee"), "pokemon stones show no visible name");
+  assert(!html.includes("Marty"));
+  assert(!html.includes("Lv "), "no level text on stones");
+  // pixel discipline: sprites stay crisp, no rounded corners anywhere
+  assertStringIncludes(html, "image-rendering: pixelated");
+  assert(!html.includes("border-radius"), "pixel-art page: no border-radius curves");
 });
 
-Deno.test("graveyard: ?tooltips=1 toggles name bubbles and escapes hostile nicknames", () => {
+Deno.test("graveyard scenery: hills, dithered ground, and drifting fog bands exist", () => {
+  const html = renderGraveyardPage(graveyardView([]), { tooltips: false, max: 0 });
+  // two stepped hill layers + the ground band
+  assertStringIncludes(html, `class="hills hills-far"`);
+  assertStringIncludes(html, `class="hills hills-near"`);
+  assertStringIncludes(html, `class="ground"`);
+  // fog: two bands behind the stones, one thin band in front, looping keyframes
+  assertStringIncludes(html, `class="fog fog-a"`);
+  assertStringIncludes(html, `class="fog fog-b"`);
+  assertStringIncludes(html, `class="fog fog-front"`);
+  assertStringIncludes(html, "@keyframes fogA");
+  assertStringIncludes(html, "@keyframes fogB");
+  assertStringIncludes(html, "@keyframes fogFront");
+  // the in-front band must actually stack above the stones
+  assert(
+    html.indexOf(`<div class="fog fog-front">`) > html.indexOf(`id="scene"`),
+    "fog-front renders after the scene",
+  );
+});
+
+Deno.test("graveyard SSE path builds the same three variants as the server (parity)", () => {
+  // The page is half server-rendered (graveHtml) and half SSE-appended
+  // (addGrave); both halves must produce the same classes and nesting.
+  const html = renderGraveyardPage(graveyardView([]), { tooltips: false, max: 0 });
+  assertStringIncludes(html, "el('div', 'stone player')");
+  assertStringIncludes(html, "el('div', 'pcross')");
+  assertStringIncludes(html, "m.cause === 'sacrifice'");
+  assertStringIncludes(html, "el('div', 'stone stake')");
+  assertStringIncludes(html, "el('div', 'plank')");
+  assertStringIncludes(html, "el('div', 'stone')");
+  assertStringIncludes(html, "el('div', 'mound')");
+  // tip parity: same two-line bubble structure as the server tip branch
+  assertStringIncludes(html, "el('b', 'tip-n')");
+  assertStringIncludes(html, "el('span', 'tip-c')");
+});
+
+Deno.test("graveyard: ?tooltips=1 = name + cause bubbles; hostile nicknames escaped", () => {
   const evil = `<script>alert("x")</script>`;
   const view = graveyardView([mon(evil, "eevee", 133, 1111)]);
 
@@ -196,7 +245,24 @@ Deno.test("graveyard: ?tooltips=1 toggles name bubbles and escapes hostile nickn
   assertStringIncludes(on, `class="tip"`);
   assert(!on.includes(evil), "raw nickname markup must never appear");
   assert(!on.includes("<script>alert"), "no unescaped script tag anywhere");
-  assertStringIncludes(on, "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;");
+  assertStringIncludes(on, `<b class="tip-n">&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;</b>`);
+  assertStringIncludes(on, `<span class="tip-c">fainted</span>`); // the cause line
+});
+
+Deno.test("graveyard bubbles carry the cause of death for every variant", () => {
+  const view = graveyardView([
+    mon("Vee", "eevee", 133, 1111),
+    { kind: "pokemon", name: "Marty", species: "magikarp", dex: 129, level: 7, cause: "sacrifice", attempt: 1, ts: 1500 },
+    { kind: "pokemon", name: "Dupe", species: "rattata", dex: 19, level: 3, cause: "duplicate_release", attempt: 1, ts: 1600 },
+    { kind: "player", name: "Cole", species: "", dex: 0, level: 0, cause: "forfeit", attempt: 1, ts: 2222 },
+    { kind: "player", name: "", species: "", dex: 0, level: 0, cause: "faint", attempt: 1, ts: 3333 },
+  ]);
+  const on = renderGraveyardPage(view, { tooltips: true, max: 0 });
+  assertStringIncludes(on, `<b class="tip-n">Vee</b><span class="tip-c">fainted</span>`);
+  assertStringIncludes(on, `<b class="tip-n">Marty</b><span class="tip-c">sacrificed</span>`);
+  assertStringIncludes(on, `<b class="tip-n">Dupe</b><span class="tip-c">released</span>`);
+  assertStringIncludes(on, `<b class="tip-n">Cole</b><span class="tip-c">whiteout · forfeit</span>`);
+  assertStringIncludes(on, `<b class="tip-n">Trainer</b><span class="tip-c">whiteout</span>`);
 });
 
 Deno.test("graveyard tooltips cycle one grave at a time (hidden at rest, spotlight class)", () => {
@@ -225,10 +291,12 @@ Deno.test("graveyard placement is deterministic (same input → same rendered of
   const p = gravePlacement(m.ts);
   assertEquals(gravePlacement(m.ts), p, "placement is a pure function of ts");
   assert(p.row === 0 || p.row === 1 || p.row === 2);
+  assert(p.leftPct >= 3 && p.leftPct <= 89, "scatter stays inside the strip");
   assert(p.dx >= -12 && p.dx <= 12, "x jitter stays within ±12px");
   assert(p.rot >= -3 && p.rot <= 3, "rotation stays within ±3deg");
   assert(p.scale >= 0.75 && p.scale <= 1, "back rows scale ~0.75-1");
   // the computed offsets are exactly what the page renders
+  assertStringIncludes(a, `style="left: ${p.leftPct}%"`);
   assertStringIncludes(a, `translate(${p.dx}px, ${p.dy}px) rotate(${p.rot}deg) scale(${p.scale})`);
   assertStringIncludes(a, ["g-back", "g-mid", "g-front"][p.row]);
   // different ts values actually scatter (not one fixed spot)

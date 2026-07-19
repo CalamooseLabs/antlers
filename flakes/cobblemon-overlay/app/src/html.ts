@@ -291,23 +291,33 @@ export const CEMETERY_HTML = page(
   CEMETERY_JS,
 );
 
-// ---- /overlay/graveyard — a mini graveyard SCENE (server-rendered) ----
-// A compact scenic strip for OBS: grass gradient at the bottom, headstones
-// scattered with depth (2-3 staggered rows — back rows smaller/higher, front
-// larger/lower) and small deterministic jitter in x-offset/rotation seeded from
-// each memorial's ts, so the layout is stable across reloads. Unlike the other
-// overlay pages the initial stones are rendered SERVER-side (through escapeHtml
-// — nicknames are player-controlled); the SSE `state` stream then appends new
-// graves client-side with the same rise animation and the same placement hash.
-// ?tooltips=1 = always-visible nickname bubbles; ?max=N = newest N stones only.
+// ---- /overlay/graveyard — a RETRO PIXEL graveyard SCENE (server-rendered) ----
+// A GBA-era pixel-art strip for OBS: two stepped hill silhouettes (muted
+// blues/greens, hard-stop gradients — everything above them stays transparent),
+// a dithered grass/ground band, and drifting blocky fog (two bands behind the
+// stones, one thin band in front). Stones are sprite-sized (~40px) with the
+// mini sprite as the FACE of the grave — no name/level text on stones. Three
+// marker variants: the default gray pixel headstone (faint/duplicate_release),
+// a deliberately cheap wooden stake + crooked plank sign (sacrifice), and the
+// trainer's taller dark slab with a pixel cross (kind:"player", no text).
+// No border-radius anywhere: silhouettes are stepped clip-path polygons with a
+// 1px 4-way drop-shadow outline. Stones sit in 3 staggered depth rows with
+// deterministic jitter seeded from each memorial's ts, stable across reloads.
+// Unlike the other overlay pages the initial stones are rendered SERVER-side
+// (through escapeHtml — nicknames are player-controlled); the SSE `state`
+// stream then appends new graves client-side with the same rise animation and
+// the same placement hash. ?tooltips=1 = a cycling pixel bubble spotlighting
+// one grave at a time: nickname + how they died; ?max=N = newest N stones.
 // Graves are persistent: like /overlay/cemetery this page only DIMS when the
 // feed goes stale (the shared body.stale rule) — it never hides.
 
 // Depth rows: [translateY px, scale] — 0 = back (smaller/higher), 2 = front.
-const GRAVE_ROWS: readonly (readonly [number, number])[] = [[-26, 0.78], [-13, 0.88], [0, 1]];
+// MUST stay in sync with `rows` inside placeGrave() in GRAVEYARD_JS.
+const GRAVE_ROWS: readonly (readonly [number, number])[] = [[-16, 0.8], [-8, 0.9], [0, 1]];
 
 export interface GravePlacement {
   row: 0 | 1 | 2;
+  leftPct: number; // %, 3..89 — scatters graves across the full strip width
   dx: number; // px, -12..12
   dy: number; // px (row lift)
   rot: number; // deg, -3..3
@@ -324,6 +334,7 @@ export function gravePlacement(ts: number): GravePlacement {
   const row = (h % 3) as 0 | 1 | 2;
   return {
     row,
+    leftPct: 3 + ((h >>> 10) % 87),
     dx: ((h >>> 2) % 25) - 12,
     dy: GRAVE_ROWS[row][0],
     rot: ((h >>> 7) % 7) - 3,
@@ -333,44 +344,110 @@ export function gravePlacement(ts: number): GravePlacement {
 
 const GRAVEYARD_CSS = `
 .wrap { position: fixed; inset: 0; }
-.ground { position: absolute; left: 0; right: 0; bottom: 0; height: 52px;
-  background: linear-gradient(rgba(38,51,31,0), rgba(48,64,39,.65) 55%, rgba(31,42,25,.95)); }
-.scene { position: absolute; left: 0; right: 0; bottom: 0; display: flex;
-  align-items: flex-end; justify-content: center; padding: 60px 28px 14px; }
-.grave { animation: rise .9s cubic-bezier(.18,.9,.24,1.06) both; }
+/* ---- scenery (all bottom-anchored; above the hills = transparent for OBS) ---- */
+.hills { position: absolute; left: 0; right: 0; bottom: 0; pointer-events: none;
+  background-repeat: no-repeat; }
+.hills-far { z-index: 0; height: 86px; background-image:
+  linear-gradient(90deg, transparent 0 10%, rgba(35,47,60,.92) 10% 20%, transparent 20% 64%, rgba(35,47,60,.92) 64% 72%, transparent 72%),
+  linear-gradient(90deg, transparent 0 6%, rgba(35,47,60,.92) 6% 26%, transparent 26% 58%, rgba(35,47,60,.92) 58% 78%, transparent 78%),
+  linear-gradient(90deg, transparent 0 2%, rgba(35,47,60,.92) 2% 32%, transparent 32% 52%, rgba(35,47,60,.92) 52% 84%, transparent 84%),
+  linear-gradient(90deg, rgba(35,47,60,.92) 0 40%, transparent 40% 46%, rgba(35,47,60,.92) 46% 92%, transparent 92%),
+  linear-gradient(rgba(35,47,60,.92), rgba(35,47,60,.92));
+  background-size: 100% 12px, 100% 14px, 100% 16px, 100% 14px, 100% 30px;
+  background-position: 0 0, 0 12px, 0 26px, 0 42px, 0 56px; }
+.hills-near { z-index: 1; height: 54px; background-image:
+  linear-gradient(90deg, transparent 0 30%, rgba(27,40,25,.95) 30% 40%, transparent 40% 80%, rgba(27,40,25,.95) 80% 90%, transparent 90%),
+  linear-gradient(90deg, transparent 0 24%, rgba(27,40,25,.95) 24% 46%, transparent 46% 74%, rgba(27,40,25,.95) 74% 96%, transparent 96%),
+  linear-gradient(90deg, transparent 0 16%, rgba(27,40,25,.95) 16% 52%, transparent 52% 68%, rgba(27,40,25,.95) 68%),
+  linear-gradient(rgba(27,40,25,.95), rgba(27,40,25,.95));
+  background-size: 100% 10px, 100% 12px, 100% 12px, 100% 20px;
+  background-position: 0 0, 0 10px, 0 22px, 0 34px; }
+/* dithered hard-stop grass band: checker fringe rows over solid pixel strata */
+.ground { position: absolute; left: 0; right: 0; bottom: 0; height: 26px; z-index: 2;
+  background-image:
+    linear-gradient(90deg, rgba(58,76,49,.95) 0 6px, transparent 6px),
+    linear-gradient(90deg, transparent 0 6px, rgba(58,76,49,.95) 6px),
+    linear-gradient(#3a4c31 0 6px, #2c3b26 6px 14px, #1f2a19 14px);
+  background-size: 12px 4px, 12px 4px, 100% 18px;
+  background-position: 0 0, 0 4px, 0 8px;
+  background-repeat: repeat-x, repeat-x, no-repeat; }
+/* ---- fog: blocky hard-stop puffs, stepped opacity; each band slides exactly
+   one pattern period per loop, so the drift is seamless ---- */
+.fog { position: absolute; left: 0; right: 0; pointer-events: none;
+  background-repeat: repeat-x; }
+.fog-a { z-index: 3; bottom: 22px; height: 20px; opacity: .32; background-image:
+  linear-gradient(90deg, transparent 0 12px, rgba(206,220,231,.7) 12px 58px, rgba(206,220,231,.35) 58px 96px, transparent 96px 132px, rgba(206,220,231,.5) 132px 176px, transparent 176px),
+  linear-gradient(90deg, rgba(206,220,231,.4) 0 30px, transparent 30px);
+  background-size: 240px 12px, 120px 8px;
+  background-position: 0 8px, 0 0;
+  animation: fogA 44s linear infinite; }
+@keyframes fogA { to { background-position: -240px 8px, -240px 0; } }
+.fog-b { z-index: 3; bottom: 44px; height: 14px; opacity: .22; background-image:
+  linear-gradient(90deg, transparent 0 26px, rgba(190,206,220,.6) 26px 92px, transparent 92px 150px, rgba(190,206,220,.4) 150px 196px, transparent 196px);
+  background-size: 288px 10px;
+  background-position: 0 4px;
+  animation: fogB 61s linear infinite; }
+@keyframes fogB { to { background-position: 288px 4px; } }
+.fog-front { z-index: 6; bottom: 2px; height: 10px; opacity: .28; background-image:
+  linear-gradient(90deg, rgba(214,228,238,.55) 0 40px, rgba(214,228,238,.25) 40px 66px, transparent 66px 118px, rgba(214,228,238,.4) 118px 156px, transparent 156px);
+  background-size: 216px 8px;
+  background-position: 0 2px;
+  animation: fogFront 33s linear infinite; }
+@keyframes fogFront { to { background-position: -216px 2px; } }
+/* ---- the stones (scattered across the strip via left:% from the placement
+   hash; rows lift/scale for depth) ---- */
+.scene { position: absolute; inset: 0; z-index: 4; }
+.grave { position: absolute; bottom: 14px;
+  animation: rise .9s cubic-bezier(.18,.9,.24,1.06) both; }
 .grave.settled { animation: none; }
-@keyframes rise { from { transform: translateY(34px); opacity: 0; }
+@keyframes rise { from { transform: translateY(26px); opacity: 0; }
   60% { opacity: 1; } to { transform: none; opacity: 1; } }
-.g-back { z-index: 1; margin: 0 -12px; }
-.g-mid { z-index: 2; margin: 0 -7px; }
-.g-front { z-index: 3; margin: 0 -2px; }
+.g-back { z-index: 1; }
+.g-mid { z-index: 2; }
+.g-front { z-index: 3; }
 .gpos { position: relative; }
-.stone { position: relative; width: 74px; padding: 18px 5px 8px; text-align: center;
-  color: #1c232b; background: linear-gradient(#93a1af, #5d6873);
-  border-radius: 37px 37px 5px 5px;
-  box-shadow: inset 0 -6px 10px rgba(0,0,0,.28), 0 2px 5px rgba(0,0,0,.55); }
-.gcross { position: absolute; top: 4px; left: 0; right: 0; font-size: 11px; color: #2b333c; }
-.gsprite { image-rendering: pixelated; height: 34px; }
-.gname { font-size: 11px; font-weight: 700; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; }
-.glvl { font-size: 9px; color: #2b333c; }
-.mound { height: 6px; margin: 2px -3px 0; background: linear-gradient(#3a4c31, #26331f);
-  border-radius: 3px; }
-.stone.player { width: 92px; min-height: 88px; padding: 24px 7px 10px; color: #b7c1cc;
-  background: linear-gradient(#3d4650, #1e242b);
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 10px 10px 4px 4px;
-  box-shadow: inset 0 -8px 12px rgba(0,0,0,.5), 0 3px 7px rgba(0,0,0,.6); }
-.pcross { position: absolute; top: -15px; left: 0; right: 0; font-size: 22px;
-  color: #39424c; text-shadow: 0 2px 3px rgba(0,0,0,.85); text-align: center; }
-.stone.player .gname { color: #dde5ec; }
-.stone.player .glvl { color: #87929e; }
+/* every marker: stepped clip-path silhouette + 1px 4-way pixel outline; the
+   sprite IS the face of the grave — no name/level text on stones */
+.stone { position: relative; width: 40px; height: 38px; display: flex;
+  align-items: flex-end; justify-content: center;
+  filter: drop-shadow(1px 0 0 #171b20) drop-shadow(-1px 0 0 #171b20)
+    drop-shadow(0 1px 0 #171b20) drop-shadow(0 -1px 0 #171b20); }
+.stone::before { content: ""; position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  background: linear-gradient(#adb6bd 0 10px, #98a2aa 10px 24px, #7e8890 24px);
+  clip-path: polygon(0 100%, 0 12px, 4px 12px, 4px 6px, 10px 6px, 10px 0,
+    30px 0, 30px 6px, 36px 6px, 36px 12px, 40px 12px, 40px 100%); }
+.gsprite { position: relative; image-rendering: pixelated; height: 30px; margin-bottom: 3px; }
+/* sacrifice = a cheap wooden stake with a crooked plank sign nailed on */
+.stone.stake { height: 44px; }
+.stone.stake::before { left: 17px; top: 2px; width: 6px; height: 42px; clip-path: none;
+  background: linear-gradient(90deg, #7b5433 0 2px, #5e3f23 2px 4px, #452e18 4px); }
+.plank { position: absolute; left: 0; top: 6px; width: 40px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(#8a5d36 0 10px, #543a20 10px 12px, #7b5230 12px);
+  transform: rotate(-4deg); }
+.plank::before { content: ""; position: absolute; top: 2px; left: 19px;
+  width: 2px; height: 2px; background: #241a10; }
+.stake .gsprite { height: 18px; margin: 0; }
+/* the trainer: taller dark slab, pixel cross above, no text at all */
+.stone.player { width: 34px; height: 46px; }
+.stone.player::before { background: linear-gradient(#4c545e 0 12px, #3c444e 12px 30px, #2c343e 30px);
+  clip-path: polygon(0 100%, 0 6px, 4px 6px, 4px 0, 30px 0, 30px 6px, 34px 6px, 34px 100%); }
+.pcross { position: absolute; left: 15px; top: -12px; width: 4px; height: 14px; background: #566068; }
+.pcross::before { content: ""; position: absolute; left: -4px; top: 4px;
+  width: 12px; height: 4px; background: #566068; }
+.mound { height: 4px; margin: 0 -3px; background: linear-gradient(#3b2d1b 0 2px, #241b10 2px);
+  box-shadow: 0 0 0 1px #12100b; }
+/* pixel dialog bubble: hard corners, monospace, 1px outline; name + cause */
 .tip { position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%);
-  margin-bottom: 7px; padding: 2px 8px; font-size: 11px; font-weight: 700;
-  color: #1c232b; background: rgba(233,240,246,.92); border-radius: 8px;
+  margin-bottom: 8px; padding: 3px 6px 4px; text-align: center;
+  font: 9px/1.3 ui-monospace, Menlo, Consolas, monospace;
+  color: #211d18; background: #f2ecd9; box-shadow: 0 0 0 1px #171b20;
   white-space: nowrap; z-index: 5; opacity: 0; transition: opacity .35s; }
-.tip::after { content: ""; position: absolute; top: 100%; left: 50%; margin-left: -5px;
-  border: 5px solid transparent; border-top-color: rgba(233,240,246,.92); }
+.tip::after { content: ""; position: absolute; top: 100%; left: 50%; margin-left: -3px;
+  width: 6px; height: 3px; background: #f2ecd9;
+  box-shadow: 1px 0 0 #171b20, -1px 0 0 #171b20, 0 1px 0 #171b20; }
+.tip-n { display: block; font-weight: 700; }
+.tip-c { display: block; font-size: 8px; letter-spacing: .5px; color: #6d6350; }
 /* ?tooltips=1 spotlights ONE grave at a time; the cycler moves this class. */
 .gpos.tipshow .tip { opacity: 1; }
 `;
@@ -387,6 +464,8 @@ var tooltips = qs.get('tooltips') === '1';
 var maxRaw = qs.get('max') || '';
 var maxStones = /^[0-9]+$/.test(maxRaw) ? parseInt(maxRaw, 10) : 0;
 var scene = document.getElementById('scene');
+// cause labels — MUST match GRAVE_CAUSE_LABELS / WHITEOUT_LABELS in html.ts
+var causeLabels = { faint: 'fainted', sacrifice: 'sacrificed', duplicate_release: 'released' };
 var reasonLabels = { faint: 'whiteout', flee: 'whiteout · fled', forfeit: 'whiteout · forfeit' };
 // server-rendered sprites that 404'd: drop them (matches the client fallback)
 (function () {
@@ -404,29 +483,43 @@ function placeGrave(ts) {
   h = Math.imul(h ^ (h >>> 16), 2246822507) >>> 0;
   h = Math.imul(h ^ (h >>> 13), 3266489909) >>> 0;
   h = (h ^ (h >>> 16)) >>> 0;
-  var rows = [[-26, 0.78], [-13, 0.88], [0, 1]];
+  var rows = [[-16, 0.8], [-8, 0.9], [0, 1]];
   var row = h % 3;
-  return { row: row, dx: ((h >>> 2) % 25) - 12, dy: rows[row][0], rot: ((h >>> 7) % 7) - 3, scale: rows[row][1] };
+  return { row: row, leftPct: 3 + ((h >>> 10) % 87), dx: ((h >>> 2) % 25) - 12, dy: rows[row][0], rot: ((h >>> 7) % 7) - 3, scale: rows[row][1] };
 }
+// tip content (nickname + how they died) — MUST match the tip branch of
+// graveHtml() in html.ts
+function tipFor(m) {
+  var tip = el('div', 'tip');
+  var n = el('b', 'tip-n');
+  n.textContent = m.kind === 'player' ? (m.name || 'Trainer') : (m.name || shortSpecies(m.species));
+  var c = el('span', 'tip-c');
+  c.textContent = m.kind === 'player' ? (reasonLabels[m.cause] || 'whiteout') : (causeLabels[m.cause] || m.cause);
+  tip.appendChild(n); tip.appendChild(c);
+  return tip;
+}
+// grave DOM — classes and nesting MUST match graveHtml() in html.ts (the
+// server-rendered half of the same scene)
 function addGrave(m) {
   var p = placeGrave(m.ts);
   var g = el('div', 'grave ' + ['g-back', 'g-mid', 'g-front'][p.row]);
+  g.style.left = p.leftPct + '%';
   var pos = el('div', 'gpos');
   pos.style.transform = 'translate(' + p.dx + 'px, ' + p.dy + 'px) rotate(' + p.rot + 'deg) scale(' + p.scale + ')';
-  if (tooltips) {
-    var tip = el('div', 'tip');
-    tip.textContent = m.name;
-    pos.appendChild(tip);
-  }
+  if (tooltips) pos.appendChild(tipFor(m));
   var stone;
   if (m.kind === 'player') {
     stone = el('div', 'stone player');
-    var pc = el('div', 'pcross'); pc.textContent = '✝'; stone.appendChild(pc);
-    var pn = el('div', 'gname'); pn.textContent = m.name || 'Trainer'; stone.appendChild(pn);
-    var rs = el('div', 'glvl'); rs.textContent = reasonLabels[m.cause] || 'whiteout'; stone.appendChild(rs);
+    stone.appendChild(el('div', 'pcross'));
+  } else if (m.cause === 'sacrifice') {
+    stone = el('div', 'stone stake');
+    var plank = el('div', 'plank');
+    var simg = spriteImg('gsprite', m.species, m.dex);
+    simg.addEventListener('error', function () { simg.remove(); });
+    plank.appendChild(simg);
+    stone.appendChild(plank);
   } else {
     stone = el('div', 'stone');
-    var cr = el('div', 'gcross'); cr.textContent = '✝'; stone.appendChild(cr);
     var img = spriteImg('gsprite', m.species, m.dex);
     img.addEventListener('error', function () { img.remove(); });
     stone.appendChild(img);
@@ -460,33 +553,52 @@ if (tooltips) {
 `;
 
 const ROW_CLASSES = ["g-back", "g-mid", "g-front"] as const;
+// cause labels — MUST match causeLabels / reasonLabels in GRAVEYARD_JS
+const GRAVE_CAUSE_LABELS: Record<string, string> = {
+  faint: "fainted",
+  sacrifice: "sacrificed",
+  duplicate_release: "released",
+};
 const WHITEOUT_LABELS: Record<string, string> = {
   faint: "whiteout",
   flee: "whiteout · fled",
   forfeit: "whiteout · forfeit",
 };
 
-// One server-rendered grave. EVERY player-controlled string (nickname, species)
-// goes through escapeHtml — same XSS gate as renderStatusPage.
+// One server-rendered grave. Classes and nesting MUST match addGrave()/tipFor()
+// in GRAVEYARD_JS (the SSE-append half of the same scene). EVERY player-
+// controlled string (nickname, species) goes through escapeHtml — same XSS
+// gate as renderStatusPage.
 function graveHtml(m: MemorialEntry, tooltips: boolean): string {
   const p = gravePlacement(m.ts);
   const style = `transform: translate(${p.dx}px, ${p.dy}px) rotate(${p.rot}deg) scale(${p.scale})`;
-  const tip = tooltips ? `<div class="tip">${escapeHtml(m.name)}</div>` : "";
+  const tipName = m.kind === "player"
+    ? (m.name || "Trainer")
+    : (m.name || m.species.replace(/^.*:/, "")); // shortSpecies, as in SHARED_JS
+  const tipCause = m.kind === "player"
+    ? (WHITEOUT_LABELS[m.cause] ?? "whiteout")
+    : (GRAVE_CAUSE_LABELS[m.cause] ?? m.cause);
+  const tip = tooltips
+    ? `<div class="tip"><b class="tip-n">${escapeHtml(tipName)}</b>` +
+      `<span class="tip-c">${escapeHtml(tipCause)}</span></div>`
+    : "";
+  const sprite = `<img class="gsprite" alt="" src="/sprites/${
+    escapeHtml(encodeURIComponent(m.species))
+  }.png?dex=${m.dex > 0 ? Math.floor(m.dex) : 0}" />`;
   const stone = m.kind === "player"
-    ? `<div class="stone player"><div class="pcross">✝</div>` +
-      `<div class="gname">${escapeHtml(m.name || "Trainer")}</div>` +
-      `<div class="glvl">${escapeHtml(WHITEOUT_LABELS[m.cause] ?? "whiteout")}</div></div>`
-    : `<div class="stone"><div class="gcross">✝</div>` +
-      `<img class="gsprite" alt="" src="/sprites/${escapeHtml(encodeURIComponent(m.species))}.png?dex=${
-        m.dex > 0 ? Math.floor(m.dex) : 0
-      }" /></div>`;
+    ? `<div class="stone player"><div class="pcross"></div></div>`
+    : m.cause === "sacrifice"
+    ? `<div class="stone stake"><div class="plank">${sprite}</div></div>`
+    : `<div class="stone">${sprite}</div>`;
   // "settled" = no rise animation (these graves predate this page load)
-  return `<div class="grave settled ${ROW_CLASSES[p.row]}"><div class="gpos" style="${style}">` +
+  return `<div class="grave settled ${
+    ROW_CLASSES[p.row]
+  }" style="left: ${p.leftPct}%"><div class="gpos" style="${style}">` +
     `${tip}${stone}<div class="mound"></div></div></div>`;
 }
 
 export interface GraveyardOpts {
-  tooltips: boolean; // ?tooltips=1 — always-visible nickname bubbles
+  tooltips: boolean; // ?tooltips=1 — cycling name + cause bubble, one grave at a time
   max: number; // ?max=N — newest N stones only; 0 = all
 }
 
@@ -494,8 +606,13 @@ export function renderGraveyardPage(view: PublicState, opts: GraveyardOpts): str
   const shown = opts.max > 0 ? view.memorial.slice(-opts.max) : view.memorial;
   const stones = shown.map((m) => graveHtml(m, opts.tooltips)).join("");
   const body = `<div class="wrap">
+  <div class="hills hills-far"></div>
+  <div class="hills hills-near"></div>
+  <div class="fog fog-a"></div>
+  <div class="fog fog-b"></div>
   <div class="ground"></div>
   <div class="scene" id="scene">${stones}</div>
+  <div class="fog fog-front"></div>
 </div>`;
   // `known` = FULL memorial length (not the ?max-capped count): the client only
   // appends entries the server has not rendered yet.
@@ -664,7 +781,7 @@ h1 { font-size: 18px; letter-spacing: 1px; }
 <ul>
 <li><a href="/overlay/party">/overlay/party</a> — party bar (6 cards, sprites, HP)</li>
 <li><a href="/overlay/cemetery">/overlay/cemetery</a> — the graveyard (<a href="/overlay/cemetery?compact=1">?compact=1</a> = counter only)</li>
-<li><a href="/overlay/graveyard">/overlay/graveyard</a> — mini graveyard scene (<a href="/overlay/graveyard?tooltips=1">?tooltips=1</a> = cycling name bubble, one grave at a time; ?max=N = newest N)</li>
+<li><a href="/overlay/graveyard">/overlay/graveyard</a> — retro pixel graveyard scene: hills, drifting fog, sprite-sized stones (<a href="/overlay/graveyard?tooltips=1">?tooltips=1</a> = cycling name + cause-of-death bubble, one grave at a time; ?max=N = newest N)</li>
 <li><a href="/overlay/badges">/overlay/badges</a> — badges + level cap</li>
 <li><a href="/overlay/toasts">/overlay/toasts</a> — live event toasts</li>
 <li><a href="/status">/status</a> — debug view</li>
