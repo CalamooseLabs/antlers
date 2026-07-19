@@ -7,7 +7,7 @@
 import { parseMessage } from "./protocol.ts";
 import type { OverlayState } from "./state.ts";
 import type { SseHub } from "./sse.ts";
-import { json, parseBearerToken, timingSafeEqual } from "./util.ts";
+import { json, log, parseBearerToken, timingSafeEqual } from "./util.ts";
 
 export interface IngestDeps {
   state: OverlayState;
@@ -65,11 +65,15 @@ export async function handleIngest(req: Request, deps: IngestDeps): Promise<Resp
   try {
     raw = JSON.parse(body);
   } catch {
+    log("warn", "ingest rejected: invalid JSON", { body: body.slice(0, 200) });
     return json({ error: "invalid JSON" }, 400);
   }
 
   const parsed = parseMessage(raw);
-  if (!parsed.ok) return json({ error: parsed.error }, 400);
+  if (!parsed.ok) {
+    log("warn", "ingest rejected", { error: parsed.error, body: body.slice(0, 300) });
+    return json({ error: parsed.error }, 400);
+  }
 
   const now = (deps.now ?? Date.now)();
   const result = deps.state.apply(parsed.msg, now);
