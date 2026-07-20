@@ -7,12 +7,16 @@ import { sanitizeSlug, SpriteStore } from "../src/sprites.ts";
 import {
   BADGES_HTML,
   CEMETERY_HTML,
+  FLICKER_WINDOWS,
   gravePlacement,
   PARTY_HTML,
   pixelArt,
   renderGraveyardPage,
   renderStatusPage,
   TOASTS_HTML,
+  TOWER_MAP,
+  TOWER_WIN_X,
+  towerWindowCell,
 } from "../src/html.ts";
 import { handleIngest } from "../src/ingest.ts";
 import { type MemorialEntry, OverlayState, type PublicState } from "../src/state.ts";
@@ -199,7 +203,7 @@ Deno.test("graveyard renders all three stone variants, keeps the shell conventio
   assert(!html.includes("border-radius"), "pixel-art page: no border-radius curves");
 });
 
-Deno.test("graveyard scenery: Company tower, fence, Lavender grass/decor, drifting mist", () => {
+Deno.test("graveyard scenery: Company tower, parking-lot lamps + trees, Lavender grass/decor, drifting mist", () => {
   const html = renderGraveyardPage(graveyardView([]), { tooltips: false, max: 0 });
   const rule = (sel: string) => {
     const i = html.indexOf(sel + " { ");
@@ -241,14 +245,43 @@ Deno.test("graveyard scenery: Company tower, fence, Lavender grass/decor, drifti
   const sign = rule(".csign");
   assertStringIncludes(sign, "border: 2px solid #101010");
   assertStringIncludes(sign, "monospace");
-  // Lavender-style fence row (repeat-x pixelTile) in front of the tower,
-  // split around the center so the entrance stays visible
-  assertStringIncludes(html, `class="fence fence-l"`);
-  assertStringIncludes(html, `class="fence fence-r"`);
-  const fence = rule(".fence");
-  assertStringIncludes(fence, "background-repeat: repeat-x");
-  assertStringIncludes(fence, "linear-gradient(90deg");
-  assertStringIncludes(fence, "#b87838"); // fence wood
+  // the fence row is gone — a corporate parking-lot lamp row stands on the
+  // lawn instead, evenly spaced with a center gap for the tower entrance
+  assert(!html.includes("fence"), "the fence row is fully removed");
+  for (const pct of [4, 18, 32, 78, 92]) {
+    assertStringIncludes(html, `<i class="lamp" style="left: ${pct}%"></i>`);
+  }
+  assertStringIncludes(html, `<i class="lamp lamp-flicker" style="left: 64%"></i>`);
+  assertEquals((html.match(/class="lamp[ "]/g) ?? []).length, 6, "six lamps in the row");
+  assert(!html.includes(`class="lamp" style="left: 5`), "no lamp collides with the entrance");
+  // lamp art: outlined near-black post + warm lit head + hard light pool,
+  // all build-time pixelArt box-shadows (structure on ::before, glow on ::after)
+  const lamp = rule(".lamp::before");
+  assertStringIncludes(lamp, "box-shadow:");
+  assertStringIncludes(lamp, "#101010"); // black pixel outline
+  assertStringIncludes(lamp, "#384858"); // near-black post metal
+  const glow = rule(".lamp::after");
+  assertStringIncludes(glow, "box-shadow:");
+  assertStringIncludes(glow, "#f8d878"); // warm lit lamp pixels
+  assertStringIncludes(glow, "#f8f0b0"); // the paler core
+  assertStringIncludes(glow, "#7cb078"); // hard-edged light pool on the grass
+  // occasional standalone round-top trees between the lamps (not a line)
+  assertEquals((html.match(/class="tree"/g) ?? []).length, 3, "three occasional trees");
+  for (const pct of [11, 25, 85]) {
+    assertStringIncludes(html, `<i class="tree" style="left: ${pct}%"></i>`);
+  }
+  const tree = rule(".tree::before");
+  assertStringIncludes(tree, "box-shadow:");
+  assertStringIncludes(tree, "#4a7a58"); // muted moss canopy
+  assertStringIncludes(tree, "#345c42");
+  assertStringIncludes(tree, "#b87838"); // wood trunk
+  assertStringIncludes(tree, "#c0a0e0"); // lavender blossom pixels
+  // the lot paints over HQ but behind the graves
+  assert(
+    html.indexOf(`class="lot"`) > html.indexOf(`class="bldg"`) &&
+      html.indexOf(`class="lot"`) < html.indexOf(`id="scene"`),
+    "lamps/trees render between the building and the graves",
+  );
   // desaturated Lavender grass checker
   const ground = rule(".ground");
   assertStringIncludes(ground, "conic-gradient");
@@ -280,6 +313,59 @@ Deno.test("graveyard scenery: Company tower, fence, Lavender grass/decor, drifti
     html.indexOf(`class="bldg"`) < html.indexOf(`id="scene"`),
     "building renders before (behind) the graves",
   );
+});
+
+Deno.test("graveyard flicker: buzzing tower windows are pixel-aligned; one lamp buzzes out of sync", () => {
+  const html = renderGraveyardPage(graveyardView([]), { tooltips: false, max: 0 });
+  // map proof: every buzz cell covers an always-dark `w` window (w is dark in
+  // BOTH officeShift frames), so the fast buzz never fights the slow shift
+  assert(FLICKER_WINDOWS.length >= 2 && FLICKER_WINDOWS.length <= 3, "2-3 bad tubes");
+  for (const { floor, win } of FLICKER_WINDOWS) {
+    for (let dy = 0; dy < 2; dy++) {
+      const row = TOWER_MAP[15 + 4 * floor + dy]; // 15 rows of antenna/roof/slab/wall above the top office floor
+      for (let dx = 0; dx < 3; dx++) {
+        assertEquals(row[TOWER_WIN_X[win] + dx], "w", `floor ${floor} win ${win} must cover a dark window cell`);
+      }
+    }
+  }
+  // css proof: each overlay <i> sits at exactly the map-cell position — map
+  // pixel (x, y) renders at ((x+1)·2, (y+1)·2) CSS px inside .bldg (the art is
+  // shifted one game px; see pixelArt) — and spans one 3×2-game-px window
+  assertEquals(towerWindowCell(2, 1), { left: 26, top: 48, width: 6, height: 4 });
+  const classes = ["wf-a", "wf-b", "wf-c"];
+  for (let i = 0; i < FLICKER_WINDOWS.length; i++) {
+    const { floor, win } = FLICKER_WINDOWS[i];
+    const c = towerWindowCell(floor, win);
+    assertEquals(c.left, (TOWER_WIN_X[win] + 1) * 2, "left matches the map column math");
+    assertEquals(c.top, (15 + 4 * floor + 1) * 2, "top matches the map row math");
+    assertStringIncludes(html, `<i class="wflick ${classes[i]}"></i>`);
+    assertStringIncludes(html, `.${classes[i]} { left: ${c.left}px; top: ${c.top}px; animation: tubeBuzz `);
+  }
+  assertStringIncludes(html, `.bldg .wflick { width: 6px; height: 4px; background: #f8d878; }`);
+  // the buzz itself: fast irregular steps(1) loops with UNEVEN keyframe gaps
+  // snapping opacity 1/0 (never a fade) — a dying tube, nothing like the slow
+  // 11s officeShift; per-cell durations/phases differ so tubes never sync
+  const keyframeLine = (name: string) => {
+    const i = html.indexOf(`@keyframes ${name} { `);
+    assert(i >= 0, name + " keyframes exist");
+    return html.slice(i, html.indexOf("\n", i));
+  };
+  for (const name of ["tubeBuzz", "lampBuzz"]) {
+    const line = keyframeLine(name);
+    assertStringIncludes(line, "opacity: 0");
+    assertStringIncludes(line, "opacity: 1");
+    const stops = [...line.matchAll(/ (\d+)% \{ opacity: [01]; \}/g)].map((m) => Number(m[1]));
+    const mids = stops.filter((s) => s > 0 && s < 100).sort((a, b) => a - b);
+    assert(mids.length >= 6, name + " stutters several times per loop");
+    const gaps = mids.slice(1).map((s, i) => s - mids[i]);
+    assert(new Set(gaps).size >= 3, name + " keyframe gaps are uneven, not a metronome");
+  }
+  assertStringIncludes(html, "animation: tubeBuzz 2.9s steps(1) infinite;");
+  assertStringIncludes(html, "animation: tubeBuzz 3.7s steps(1) infinite .7s;");
+  assertStringIncludes(html, "animation: tubeBuzz 3.3s steps(1) infinite 1.3s;");
+  // exactly one lamp in the row flickers, on its own period/phase
+  assertStringIncludes(html, `class="lamp lamp-flicker"`);
+  assertStringIncludes(html, ".lamp-flicker::after { animation: lampBuzz 3.9s steps(1) infinite .2s; }");
 });
 
 Deno.test("graveyard markers are pixelArt box-shadows; tooltip is a GB textbox", () => {
