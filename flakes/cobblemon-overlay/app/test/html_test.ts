@@ -9,6 +9,7 @@ import {
   CEMETERY_HTML,
   gravePlacement,
   PARTY_HTML,
+  pixelArt,
   renderGraveyardPage,
   renderStatusPage,
   TOASTS_HTML,
@@ -198,13 +199,21 @@ Deno.test("graveyard renders all three stone variants, keeps the shell conventio
   assert(!html.includes("border-radius"), "pixel-art page: no border-radius curves");
 });
 
-Deno.test("graveyard scenery: hills, dithered ground, and drifting fog bands exist", () => {
+Deno.test("graveyard scenery: GB tree line, checker grass, decor tiles, drifting mist", () => {
   const html = renderGraveyardPage(graveyardView([]), { tooltips: false, max: 0 });
-  // two stepped hill layers + the ground band
-  assertStringIncludes(html, `class="hills hills-far"`);
-  assertStringIncludes(html, `class="hills hills-near"`);
+  // tree line: two depth rows of repeating round-top pixel trees (repeat-x tiles)
+  assertStringIncludes(html, `class="treeline treeline-far"`);
+  assertStringIncludes(html, `class="treeline treeline-near"`);
+  assertStringIncludes(html, "background-repeat: repeat-x");
+  // flat grass band with the classic two-tone tile checker
   assertStringIncludes(html, `class="ground"`);
-  // fog: two bands behind the stones, one thin band in front, looping keyframes
+  assertStringIncludes(html, "conic-gradient");
+  // scattered decor: grass tufts + Crystal-style 2-frame blinking flowers
+  assertStringIncludes(html, `class="tuft"`);
+  assertStringIncludes(html, `class="flower"`);
+  assertStringIncludes(html, "@keyframes bloom");
+  assertStringIncludes(html, "steps(1)", "the flower blink snaps between frames, GB-style");
+  // mist: two bands behind the stones, one thin band in front, looping keyframes
   assertStringIncludes(html, `class="fog fog-a"`);
   assertStringIncludes(html, `class="fog fog-b"`);
   assertStringIncludes(html, `class="fog fog-front"`);
@@ -216,6 +225,41 @@ Deno.test("graveyard scenery: hills, dithered ground, and drifting fog bands exi
     html.indexOf(`<div class="fog fog-front">`) > html.indexOf(`id="scene"`),
     "fog-front renders after the scene",
   );
+});
+
+Deno.test("graveyard markers are pixelArt box-shadows; tooltip is a GB textbox", () => {
+  // pixelArt: pixel map → box-shadow, one game px shifted (outer shadows are
+  // invisible over their own base box), "." transparent, colors by char
+  assertEquals(
+    pixelArt(["K.", ".1"], { K: "#101010", "1": "#f8f8f8" }, 2),
+    "2px 2px 0 #101010, 4px 4px 0 #f8f8f8",
+  );
+  const html = renderGraveyardPage(graveyardView([]), { tooltips: false, max: 0 });
+  const rule = (sel: string) => {
+    const i = html.indexOf(sel + " { ");
+    assert(i >= 0, sel + " rule exists");
+    return html.slice(i, html.indexOf("}", i));
+  };
+  // all three markers draw from generated box-shadow pixel art in the GB
+  // palette (flat shades + the #101010 outline baked into the maps)
+  const stone = rule(".stone::before");
+  assertStringIncludes(stone, "box-shadow:");
+  assertStringIncludes(stone, "#f8f8f8"); // headstone highlight gray
+  assertStringIncludes(stone, "#101010"); // black pixel outline
+  const stake = rule(".stone.stake::before");
+  assertStringIncludes(stake, "box-shadow:");
+  assertStringIncludes(stake, "#b87838"); // wood
+  const player = rule(".stone.player::before");
+  assertStringIncludes(player, "box-shadow:");
+  assertStringIncludes(player, "#484848"); // dark stone cross
+  // the tooltip is a mini Pokémon textbox: white, thick black double frame
+  // (border + ring), hard corners, black monospace text
+  const tip = rule(".tip");
+  assertStringIncludes(tip, "background: #f8f8f8");
+  assertStringIncludes(tip, "border: 2px solid #101010");
+  assertStringIncludes(tip, "box-shadow: 0 0 0 2px #f8f8f8, 0 0 0 4px #101010");
+  assertStringIncludes(tip, "monospace");
+  assertStringIncludes(tip, "color: #101010");
 });
 
 Deno.test("graveyard SSE path builds the same three variants as the server (parity)", () => {

@@ -291,23 +291,27 @@ export const CEMETERY_HTML = page(
   CEMETERY_JS,
 );
 
-// ---- /overlay/graveyard — a RETRO PIXEL graveyard SCENE (server-rendered) ----
-// A GBA-era pixel-art strip for OBS: two stepped hill silhouettes (muted
-// blues/greens, hard-stop gradients — everything above them stays transparent),
-// a dithered grass/ground band, and drifting blocky fog (two bands behind the
-// stones, one thin band in front). Stones are sprite-sized (~40px) with the
-// mini sprite as the FACE of the grave — no name/level text on stones. Three
-// marker variants: the default gray pixel headstone (faint/duplicate_release),
-// a deliberately cheap wooden stake + crooked plank sign (sacrifice), and the
-// trainer's taller dark slab with a pixel cross (kind:"player", no text).
-// No border-radius anywhere: silhouettes are stepped clip-path polygons with a
-// 1px 4-way drop-shadow outline. Stones sit in 3 staggered depth rows with
+// ---- /overlay/graveyard — a GAME BOY pixel graveyard SCENE (server-rendered) ----
+// Pokémon Yellow / Crystal overworld look for OBS: everything sits on the
+// 16×16-game-pixel tile grid at PX(=2) CSS px per game pixel, in a flat 3-4
+// shade GBC palette + #101010 outlines — no soft gradients, no alpha edges on
+// scenery. Scenery: a repeating round-top TREE LINE (two depth rows, tiled
+// edge to edge — everything above it stays transparent), a flat #78c850 grass
+// band with the classic darker tile checker, scattered grass tufts and
+// Crystal-style 2-frame blinking flowers (steps(1) box-shadow swap), plus
+// drifting blocky mist (two bands behind the stones, one thin band in front).
+// Markers are build-time pixelArt() box-shadows: the Lavender Town rounded-
+// top/stepped-base slab (faint/duplicate_release), a deliberately cheap
+// crooked wooden stake + plank sign (sacrifice), and the trainer's taller
+// dark stone cross (kind:"player", no text). The mini sprite stays the FACE
+// of the grave — no name/level text on stones. No border-radius anywhere.
+// Stones sit in 3 staggered depth rows with
 // deterministic jitter seeded from each memorial's ts, stable across reloads.
 // Unlike the other overlay pages the initial stones are rendered SERVER-side
 // (through escapeHtml — nicknames are player-controlled); the SSE `state`
 // stream then appends new graves client-side with the same rise animation and
-// the same placement hash. ?tooltips=1 = a cycling pixel bubble spotlighting
-// one grave at a time: nickname + how they died; ?max=N = newest N stones.
+// the same placement hash. ?tooltips=1 = a cycling mini Pokémon-textbox bubble
+// spotlighting one grave at a time: nickname + how they died; ?max=N = newest N stones.
 // Graves are persistent: like /overlay/cemetery this page only DIMS when the
 // feed goes stale (the shared body.stale rule) — it never hides.
 
@@ -342,62 +346,278 @@ export function gravePlacement(ts: number): GravePlacement {
   };
 }
 
+// ---- build-time pixel art --------------------------------------------------
+// 1 game pixel = PX CSS px (Game Boy overworld tiles are 16×16 game px).
+const PX = 2;
+
+// Turns a pixel map (one string per row, one char per game pixel, "." =
+// transparent) into a box-shadow string on a px-by-px base div. Offsets start
+// at one game pixel (+px,+px) because an outer box-shadow is invisible where
+// it overlaps its own base box — the carrier element compensates by sitting at
+// (-px,-px). Throws at module load on ragged rows / unmapped chars, so a bad
+// map can never ship silently.
+export function pixelArt(map: readonly string[], colors: Record<string, string>, px: number): string {
+  const shadows: string[] = [];
+  for (let y = 0; y < map.length; y++) {
+    const row = map[y];
+    if (row.length !== map[0].length) {
+      throw new Error(`pixelArt: row ${y} is ${row.length} wide, want ${map[0].length}`);
+    }
+    for (let x = 0; x < row.length; x++) {
+      const ch = row[x];
+      if (ch === ".") continue;
+      const color = colors[ch];
+      if (!color) throw new Error(`pixelArt: no color for "${ch}"`);
+      shadows.push(`${(x + 1) * px}px ${(y + 1) * px}px 0 ${color}`);
+    }
+  }
+  return shadows.join(", ");
+}
+
+// Same pixel-map format, emitted as horizontally-tileable background layers
+// (one hard-stop linear-gradient per non-empty row, repeat-x) — for scenery
+// that must repeat edge to edge, like the tree line.
+function pixelTile(
+  map: readonly string[],
+  colors: Record<string, string>,
+  px: number,
+  xShift = 0,
+): { image: string; position: string; size: string } {
+  const images: string[] = [];
+  const positions: string[] = [];
+  for (let y = 0; y < map.length; y++) {
+    const row = map[y];
+    if (row.length !== map[0].length) {
+      throw new Error(`pixelTile: row ${y} is ${row.length} wide, want ${map[0].length}`);
+    }
+    const stops: string[] = [];
+    let solid = false;
+    let x = 0;
+    while (x < row.length) {
+      const ch = row[x];
+      let end = x;
+      while (end < row.length && row[end] === ch) end++;
+      let color = "transparent";
+      if (ch !== ".") {
+        color = colors[ch] ?? "";
+        if (!color) throw new Error(`pixelTile: no color for "${ch}"`);
+        solid = true;
+      }
+      stops.push(`${color} ${x * px}px ${end * px}px`);
+      x = end;
+    }
+    if (!solid) continue;
+    images.push(`linear-gradient(90deg, ${stops.join(", ")})`);
+    positions.push(`${xShift}px ${y * px}px`);
+  }
+  return {
+    image: images.join(", "),
+    position: positions.join(", "),
+    size: `${map[0].length * px}px ${px}px`,
+  };
+}
+
+// GBC-ish flat palette (Pokémon Yellow / Crystal overworld): 3-4 shades per
+// element + one near-black for outlines. The whole scene draws from here.
+const GB = {
+  ink: "#101010",
+  stone1: "#f8f8f8", stone2: "#a8a8a8", stone3: "#707070", stone4: "#484848",
+  leaf1: "#58c870", leaf2: "#309850", leaf3: "#186838", leaf4: "#104028",
+  grass: "#78c850", grassCheck: "#68b048",
+  dirt1: "#e8d8a0", dirt2: "#c8a868",
+  wood1: "#b87838", wood2: "#885828", wood3: "#583818",
+};
+
+// Lavender-Town-style headstone: rounded-top slab over a stepped base, 3 grays.
+const STONE_MAP = [
+  "......KKKK......",
+  "....KK1111KK....",
+  "...K11111122K...",
+  "..K1111111222K..",
+  "..K1111111222K..",
+  "..K2111111222K..",
+  "..K2111112222K..",
+  "..K2211112222K..",
+  "..K2211122223K..",
+  "..K2221222233K..",
+  "..K2222222233K..",
+  "..K2222223333K..",
+  ".KK2222233333KK.",
+  ".K222222333333K.",
+  "KK222233333333KK",
+  "KKKKKKKKKKKKKKKK",
+];
+const STONE_SHADOW = pixelArt(STONE_MAP, { K: GB.ink, "1": GB.stone1, "2": GB.stone2, "3": GB.stone3 }, PX);
+
+// Sacrifice: a cheap wooden stake, plank sign nailed on skew, kicked-out foot.
+const STAKE_MAP = [
+  ".......KK.......",
+  "......K12K......",
+  "......K12K......",
+  ".KKKKKKKKKKKKK..",
+  ".K11111111112K..",
+  ".K12111111122K..",
+  "..K1111111122K..",
+  "..K2222222222K..",
+  "..KKKKKKKKKKKK..",
+  "......K12K......",
+  "......K12K......",
+  "......K12K......",
+  "......K12K......",
+  "......K22K......",
+  "......K22K......",
+  ".....K122K......",
+  ".....K222K......",
+  ".....K22K.......",
+  "......KK........",
+];
+const STAKE_SHADOW = pixelArt(STAKE_MAP, { K: GB.ink, "1": GB.wood1, "2": GB.wood2 }, PX);
+
+// Player whiteout: a taller dark stone cross, textless.
+const PLAYER_MAP = [
+  "....KKKK....",
+  "...K1122K...",
+  "...K1122K...",
+  "...K1122K...",
+  "KKKK1122KKKK",
+  "K1111122223K",
+  "K1111222233K",
+  "KKKK2223KKKK",
+  "...K1223K...",
+  "...K1223K...",
+  "...K1223K...",
+  "...K1223K...",
+  "...K2233K...",
+  "...K2233K...",
+  "...K2233K...",
+  "...K2233K...",
+  "..K222333K..",
+  "..K222333K..",
+  ".K22233333K.",
+  ".K23333333K.",
+  ".KKKKKKKKKK.",
+];
+const PLAYER_SHADOW = pixelArt(PLAYER_MAP, { K: GB.ink, "1": GB.stone2, "2": GB.stone3, "3": GB.stone4 }, PX);
+
+// One 16×16 round-top bushy tree tile, tileable edge to edge (rows 5-9 run
+// full width so neighboring crowns touch; the dark bottom rows read as the
+// tree-row shadow band).
+const TREE_MAP = [
+  ".....KKKKKK.....",
+  "...KK111111KK...",
+  "..K1111111111K..",
+  ".K111211112111K.",
+  ".K112211221122K.",
+  "K11221112211122K",
+  "K12211221122112K",
+  "K22112211221122K",
+  "K22221122112222K",
+  "K22222222222222K",
+  "3K222222222222K3",
+  "33K2222222222K33",
+  "33KK22222222KK33",
+  "33333KWWXXK33333",
+  "33333KWWXXK33333",
+  "33333KKXXKK33333",
+];
+const TREES_NEAR = pixelTile(
+  TREE_MAP,
+  { K: GB.ink, "1": GB.leaf1, "2": GB.leaf2, "3": GB.leaf3, W: GB.wood1, X: GB.wood2 },
+  PX,
+);
+// far row: one palette step darker, offset half a tile so crowns fill the gaps
+const TREES_FAR = pixelTile(
+  TREE_MAP,
+  { K: GB.ink, "1": GB.leaf2, "2": GB.leaf3, "3": GB.leaf4, W: GB.wood2, X: GB.wood3 },
+  PX,
+  8 * PX,
+);
+
+// Ground decor: a grass tuft and Crystal's 2-frame blinking flower.
+const TUFT_MAP = [
+  ".3..2.3.",
+  ".3.23.2.",
+  "32.32.33",
+  ".23232..",
+  "..232...",
+];
+const TUFT_SHADOW = pixelArt(TUFT_MAP, { "2": GB.leaf2, "3": GB.leaf3 }, PX);
+const FLOWER_A_MAP = [
+  ".PP..PP.",
+  ".PPYYPP.",
+  "..YYYY..",
+  ".PPYYPP.",
+  ".PP..PP.",
+  "...33...",
+  "..33.3..",
+];
+const FLOWER_B_MAP = [
+  "........",
+  "..P..P..",
+  "..YYYY..",
+  "..YYYY..",
+  "..P..P..",
+  "...33...",
+  "..33.3..",
+];
+const FLOWER_COLORS = { P: GB.stone1, Y: GB.dirt1, "3": GB.leaf3 };
+const FLOWER_A_SHADOW = pixelArt(FLOWER_A_MAP, FLOWER_COLORS, PX);
+const FLOWER_B_SHADOW = pixelArt(FLOWER_B_MAP, FLOWER_COLORS, PX);
+
 const GRAVEYARD_CSS = `
 .wrap { position: fixed; inset: 0; }
-/* ---- scenery (all bottom-anchored; above the hills = transparent for OBS) ---- */
-.hills { position: absolute; left: 0; right: 0; bottom: 0; pointer-events: none;
-  background-repeat: no-repeat; }
-.hills-far { z-index: 0; height: 86px; background-image:
-  linear-gradient(90deg, transparent 0 10%, rgba(35,47,60,.92) 10% 20%, transparent 20% 64%, rgba(35,47,60,.92) 64% 72%, transparent 72%),
-  linear-gradient(90deg, transparent 0 6%, rgba(35,47,60,.92) 6% 26%, transparent 26% 58%, rgba(35,47,60,.92) 58% 78%, transparent 78%),
-  linear-gradient(90deg, transparent 0 2%, rgba(35,47,60,.92) 2% 32%, transparent 32% 52%, rgba(35,47,60,.92) 52% 84%, transparent 84%),
-  linear-gradient(90deg, rgba(35,47,60,.92) 0 40%, transparent 40% 46%, rgba(35,47,60,.92) 46% 92%, transparent 92%),
-  linear-gradient(rgba(35,47,60,.92), rgba(35,47,60,.92));
-  background-size: 100% 12px, 100% 14px, 100% 16px, 100% 14px, 100% 30px;
-  background-position: 0 0, 0 12px, 0 26px, 0 42px, 0 56px; }
-.hills-near { z-index: 1; height: 54px; background-image:
-  linear-gradient(90deg, transparent 0 30%, rgba(27,40,25,.95) 30% 40%, transparent 40% 80%, rgba(27,40,25,.95) 80% 90%, transparent 90%),
-  linear-gradient(90deg, transparent 0 24%, rgba(27,40,25,.95) 24% 46%, transparent 46% 74%, rgba(27,40,25,.95) 74% 96%, transparent 96%),
-  linear-gradient(90deg, transparent 0 16%, rgba(27,40,25,.95) 16% 52%, transparent 52% 68%, rgba(27,40,25,.95) 68%),
-  linear-gradient(rgba(27,40,25,.95), rgba(27,40,25,.95));
-  background-size: 100% 10px, 100% 12px, 100% 12px, 100% 20px;
-  background-position: 0 0, 0 10px, 0 22px, 0 34px; }
-/* dithered hard-stop grass band: checker fringe rows over solid pixel strata */
-.ground { position: absolute; left: 0; right: 0; bottom: 0; height: 26px; z-index: 2;
-  background-image:
-    linear-gradient(90deg, rgba(58,76,49,.95) 0 6px, transparent 6px),
-    linear-gradient(90deg, transparent 0 6px, rgba(58,76,49,.95) 6px),
-    linear-gradient(#3a4c31 0 6px, #2c3b26 6px 14px, #1f2a19 14px);
-  background-size: 12px 4px, 12px 4px, 100% 18px;
-  background-position: 0 0, 0 4px, 0 8px;
-  background-repeat: repeat-x, repeat-x, no-repeat; }
-/* ---- fog: blocky hard-stop puffs, stepped opacity; each band slides exactly
-   one pattern period per loop, so the drift is seamless ---- */
+/* ---- GB scenery, bottom-anchored; above the tree line = transparent for OBS.
+   1 game px = ${PX} CSS px; flat colors, hard stops, black outlines only. ---- */
+/* flat grass band with the classic two-tone tile checker (8×8 game-px tiles) */
+.ground { position: absolute; left: 0; right: 0; bottom: 0; height: 52px; z-index: 0;
+  background: conic-gradient(${GB.grassCheck} 0 25%, ${GB.grass} 0 50%, ${GB.grassCheck} 0 75%, ${GB.grass} 0) 0 0 / 32px 32px; }
+/* repeating round-top tree line: one pixelTile() row per depth layer */
+.treeline { position: absolute; left: 0; right: 0; height: 32px; z-index: 1;
+  pointer-events: none; background-repeat: repeat-x; }
+.treeline-far { bottom: 52px;
+  background-image: ${TREES_FAR.image};
+  background-size: ${TREES_FAR.size};
+  background-position: ${TREES_FAR.position}; }
+.treeline-near { bottom: 40px;
+  background-image: ${TREES_NEAR.image};
+  background-size: ${TREES_NEAR.size};
+  background-position: ${TREES_NEAR.position}; }
+/* scattered grass tufts + Crystal's synced 2-frame blinking flowers */
+.decor { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.tuft, .flower { position: absolute; width: ${PX}px; height: ${PX}px; }
+.tuft { bottom: 16px; box-shadow: ${TUFT_SHADOW}; }
+.flower { bottom: 20px; box-shadow: ${FLOWER_A_SHADOW};
+  animation: bloom 1.4s steps(1) infinite; }
+@keyframes bloom { 50% { box-shadow: ${FLOWER_B_SHADOW}; } }
+/* ---- mist: blocky checker dashes (Sprout Tower / Ilex Forest style); each
+   band slides exactly one pattern period per loop, so the drift is seamless ---- */
 .fog { position: absolute; left: 0; right: 0; pointer-events: none;
   background-repeat: repeat-x; }
-.fog-a { z-index: 3; bottom: 22px; height: 20px; opacity: .32; background-image:
-  linear-gradient(90deg, transparent 0 12px, rgba(206,220,231,.7) 12px 58px, rgba(206,220,231,.35) 58px 96px, transparent 96px 132px, rgba(206,220,231,.5) 132px 176px, transparent 176px),
-  linear-gradient(90deg, rgba(206,220,231,.4) 0 30px, transparent 30px);
-  background-size: 240px 12px, 120px 8px;
-  background-position: 0 8px, 0 0;
-  animation: fogA 44s linear infinite; }
-@keyframes fogA { to { background-position: -240px 8px, -240px 0; } }
-.fog-b { z-index: 3; bottom: 44px; height: 14px; opacity: .22; background-image:
-  linear-gradient(90deg, transparent 0 26px, rgba(190,206,220,.6) 26px 92px, transparent 92px 150px, rgba(190,206,220,.4) 150px 196px, transparent 196px);
-  background-size: 288px 10px;
-  background-position: 0 4px;
-  animation: fogB 61s linear infinite; }
-@keyframes fogB { to { background-position: 288px 4px; } }
-.fog-front { z-index: 6; bottom: 2px; height: 10px; opacity: .28; background-image:
-  linear-gradient(90deg, rgba(214,228,238,.55) 0 40px, rgba(214,228,238,.25) 40px 66px, transparent 66px 118px, rgba(214,228,238,.4) 118px 156px, transparent 156px);
-  background-size: 216px 8px;
+.fog-a { z-index: 3; bottom: 18px; height: 16px; opacity: .28; background-image:
+  linear-gradient(90deg, rgba(248,248,248,.8) 0 24px, transparent 24px),
+  linear-gradient(90deg, transparent 0 16px, rgba(248,248,248,.6) 16px 32px),
+  linear-gradient(90deg, rgba(248,248,248,.7) 0 16px, transparent 16px 40px, rgba(248,248,248,.7) 40px 48px);
+  background-size: 48px 4px, 32px 4px, 48px 4px;
+  background-position: 0 2px, 0 6px, 0 10px;
+  animation: fogA 48s linear infinite; }
+@keyframes fogA { to { background-position: -96px 2px, -96px 6px, -96px 10px; } }
+.fog-b { z-index: 3; bottom: 56px; height: 10px; opacity: .18; background-image:
+  linear-gradient(90deg, transparent 0 8px, rgba(248,248,248,.6) 8px 32px, transparent 32px),
+  linear-gradient(90deg, rgba(248,248,248,.4) 0 16px, transparent 16px);
+  background-size: 48px 4px, 48px 4px;
+  background-position: 0 2px, 0 6px;
+  animation: fogB 64s linear infinite; }
+@keyframes fogB { to { background-position: 48px 2px, 48px 6px; } }
+.fog-front { z-index: 6; bottom: 2px; height: 8px; opacity: .22; background-image:
+  linear-gradient(90deg, rgba(248,248,248,.7) 0 16px, transparent 16px 32px, rgba(248,248,248,.45) 32px 40px, transparent 40px);
+  background-size: 64px 4px;
   background-position: 0 2px;
-  animation: fogFront 33s linear infinite; }
-@keyframes fogFront { to { background-position: -216px 2px; } }
+  animation: fogFront 36s linear infinite; }
+@keyframes fogFront { to { background-position: -64px 2px; } }
 /* ---- the stones (scattered across the strip via left:% from the placement
    hash; rows lift/scale for depth) ---- */
 .scene { position: absolute; inset: 0; z-index: 4; }
-.grave { position: absolute; bottom: 14px;
+.grave { position: absolute; bottom: 12px;
   animation: rise .9s cubic-bezier(.18,.9,.24,1.06) both; }
 .grave.settled { animation: none; }
 @keyframes rise { from { transform: translateY(26px); opacity: 0; }
@@ -406,48 +626,41 @@ const GRAVEYARD_CSS = `
 .g-mid { z-index: 2; }
 .g-front { z-index: 3; }
 .gpos { position: relative; }
-/* every marker: stepped clip-path silhouette + 1px 4-way pixel outline; the
-   sprite IS the face of the grave — no name/level text on stones */
-.stone { position: relative; width: 40px; height: 38px; display: flex;
-  align-items: flex-end; justify-content: center;
-  filter: drop-shadow(1px 0 0 #171b20) drop-shadow(-1px 0 0 #171b20)
-    drop-shadow(0 1px 0 #171b20) drop-shadow(0 -1px 0 #171b20); }
-.stone::before { content: ""; position: absolute; left: 0; top: 0; width: 100%; height: 100%;
-  background: linear-gradient(#adb6bd 0 10px, #98a2aa 10px 24px, #7e8890 24px);
-  clip-path: polygon(0 100%, 0 12px, 4px 12px, 4px 6px, 10px 6px, 10px 0,
-    30px 0, 30px 6px, 36px 6px, 36px 12px, 40px 12px, 40px 100%); }
-.gsprite { position: relative; image-rendering: pixelated; height: 30px; margin-bottom: 3px; }
-/* sacrifice = a cheap wooden stake with a crooked plank sign nailed on */
-.stone.stake { height: 44px; }
-.stone.stake::before { left: 17px; top: 2px; width: 6px; height: 42px; clip-path: none;
-  background: linear-gradient(90deg, #7b5433 0 2px, #5e3f23 2px 4px, #452e18 4px); }
-.plank { position: absolute; left: 0; top: 6px; width: 40px; height: 22px;
-  display: flex; align-items: center; justify-content: center;
-  background: linear-gradient(#8a5d36 0 10px, #543a20 10px 12px, #7b5230 12px);
-  transform: rotate(-4deg); }
-.plank::before { content: ""; position: absolute; top: 2px; left: 19px;
-  width: 2px; height: 2px; background: #241a10; }
-.stake .gsprite { height: 18px; margin: 0; }
-/* the trainer: taller dark slab, pixel cross above, no text at all */
-.stone.player { width: 34px; height: 46px; }
-.stone.player::before { background: linear-gradient(#4c545e 0 12px, #3c444e 12px 30px, #2c343e 30px);
-  clip-path: polygon(0 100%, 0 6px, 4px 6px, 4px 0, 30px 0, 30px 6px, 34px 6px, 34px 100%); }
-.pcross { position: absolute; left: 15px; top: -12px; width: 4px; height: 14px; background: #566068; }
-.pcross::before { content: ""; position: absolute; left: -4px; top: 4px;
-  width: 12px; height: 4px; background: #566068; }
-.mound { height: 4px; margin: 0 -3px; background: linear-gradient(#3b2d1b 0 2px, #241b10 2px);
-  box-shadow: 0 0 0 1px #12100b; }
-/* pixel dialog bubble: hard corners, monospace, 1px outline; name + cause */
+/* every marker = a build-time pixelArt() box-shadow on a ${PX}×${PX} ::before
+   (sitting at -${PX}px both ways: the art is shifted one game px because an
+   outer box-shadow is invisible over its own base box). Outlines are baked
+   into the maps. The sprite IS the face of the grave — no text on stones. */
+.stone { position: relative; width: 32px; height: 32px; display: flex;
+  align-items: flex-end; justify-content: center; }
+.stone::before { content: ""; position: absolute; left: -${PX}px; top: -${PX}px;
+  width: ${PX}px; height: ${PX}px; box-shadow: ${STONE_SHADOW}; }
+.gsprite { position: relative; image-rendering: pixelated; height: 26px; margin-bottom: ${PX}px; }
+/* sacrifice = the cheap crooked wooden stake; the plank is just the seat for
+   the small sprite (all the wood is part of the stake's pixel art) */
+.stone.stake { width: 32px; height: 38px; }
+.stone.stake::before { box-shadow: ${STAKE_SHADOW}; }
+.plank { position: absolute; left: 2px; top: 6px; width: 28px; height: 12px;
+  display: flex; align-items: center; justify-content: center; }
+.stake .gsprite { height: 16px; margin: 0; }
+/* the trainer: the whole marker is the dark cross art; the .pcross child
+   stays for server/client DOM parity but draws nothing itself */
+.stone.player { width: 24px; height: 42px; }
+.stone.player::before { box-shadow: ${PLAYER_SHADOW}; }
+.mound { height: 4px; margin: ${PX}px -${PX}px 0;
+  background: repeating-linear-gradient(90deg, ${GB.dirt2} 0 4px, ${GB.dirt1} 4px 8px); }
+/* tooltip = a mini Pokémon TEXTBOX: white, thick black double frame (border +
+   ring), hard corners, black monospace text; name + cause */
 .tip { position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%);
-  margin-bottom: 8px; padding: 3px 6px 4px; text-align: center;
-  font: 9px/1.3 ui-monospace, Menlo, Consolas, monospace;
-  color: #211d18; background: #f2ecd9; box-shadow: 0 0 0 1px #171b20;
+  margin-bottom: 12px; padding: 3px 7px 4px; text-align: center;
+  font: 10px/1.4 ui-monospace, Menlo, Consolas, monospace;
+  color: #101010; background: #f8f8f8;
+  border: 2px solid #101010;
+  box-shadow: 0 0 0 2px #f8f8f8, 0 0 0 4px #101010;
   white-space: nowrap; z-index: 5; opacity: 0; transition: opacity .35s; }
-.tip::after { content: ""; position: absolute; top: 100%; left: 50%; margin-left: -3px;
-  width: 6px; height: 3px; background: #f2ecd9;
-  box-shadow: 1px 0 0 #171b20, -1px 0 0 #171b20, 0 1px 0 #171b20; }
+.tip::after { content: ""; position: absolute; top: 100%; left: 50%;
+  margin: 6px 0 0 -3px; width: 6px; height: 4px; background: #101010; }
 .tip-n { display: block; font-weight: 700; }
-.tip-c { display: block; font-size: 8px; letter-spacing: .5px; color: #6d6350; }
+.tip-c { display: block; font-size: 9px; letter-spacing: .5px; color: #707070; }
 /* ?tooltips=1 spotlights ONE grave at a time; the cycler moves this class. */
 .gpos.tipshow .tip { opacity: 1; }
 `;
@@ -606,11 +819,25 @@ export function renderGraveyardPage(view: PublicState, opts: GraveyardOpts): str
   const shown = opts.max > 0 ? view.memorial.slice(-opts.max) : view.memorial;
   const stones = shown.map((m) => graveHtml(m, opts.tooltips)).join("");
   const body = `<div class="wrap">
-  <div class="hills hills-far"></div>
-  <div class="hills hills-near"></div>
+  <div class="ground"></div>
+  <div class="treeline treeline-far"></div>
+  <div class="treeline treeline-near"></div>
+  <div class="decor">
+    <i class="tuft" style="left: 5%"></i>
+    <i class="flower" style="left: 12%"></i>
+    <i class="tuft" style="left: 20%; bottom: 26px"></i>
+    <i class="flower" style="left: 28%; bottom: 30px"></i>
+    <i class="tuft" style="left: 37%"></i>
+    <i class="flower" style="left: 45%"></i>
+    <i class="tuft" style="left: 55%; bottom: 26px"></i>
+    <i class="flower" style="left: 61%; bottom: 32px"></i>
+    <i class="tuft" style="left: 70%"></i>
+    <i class="flower" style="left: 78%"></i>
+    <i class="tuft" style="left: 88%"></i>
+    <i class="flower" style="left: 94%; bottom: 28px"></i>
+  </div>
   <div class="fog fog-a"></div>
   <div class="fog fog-b"></div>
-  <div class="ground"></div>
   <div class="scene" id="scene">${stones}</div>
   <div class="fog fog-front"></div>
 </div>`;
@@ -781,7 +1008,7 @@ h1 { font-size: 18px; letter-spacing: 1px; }
 <ul>
 <li><a href="/overlay/party">/overlay/party</a> — party bar (6 cards, sprites, HP)</li>
 <li><a href="/overlay/cemetery">/overlay/cemetery</a> — the graveyard (<a href="/overlay/cemetery?compact=1">?compact=1</a> = counter only)</li>
-<li><a href="/overlay/graveyard">/overlay/graveyard</a> — retro pixel graveyard scene: hills, drifting fog, sprite-sized stones (<a href="/overlay/graveyard?tooltips=1">?tooltips=1</a> = cycling name + cause-of-death bubble, one grave at a time; ?max=N = newest N)</li>
+<li><a href="/overlay/graveyard">/overlay/graveyard</a> — Game Boy pixel graveyard scene: tree line, blinking flowers, drifting mist, sprite-faced stones (<a href="/overlay/graveyard?tooltips=1">?tooltips=1</a> = cycling name + cause-of-death textbox, one grave at a time; ?max=N = newest N)</li>
 <li><a href="/overlay/badges">/overlay/badges</a> — badges + level cap</li>
 <li><a href="/overlay/toasts">/overlay/toasts</a> — live event toasts</li>
 <li><a href="/status">/status</a> — debug view</li>
