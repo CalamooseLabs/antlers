@@ -11,12 +11,16 @@ import {
   gravePlacement,
   PARTY_HTML,
   pixelArt,
+  PLAYER_MAP,
   renderGraveyardPage,
   renderStatusPage,
+  STAKE_MAP,
+  STONE_MAP,
   TOASTS_HTML,
   TOWER_MAP,
   TOWER_WIN_X,
   towerWindowCell,
+  TREE_MAP,
 } from "../src/html.ts";
 import { handleIngest } from "../src/ingest.ts";
 import { type MemorialEntry, OverlayState, type PublicState } from "../src/state.ts";
@@ -239,6 +243,21 @@ Deno.test("graveyard scenery: Company tower, parking-lot lamps + trees, Lavender
     shadowOf(flick).length,
     "flicker frames differ only in which windows are lit",
   );
+  // the roofline is a flat stepped slab — the antenna/spire is gone (it read
+  // as a cross on the silhouette, wrong vibe for corporate HQ)
+  assertEquals(
+    TOWER_MAP[0],
+    ".".repeat(10) + "K".repeat(24) + ".".repeat(10),
+    "the map starts at the stepped roofline, no antenna rows",
+  );
+  assertEquals(TOWER_MAP.length, 84, "tower is 84 game px tall without the spire");
+  // …and the .bldg box shrinks with the map: the art's bottom edge lands at
+  // (rows+1)·2 CSS px inside .bldg (the 1-game-px pixelArt shift), so the box
+  // height must track the map or the building floats above its bottom anchor;
+  // the 28-row wings (art bottom = top + 58) must land on the same ground line
+  const bldgH = (TOWER_MAP.length + 1) * 2;
+  assertStringIncludes(rule(".bldg"), `height: ${bldgH}px`);
+  assertStringIncludes(html, `.wing { top: ${bldgH - 58}px;`);
   // the sign: legible plaque text flush on the building, GB textbox styling
   assertStringIncludes(html, `class="csign"`);
   assertStringIncludes(html, "THE COMPANY, INC.");
@@ -265,22 +284,43 @@ Deno.test("graveyard scenery: Company tower, parking-lot lamps + trees, Lavender
   assertStringIncludes(glow, "#f8d878"); // warm lit lamp pixels
   assertStringIncludes(glow, "#f8f0b0"); // the paler core
   assertStringIncludes(glow, "#7cb078"); // hard-edged light pool on the grass
-  // occasional standalone round-top trees between the lamps (not a line)
-  assertEquals((html.match(/class="tree"/g) ?? []).length, 3, "three occasional trees");
-  for (const pct of [11, 25, 85]) {
-    assertStringIncludes(html, `<i class="tree" style="left: ${pct}%"></i>`);
-  }
+  // background grove: three BIG darker trees as set dressing — two tucked in
+  // behind the building's flanks (px-anchored to the tower), one on the lawn
+  assertEquals((html.match(/class="tree"/g) ?? []).length, 3, "three background trees");
+  assertStringIncludes(html, `<i class="tree" style="left: calc(50% - 100px)"></i>`);
+  assertStringIncludes(html, `<i class="tree" style="left: calc(50% + 36px)"></i>`);
+  assertStringIncludes(html, `<i class="tree" style="left: 76%"></i>`);
   const tree = rule(".tree::before");
   assertStringIncludes(tree, "box-shadow:");
-  assertStringIncludes(tree, "#4a7a58"); // muted moss canopy
-  assertStringIncludes(tree, "#345c42");
-  assertStringIncludes(tree, "#b87838"); // wood trunk
-  assertStringIncludes(tree, "#c0a0e0"); // lavender blossom pixels
+  assertStringIncludes(tree, "#3e6a4c"); // canopy a step darker than the lawn mosses
+  assertStringIncludes(tree, "#2c5038");
+  assertStringIncludes(tree, "#1e3c2a"); // deep canopy underside
+  assertStringIncludes(tree, "#5c3c20"); // dark trunk
+  assertStringIncludes(tree, "#8f78b8"); // muted blossom pixels
+  // the map really is a towering tree (lamps are 30 game px), and the CSS box
+  // is exactly the map size at 2 CSS px per game px
+  assertEquals(TREE_MAP[0].length, 32);
+  assertEquals(TREE_MAP.length, 44);
+  assertStringIncludes(
+    html,
+    `.tree { bottom: 34px; width: ${TREE_MAP[0].length * 2}px; height: ${TREE_MAP.length * 2}px; }`,
+  );
+  // grove layering: trees paint BEHIND HQ and the lamp posts (same z-index,
+  // earlier in the DOM), so canopies peek from behind the wings and can never
+  // cover the sign or the door
+  assert(
+    html.indexOf(`class="grove"`) < html.indexOf(`class="bldg"`),
+    "grove renders before (behind) the building",
+  );
+  assert(
+    html.indexOf(`class="tree"`) < html.indexOf(`class="lamp"`),
+    "trees render before (behind) the lamp posts",
+  );
   // the lot paints over HQ but behind the graves
   assert(
     html.indexOf(`class="lot"`) > html.indexOf(`class="bldg"`) &&
       html.indexOf(`class="lot"`) < html.indexOf(`id="scene"`),
-    "lamps/trees render between the building and the graves",
+    "lamps render between the building and the graves",
   );
   // desaturated Lavender grass checker
   const ground = rule(".ground");
@@ -322,7 +362,7 @@ Deno.test("graveyard flicker: buzzing tower windows are pixel-aligned; one lamp 
   assert(FLICKER_WINDOWS.length >= 2 && FLICKER_WINDOWS.length <= 3, "2-3 bad tubes");
   for (const { floor, win } of FLICKER_WINDOWS) {
     for (let dy = 0; dy < 2; dy++) {
-      const row = TOWER_MAP[15 + 4 * floor + dy]; // 15 rows of antenna/roof/slab/wall above the top office floor
+      const row = TOWER_MAP[9 + 4 * floor + dy]; // 9 rows of roof/slab/wall above the top office floor
       for (let dx = 0; dx < 3; dx++) {
         assertEquals(row[TOWER_WIN_X[win] + dx], "w", `floor ${floor} win ${win} must cover a dark window cell`);
       }
@@ -331,13 +371,13 @@ Deno.test("graveyard flicker: buzzing tower windows are pixel-aligned; one lamp 
   // css proof: each overlay <i> sits at exactly the map-cell position — map
   // pixel (x, y) renders at ((x+1)·2, (y+1)·2) CSS px inside .bldg (the art is
   // shifted one game px; see pixelArt) — and spans one 3×2-game-px window
-  assertEquals(towerWindowCell(2, 1), { left: 26, top: 48, width: 6, height: 4 });
+  assertEquals(towerWindowCell(2, 1), { left: 26, top: 36, width: 6, height: 4 });
   const classes = ["wf-a", "wf-b", "wf-c"];
   for (let i = 0; i < FLICKER_WINDOWS.length; i++) {
     const { floor, win } = FLICKER_WINDOWS[i];
     const c = towerWindowCell(floor, win);
     assertEquals(c.left, (TOWER_WIN_X[win] + 1) * 2, "left matches the map column math");
-    assertEquals(c.top, (15 + 4 * floor + 1) * 2, "top matches the map row math");
+    assertEquals(c.top, (9 + 4 * floor + 1) * 2, "top matches the map row math");
     assertStringIncludes(html, `<i class="wflick ${classes[i]}"></i>`);
     assertStringIncludes(html, `.${classes[i]} { left: ${c.left}px; top: ${c.top}px; animation: tubeBuzz `);
   }
@@ -382,17 +422,46 @@ Deno.test("graveyard markers are pixelArt box-shadows; tooltip is a GB textbox",
     return html.slice(i, html.indexOf("}", i));
   };
   // all three markers draw from generated box-shadow pixel art in the GB
-  // palette (flat shades + the #101010 outline baked into the maps)
+  // palette (4-shade shading + the #101010 outline baked into the maps)
   const stone = rule(".stone::before");
   assertStringIncludes(stone, "box-shadow:");
   assertStringIncludes(stone, "#f8f8f8"); // headstone highlight gray
+  assertStringIncludes(stone, "#484848"); // 4th shade: plaque recess/base shadow
   assertStringIncludes(stone, "#101010"); // black pixel outline
   const stake = rule(".stone.stake::before");
   assertStringIncludes(stake, "box-shadow:");
   assertStringIncludes(stake, "#b87838"); // wood
+  assertStringIncludes(stake, "#5c3c20"); // third wood tone (under-plank shadow)
   const player = rule(".stone.player::before");
   assertStringIncludes(player, "box-shadow:");
   assertStringIncludes(player, "#484848"); // dark stone cross
+  assertStringIncludes(player, "#303030"); // deep slab shadow
+  // map ↔ CSS lockstep: each marker's box is exactly its map size at 2 CSS px
+  // per game px (the ::before carrier compensates for the 1-game-px art shift)
+  assertEquals([STONE_MAP[0].length, STONE_MAP.length], [18, 20]);
+  assertEquals([STAKE_MAP[0].length, STAKE_MAP.length], [16, 20]);
+  assertEquals([PLAYER_MAP[0].length, PLAYER_MAP.length], [14, 24]);
+  assertStringIncludes(
+    html,
+    `.stone { position: relative; width: ${STONE_MAP[0].length * 2}px; height: ${STONE_MAP.length * 2}px;`,
+  );
+  assertStringIncludes(
+    html,
+    `.stone.stake { width: ${STAKE_MAP[0].length * 2}px; height: ${STAKE_MAP.length * 2}px; }`,
+  );
+  assertStringIncludes(
+    html,
+    `.stone.player { width: ${PLAYER_MAP[0].length * 2}px; height: ${PLAYER_MAP.length * 2}px; }`,
+  );
+  // the sprite rides HIGH on both sprite-bearing markers: on the slab it sits
+  // on the inset portrait plaque the map carves at rows 4-12 (y 8..26 CSS px),
+  // and on the stake it sits on the plank nailed at rows 1-8 (y 2..18) — never
+  // overflowing the marker outline
+  assert(STONE_MAP[4].includes("4444444444"), "plaque top-shadow row high on the slab face");
+  assert(STONE_MAP[8].includes("433333333"), "recessed plaque field where the sprite sits");
+  assertStringIncludes(html, ".gsprite { position: relative; image-rendering: pixelated; height: 18px; margin-top: 8px; }");
+  assertStringIncludes(html, ".plank { position: absolute; left: 2px; top: 2px; width: 26px; height: 16px;");
+  assertStringIncludes(html, ".stake .gsprite { height: 14px; margin: 0; }");
   // the tooltip is a mini Pokémon textbox: white, thick black double frame
   // (border + ring), hard corners, black monospace text
   const tip = rule(".tip");

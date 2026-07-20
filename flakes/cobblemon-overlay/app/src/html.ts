@@ -297,7 +297,7 @@ export const CEMETERY_HTML = page(
 // shade GBC palette + #101010 outlines — no soft gradients, no alpha edges on
 // scenery. Scenery: THE COMPANY, INC. — the corporate antagonist of the
 // campaign — as ONE big pixelArt() office tower looming behind the yard
-// (cool blue-gray slab, stepped roofline + antenna, regular window grid with
+// (cool blue-gray slab, stepped roofline, regular window grid with
 // a handful of lit windows that slowly SHIFTS between two frames of the same
 // map — steps(1), like people moving about the office — a sign plaque, and an
 // awning + dark-glass double-door entrance; two smaller darker wings give the
@@ -306,8 +306,9 @@ export const CEMETERY_HTML = page(
 // dying-fluorescent-tube steps(1) flicker, nothing like the slow shift), a
 // corporate parking-lot lamp row on the lawn (tall double-arm posts, warm lit
 // heads, a hard-edged light pool on the grass at each foot; one lamp buzzes
-// like the bad windows, on its own period so they never sync) with a few
-// standalone round-top trees scattered between the lamps, a muted desaturated
+// like the bad windows, on its own period so they never sync), big darker
+// round-top trees as background set dressing BEHIND the lamp row (two tucked
+// in behind HQ's flanks, canopies peeking past the wings), a muted desaturated
 // grass band with the
 // classic darker tile checker, scattered muted tufts and 2-frame blooming
 // LAVENDER flowers (steps(1) box-shadow swap), plus drifting blocky
@@ -397,7 +398,12 @@ const GB = {
   // pale-purple flower petals/heart
   lav1: "#c0a0e0", lav2: "#e8d8f8",
   dirt1: "#e8d8a0", dirt2: "#c8a868",
-  wood1: "#b87838", wood2: "#885828",
+  wood1: "#b87838", wood2: "#885828", wood3: "#5c3c20", wood4: "#402c18",
+  // deep shadow shade for the trainer's dark cross
+  slate: "#303030",
+  // background grove: canopy a step darker/more muted than the lawn mosses,
+  // plus a muted blossom, so the big trees recede behind the lot
+  tree1: "#3e6a4c", tree2: "#2c5038", tree3: "#1e3c2a", treeBloom: "#8f78b8",
   // THE COMPANY, INC. — cool corporate blue-grays + window shades
   bld1: "#a0b0c8", bld2: "#8090a8", bld3: "#586880", bld4: "#384858",
   win: "#383848", winLit: "#f8d878",
@@ -406,79 +412,105 @@ const GB = {
   lampCore: "#f8f0b0", grassLit: "#7cb078",
 };
 
-// Lavender-Town-style headstone: rounded-top slab over a stepped base, 3 grays.
-const STONE_MAP = [
-  "......KKKK......",
-  "....KK1111KK....",
-  "...K11111122K...",
-  "..K1111111222K..",
-  "..K1111111222K..",
-  "..K2111111222K..",
-  "..K2111112222K..",
-  "..K2211112222K..",
-  "..K2211122223K..",
-  "..K2221222233K..",
-  "..K2222222233K..",
-  "..K2222223333K..",
-  ".KK2222233333KK.",
-  ".K222222333333K.",
-  "KK222233333333KK",
-  "KKKKKKKKKKKKKKKK",
+// Lavender-Tower-style headstone (18×20): rounded slab over a subtle two-step
+// base, the full 4 grays lit from the top-left, with an inset portrait-plaque
+// recess HIGH on the face (rows 4-12 × cols 4-13: "4" top/left shadow, "3"
+// recess field, "1" light catch on the bottom/right edge) — the .gsprite sits
+// exactly on that plaque (top 8px, 20×18px in CSS), never resting at the base.
+export const STONE_MAP: readonly string[] = [
+  ".....KKKKKKKK.....",
+  "...KK11111122KK...",
+  "..K111111112222K..",
+  ".K11111111122222K.",
+  ".K11444444444422K.",
+  ".K11433333333122K.",
+  ".K11433333333122K.",
+  ".K11433333333122K.",
+  ".K11433333333122K.",
+  ".K11433333333122K.",
+  ".K11433333333122K.",
+  ".K11433333333122K.",
+  ".K11111111111122K.",
+  ".K21111112222233K.",
+  ".K22111222223333K.",
+  ".K22222222333333K.",
+  "KK22222223333333KK",
+  "K2222222333333344K",
+  "K2223333344444444K",
+  "KKKKKKKKKKKKKKKKKK",
 ];
-const STONE_SHADOW = pixelArt(STONE_MAP, { K: GB.ink, "1": GB.stone1, "2": GB.stone2, "3": GB.stone3 }, PX);
+const STONE_SHADOW = pixelArt(
+  STONE_MAP,
+  { K: GB.ink, "1": GB.stone1, "2": GB.stone2, "3": GB.stone3, "4": GB.stone4 },
+  PX,
+);
 
-// Sacrifice: a cheap wooden stake, plank sign nailed on skew, kicked-out foot.
-const STAKE_MAP = [
-  ".......KK.......",
-  "......K12K......",
+// Sacrifice (16×20): still the deliberately cheap crooked wooden stake, now
+// with a third wood tone for real shading. The plank sign is nailed on skew
+// near the TOP (rows 1-8 → .plank at top 2px, 16px tall in CSS) so the sprite
+// rides high; an under-plank shadow row, a drifting post, a kicked-out foot.
+export const STAKE_MAP: readonly string[] = [
   "......K12K......",
   ".KKKKKKKKKKKKK..",
   ".K11111111112K..",
   ".K12111111122K..",
+  ".K11111111122K..",
   "..K1111111122K..",
-  "..K2222222222K..",
+  "..K1211112223K..",
+  "..K2222222233K..",
   "..KKKKKKKKKKKK..",
+  "......K33K......",
   "......K12K......",
   "......K12K......",
-  "......K12K......",
-  "......K12K......",
-  "......K22K......",
-  "......K22K......",
-  ".....K122K......",
-  ".....K222K......",
+  ".....K12K.......",
+  ".....K12K.......",
   ".....K22K.......",
-  "......KK........",
+  ".....K223K......",
+  "....K1223K......",
+  "....K2233K......",
+  "....K233K.......",
+  ".....KKK........",
 ];
-const STAKE_SHADOW = pixelArt(STAKE_MAP, { K: GB.ink, "1": GB.wood1, "2": GB.wood2 }, PX);
+const STAKE_SHADOW = pixelArt(STAKE_MAP, { K: GB.ink, "1": GB.wood1, "2": GB.wood2, "3": GB.wood3 }, PX);
 
-// Player whiteout: a taller dark stone cross, textless.
-const PLAYER_MAP = [
-  "....KKKK....",
-  "...K1122K...",
-  "...K1122K...",
-  "...K1122K...",
-  "KKKK1122KKKK",
-  "K1111122223K",
-  "K1111222233K",
-  "KKKK2223KKKK",
-  "...K1223K...",
-  "...K1223K...",
-  "...K1223K...",
-  "...K1223K...",
-  "...K2233K...",
-  "...K2233K...",
-  "...K2233K...",
-  "...K2233K...",
-  "..K222333K..",
-  "..K222333K..",
-  ".K22233333K.",
-  ".K23333333K.",
-  ".KKKKKKKKKK.",
+// Player whiteout (14×24): the taller dark stone cross, still textless — a
+// notch more presence now: 4 shades top-left → bottom-right and a wider
+// two-step base sinking into the ground.
+export const PLAYER_MAP: readonly string[] = [
+  "....KKKKKK....",
+  "....K1123K....",
+  "....K1123K....",
+  "....K1123K....",
+  "KKKKK1123KKKKK",
+  "K111112223333K",
+  "K112222233334K",
+  "K222233334444K",
+  "KKKKK2233KKKKK",
+  "....K1233K....",
+  "....K1233K....",
+  "....K2233K....",
+  "....K2233K....",
+  "....K2234K....",
+  "....K2334K....",
+  "....K2334K....",
+  "...K223344K...",
+  "...K223344K...",
+  "..K22233444K..",
+  "..K22334444K..",
+  ".K2233334444K.",
+  ".K2333344444K.",
+  "K233334444444K",
+  "KKKKKKKKKKKKKK",
 ];
-const PLAYER_SHADOW = pixelArt(PLAYER_MAP, { K: GB.ink, "1": GB.stone2, "2": GB.stone3, "3": GB.stone4 }, PX);
+const PLAYER_SHADOW = pixelArt(
+  PLAYER_MAP,
+  { K: GB.ink, "1": GB.stone2, "2": GB.stone3, "3": GB.stone4, "4": GB.slate },
+  PX,
+);
 
-// ---- THE COMPANY, INC. HQ tower (44×90 game px, one big pixelArt map) ----
-// Stepped roofline + antenna, a regular window grid, a dark sign band (the
+// ---- THE COMPANY, INC. HQ tower (44×84 game px, one big pixelArt map) ----
+// Stepped roofline (flat — no antenna: a spire reads as a cross on the
+// silhouette, wrong vibe for corporate HQ), a regular window grid, a dark sign band (the
 // legible HTML .csign plaque sits flush on it), and a ground-floor dark-glass
 // double door under a striped awning. The map is assembled from repeated row
 // strings so it stays rectangular by construction (pixelArt still throws on
@@ -507,13 +539,6 @@ const TOWER_AWN_BODY = "K" + "1".repeat(12) + "K" + "4411".repeat(4) + "K" + "1"
 const TOWER_DOOR = "K" + "1".repeat(14) + "KwwwwwKwwwwwK" + "1".repeat(9) + "222333K";
 const TOWER_DOOR_HANDLE = "K" + "1".repeat(14) + "Kwwww1K1wwwwK" + "1".repeat(9) + "222333K";
 export const TOWER_MAP: readonly string[] = [
-  // antenna / spire
-  dots(21) + "KK" + dots(21),
-  dots(21) + "KK" + dots(21),
-  dots(19) + "K".repeat(6) + dots(19),
-  dots(21) + "KK" + dots(21),
-  dots(21) + "KK" + dots(21),
-  dots(21) + "KK" + dots(21),
   // stepped roofline: narrow top slab, then the full-width main slab
   dots(10) + "K".repeat(24) + dots(10),
   TOWER_SLAB, TOWER_SLAB, TOWER_SLAB, TOWER_SLAB, TOWER_SLAB,
@@ -550,7 +575,7 @@ const TOWER_B_SHADOW = pixelArt(TOWER_MAP, { ...TOWER_COLORS, x: GB.win, y: GB.w
 // window grid: map pixel (x, y) renders at ((x+1)·PX, (y+1)·PX) inside .bldg
 // (the art is shifted one game px — see pixelArt), so a window at column
 // TOWER_WIN_X[win] on floor `floor` sits exactly here:
-const TOWER_FLOOR_ROW0 = 15; // map row of the top floor's window top: 6 antenna + 1 roofline + 5 slab + 1 step + 2 wall rows
+const TOWER_FLOOR_ROW0 = 9; // map row of the top floor's window top: 1 roofline + 5 slab + 1 step + 2 wall rows
 export function towerWindowCell(
   floor: number,
   win: number,
@@ -628,36 +653,60 @@ const LAMP_GLOW_MAP = LAMP_MAP.map((r) => r.replace(/[^LCg]/g, "."));
 const LAMP_SHADOW = pixelArt(LAMP_OFF_MAP, { K: GB.ink, "4": GB.bld4, w: GB.win }, PX);
 const LAMP_GLOW_SHADOW = pixelArt(LAMP_GLOW_MAP, { L: GB.winLit, C: GB.lampCore, g: GB.grassLit }, PX);
 
-// Standalone round-top GB tree (18×23 game px) for the lawn — the muted
-// Lavender mosses with a few pale-purple blossom pixels in the canopy.
-const TREE_MAP: readonly string[] = [
-  "......KKKKKK......",
-  "....KKaaaaaaKK....",
-  "...KaaaaaaaaaaK...",
-  "..KaaaaaaabaaaaK..",
-  ".KaaabaaaaaapbaaK.",
-  ".KaabaaabaaabaaaK.",
-  "KaaaaabaaabaaabaaK",
-  "KabaaabaabaabbaabK",
-  "KaabapbabbabaabbaK",
-  "KabaabbabbabbabaaK",
-  "KaabbababbbababbaK",
-  "KbabbabpbabbabbabK",
-  "KabbbababbabbbbabK",
-  ".KbabbbabbbababbK.",
-  ".KbbbabbbabbbbbaK.",
-  "..KbbbbabbbbbbK...",
-  "...KKbbbbbbbbKK...",
-  "......KttuuK......",
-  "......KttuuK......",
-  "......KttuuK......",
-  "......KttuuK......",
-  ".....KttuuuuK.....",
-  ".....KKKKKKKK.....",
+// Background grove tree (32×44 game px): big round-top set dressing that
+// towers over the 30-px lamp posts. Three canopy shades a step darker than
+// the lawn mosses (highlight top-left → deep shadow underside), a few muted
+// blossom pixels, and a dark trunk with a root flare. Drawn in the .grove
+// layer BEHIND HQ and the lamp row — two of them tuck behind the wings.
+export const TREE_MAP: readonly string[] = [
+  "............KKKKKKKK............",
+  "..........KKaaaaaaaaKK..........",
+  "........KKaaaaaabaaaaaKK........",
+  ".......KaaabaaaaaabaaaaaK.......",
+  "......KaabaaaaabaaaaapbaaK......",
+  ".....KaaabaaabaaaaabaaabaaK.....",
+  "....KaabaaaaabaabaaaaabaabaK....",
+  "...KaaabaabaaaabaaabaabaaabaK...",
+  "..KaabaaabbaabaabaabaabbaabaaK..",
+  "..KaabaabaabaabpbaababbabbaabK..",
+  ".KaabaababbaababbaabbabbabbabbK.",
+  "KaababbaabpbaababbaababbabbabbaK",
+  "KabbaababbaabbabbaababbabbabbabK",
+  "KbabbaabbabbaababbabbabbabbbabbK",
+  "KabbabpbabbabbabbaabbabbbabbabbK",
+  "KbabbabbabbbabbabbabbbabbcbbabbK",
+  "KabbbabbabbabbbabbbabbabbbcbbbbK",
+  "KbbabbbabbcbbabbabbbcbbabbbcbbbK",
+  "KbbbabbbcbbabbbcbbbabbbcbbbbcbbK",
+  "KbbcbbbbcbbbpbbcbbbbbcbbbcbbbcbK",
+  "KbcbbcbbbcbbbbcbbbcbbbbccbbbccbK",
+  "KbbccbbcbbccbbbccbbbcbbccbccbcbK",
+  "KcbccbbccbcbbccbccbbccbcccbccbcK",
+  ".KccbccbccbccccbccbcccbccccbccK.",
+  "..KcccbccccbccccccbccccbcccccK..",
+  "...KcccccbcccccccccbccccccccK...",
+  "....KKcccccccbccccccccccccKK....",
+  "......KKccccccccccccccccKK......",
+  "........KKccccccccccccKK........",
+  "...........KuuuuuuuuK...........",
+  "...........KttttuuuuK...........",
+  "...........KttttuuuuK...........",
+  "...........KttttuuuuK...........",
+  "...........KttttuuuuK...........",
+  "...........KttttuuuuK...........",
+  "...........KttttuuuuK...........",
+  "...........KttttuuuuK...........",
+  "...........KttttuuuuK...........",
+  "...........KttttuuuuK...........",
+  "...........KttttuuuuK...........",
+  "...........KttttuuuuK...........",
+  "..........KtttttuuuuuK..........",
+  ".........KttttttuuuuuuK.........",
+  ".........KKKKKKKKKKKKKK.........",
 ];
 const TREE_SHADOW = pixelArt(
   TREE_MAP,
-  { K: GB.ink, a: GB.moss1, b: GB.moss2, p: GB.lav1, t: GB.wood1, u: GB.wood2 },
+  { K: GB.ink, a: GB.tree1, b: GB.tree2, c: GB.tree3, p: GB.treeBloom, t: GB.wood3, u: GB.wood4 },
   PX,
 );
 
@@ -703,9 +752,9 @@ const GRAVEYARD_CSS = `
    flanked by two darker wings. The lit-window pattern swaps between two
    frames of the same map on a slow steps(1) cycle — office life after dark. */
 .bldg { position: absolute; bottom: 46px; left: 50%; margin-left: -44px;
-  width: 88px; height: 182px; z-index: 1; pointer-events: none; }
+  width: 88px; height: 170px; z-index: 1; pointer-events: none; }
 .bldg i { position: absolute; width: ${PX}px; height: ${PX}px; }
-.wing { top: 124px; box-shadow: ${WING_SHADOW}; }
+.wing { top: 112px; box-shadow: ${WING_SHADOW}; }
 .wing-l { left: -26px; }
 .wing-r { left: 82px; }
 .tower { left: 0; top: 0; box-shadow: ${TOWER_A_SHADOW};
@@ -723,13 +772,18 @@ ${WFLICK_CSS}
   padding: 2px 3px; background: ${GB.bld4}; color: #f8f8f8;
   border: 2px solid ${GB.ink}; white-space: nowrap;
   font: 700 8px/1 ui-monospace, Menlo, Consolas, monospace; }
-/* the parking lot: a row of lamp posts + occasional trees on the lawn
-   (behind the graves, in front of HQ); the lamp row keeps a center gap so
-   the tower entrance stays visible. Same layer trick as the stones: the art
-   hangs off a ${PX}×${PX} pseudo-element at (-${PX}px,-${PX}px). */
+/* the background grove: big darker trees as set dressing — same z-index as
+   .bldg/.lot but FIRST in the DOM, so HQ and the lamp posts paint over them
+   (two canopies tuck in behind the building's flanks and peek past the
+   wings; the sign and door can never be covered) */
+.grove { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+/* the parking lot: the lamp-post row on the lawn (behind the graves, in
+   front of HQ); it keeps a center gap so the tower entrance stays visible.
+   Same layer trick as the stones: the art hangs off a ${PX}×${PX}
+   pseudo-element at (-${PX}px,-${PX}px). */
 .lot { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
-.lot i { position: absolute; }
-.lot i::before, .lot i::after { content: ""; position: absolute;
+.lot i, .grove i { position: absolute; }
+.lot i::before, .lot i::after, .grove i::before { content: ""; position: absolute;
   left: -${PX}px; top: -${PX}px; width: ${PX}px; height: ${PX}px; }
 .lamp { bottom: 28px; width: ${9 * PX}px; height: ${30 * PX}px; }
 .lamp::before { box-shadow: ${LAMP_SHADOW}; }
@@ -739,7 +793,7 @@ ${WFLICK_CSS}
    windows, on its own period/phase so they never sync */
 .lamp-flicker::after { animation: lampBuzz 3.9s steps(1) infinite .2s; }
 @keyframes lampBuzz { 0%, 100% { opacity: 1; } 13% { opacity: 0; } 17% { opacity: 1; } 42% { opacity: 0; } 43% { opacity: 1; } 47% { opacity: 0; } 56% { opacity: 1; } 84% { opacity: 0; } 86% { opacity: 1; } }
-.tree { bottom: 28px; width: ${18 * PX}px; height: ${23 * PX}px; }
+.tree { bottom: 34px; width: ${32 * PX}px; height: ${44 * PX}px; }
 .tree::before { box-shadow: ${TREE_SHADOW}; }
 /* scattered muted tufts + the synced 2-frame blooming lavender flowers */
 .decor { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
@@ -790,21 +844,24 @@ ${WFLICK_CSS}
    (sitting at -${PX}px both ways: the art is shifted one game px because an
    outer box-shadow is invisible over its own base box). Outlines are baked
    into the maps. The sprite IS the face of the grave — no text on stones. */
-.stone { position: relative; width: 32px; height: 32px; display: flex;
-  align-items: flex-end; justify-content: center; }
+.stone { position: relative; width: 36px; height: 40px; display: flex;
+  align-items: flex-start; justify-content: center; }
 .stone::before { content: ""; position: absolute; left: -${PX}px; top: -${PX}px;
   width: ${PX}px; height: ${PX}px; box-shadow: ${STONE_SHADOW}; }
-.gsprite { position: relative; image-rendering: pixelated; height: 26px; margin-bottom: ${PX}px; }
+/* the sprite sits HIGH on the slab like a portrait plaque — top 8px/height
+   18px is exactly the inset recess the stone map carves at rows 4-12 */
+.gsprite { position: relative; image-rendering: pixelated; height: 18px; margin-top: 8px; }
 /* sacrifice = the cheap crooked wooden stake; the plank is just the seat for
-   the small sprite (all the wood is part of the stake's pixel art) */
-.stone.stake { width: 32px; height: 38px; }
+   the small sprite (all the wood is part of the stake's pixel art) — nailed
+   near the top (map rows 1-8), so the sprite rides high on the sign */
+.stone.stake { width: 32px; height: 40px; }
 .stone.stake::before { box-shadow: ${STAKE_SHADOW}; }
-.plank { position: absolute; left: 2px; top: 6px; width: 28px; height: 12px;
+.plank { position: absolute; left: 2px; top: 2px; width: 26px; height: 16px;
   display: flex; align-items: center; justify-content: center; }
-.stake .gsprite { height: 16px; margin: 0; }
+.stake .gsprite { height: 14px; margin: 0; }
 /* the trainer: the whole marker is the dark cross art; the .pcross child
    stays for server/client DOM parity but draws nothing itself */
-.stone.player { width: 24px; height: 42px; }
+.stone.player { width: 28px; height: 48px; }
 .stone.player::before { box-shadow: ${PLAYER_SHADOW}; }
 .mound { height: 4px; margin: ${PX}px -${PX}px 0;
   background: repeating-linear-gradient(90deg, ${GB.dirt2} 0 4px, ${GB.dirt1} 4px 8px); }
@@ -980,6 +1037,11 @@ export function renderGraveyardPage(view: PublicState, opts: GraveyardOpts): str
   const stones = shown.map((m) => graveHtml(m, opts.tooltips)).join("");
   const body = `<div class="wrap">
   <div class="ground"></div>
+  <div class="grove">
+    <i class="tree" style="left: calc(50% - 100px)"></i>
+    <i class="tree" style="left: calc(50% + 36px)"></i>
+    <i class="tree" style="left: 76%"></i>
+  </div>
   <div class="bldg">
     <i class="wing wing-l"></i>
     <i class="wing wing-r"></i>
@@ -994,9 +1056,6 @@ export function renderGraveyardPage(view: PublicState, opts: GraveyardOpts): str
     <i class="lamp lamp-flicker" style="left: 64%"></i>
     <i class="lamp" style="left: 78%"></i>
     <i class="lamp" style="left: 92%"></i>
-    <i class="tree" style="left: 11%"></i>
-    <i class="tree" style="left: 25%"></i>
-    <i class="tree" style="left: 85%"></i>
   </div>
   <div class="decor">
     <i class="tuft" style="left: 5%"></i>
@@ -1184,7 +1243,7 @@ h1 { font-size: 18px; letter-spacing: 1px; }
 <ul>
 <li><a href="/overlay/party">/overlay/party</a> — party bar (6 cards, sprites, HP)</li>
 <li><a href="/overlay/cemetery">/overlay/cemetery</a> — the graveyard (<a href="/overlay/cemetery?compact=1">?compact=1</a> = counter only)</li>
-<li><a href="/overlay/graveyard">/overlay/graveyard</a> — Lavender-Town pixel graveyard scene: The Company, Inc. tower looming behind the graves (lit windows shift, a few buzz like dying tubes), a parking-lot lamp row (one flickering) with occasional trees, blooming lavender flowers, drifting mist, sprite-faced stones (<a href="/overlay/graveyard?tooltips=1">?tooltips=1</a> = cycling name + cause-of-death textbox, one grave at a time; ?max=N = newest N)</li>
+<li><a href="/overlay/graveyard">/overlay/graveyard</a> — Lavender-Town pixel graveyard scene: The Company, Inc. tower looming behind the graves (lit windows shift, a few buzz like dying tubes), a parking-lot lamp row (one flickering) against big backdrop trees, blooming lavender flowers, drifting mist, sprite-faced stones (<a href="/overlay/graveyard?tooltips=1">?tooltips=1</a> = cycling name + cause-of-death textbox, one grave at a time; ?max=N = newest N)</li>
 <li><a href="/overlay/badges">/overlay/badges</a> — badges + level cap</li>
 <li><a href="/overlay/toasts">/overlay/toasts</a> — live event toasts</li>
 <li><a href="/status">/status</a> — debug view</li>
