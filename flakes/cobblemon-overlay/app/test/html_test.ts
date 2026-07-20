@@ -284,12 +284,36 @@ Deno.test("graveyard scenery: Company tower, parking-lot lamps + trees, Lavender
   assertStringIncludes(glow, "#f8d878"); // warm lit lamp pixels
   assertStringIncludes(glow, "#f8f0b0"); // the paler core
   assertStringIncludes(glow, "#7cb078"); // hard-edged light pool on the grass
-  // background grove: three BIG darker trees as set dressing — two tucked in
-  // behind the building's flanks (px-anchored to the tower), one on the lawn
-  assertEquals((html.match(/class="tree"/g) ?? []).length, 3, "three background trees");
-  assertStringIncludes(html, `<i class="tree" style="left: calc(50% - 100px)"></i>`);
-  assertStringIncludes(html, `<i class="tree" style="left: calc(50% + 36px)"></i>`);
-  assertStringIncludes(html, `<i class="tree" style="left: 76%"></i>`);
+  // background grove: SIX big darker trees spread unevenly across the strip
+  // (not metronome-spaced like the lamps), every one fully clear of the
+  // building — the two nearest HQ are calc()-anchored to the same 50% center
+  // the tower uses, so they stay clear at every viewport width
+  const trees: (readonly [string, (w: number) => number])[] = [
+    ["2%", (w) => w * 0.02],
+    ["13%", (w) => w * 0.13],
+    ["calc(50% - 158px)", (w) => w / 2 - 158],
+    ["calc(50% + 84px)", (w) => w / 2 + 84],
+    ["71%", (w) => w * 0.71],
+    ["86%", (w) => w * 0.86],
+  ];
+  assertEquals((html.match(/class="tree"/g) ?? []).length, trees.length, "six background trees");
+  for (const [left] of trees) {
+    assertStringIncludes(html, `<i class="tree" style="left: ${left}"></i>`);
+  }
+  // clearance proof at OBS-realistic widths: the building complex spans
+  // 50% ± 70px (the 88px tower centered via margin-left -44px, wings at
+  // -26px/+82px inside .bldg, 16 game px = 32px wide) and a tree box is
+  // 64px wide — no tree box may intersect that span
+  const treeW = TREE_MAP[0].length * 2;
+  for (const w of [900, 950, 1200, 1280, 1500, 1920]) {
+    for (const [left, at] of trees) {
+      const x = at(w);
+      assert(
+        x + treeW <= w / 2 - 70 || x >= w / 2 + 70,
+        `tree at ${left} clears the building at ${w}px viewport`,
+      );
+    }
+  }
   const tree = rule(".tree::before");
   assertStringIncludes(tree, "box-shadow:");
   assertStringIncludes(tree, "#3e6a4c"); // canopy a step darker than the lawn mosses
@@ -298,13 +322,23 @@ Deno.test("graveyard scenery: Company tower, parking-lot lamps + trees, Lavender
   assertStringIncludes(tree, "#5c3c20"); // dark trunk
   assertStringIncludes(tree, "#8f78b8"); // muted blossom pixels
   // the map really is a towering tree (lamps are 30 game px), and the CSS box
-  // is exactly the map size at 2 CSS px per game px
+  // is exactly the map size at 2 CSS px per game px; the grove reads FURTHER
+  // BACK than before: lifted 5 game px above the lamps' bottom-28px ground
+  // line and shrunk a notch via a bottom-anchored scale (base stays put)
   assertEquals(TREE_MAP[0].length, 32);
   assertEquals(TREE_MAP.length, 44);
   assertStringIncludes(
     html,
-    `.tree { bottom: 34px; width: ${TREE_MAP[0].length * 2}px; height: ${TREE_MAP.length * 2}px; }`,
+    `.tree { bottom: 38px; width: ${TREE_MAP[0].length * 2}px; height: ${TREE_MAP.length * 2}px;`,
   );
+  const treeRule = rule(".tree");
+  assertStringIncludes(treeRule, "transform: scale(.9)");
+  assertStringIncludes(treeRule, "transform-origin: 50% 100%");
+  // …and the lift is computed, not just quoted: tree bottom minus the lamps'
+  // actual ground line must be exactly 10 CSS px (5 game px)
+  const bottomPx = (r: string) => Number((r.match(/bottom: (\d+)px/) ?? [])[1]);
+  assertEquals(bottomPx(rule(".lamp")), 28, "the lamp row's ground line");
+  assertEquals(bottomPx(treeRule) - bottomPx(rule(".lamp")), 10, "grove lifted 5 game px above the lamp ground line");
   // grove layering: trees paint BEHIND HQ and the lamp posts (same z-index,
   // earlier in the DOM), so canopies peek from behind the wings and can never
   // cover the sign or the door
@@ -438,9 +472,9 @@ Deno.test("graveyard markers are pixelArt box-shadows; tooltip is a GB textbox",
   assertStringIncludes(player, "#303030"); // deep slab shadow
   // map ↔ CSS lockstep: each marker's box is exactly its map size at 2 CSS px
   // per game px (the ::before carrier compensates for the 1-game-px art shift)
-  assertEquals([STONE_MAP[0].length, STONE_MAP.length], [18, 20]);
+  assertEquals([STONE_MAP[0].length, STONE_MAP.length], [20, 24]);
   assertEquals([STAKE_MAP[0].length, STAKE_MAP.length], [16, 20]);
-  assertEquals([PLAYER_MAP[0].length, PLAYER_MAP.length], [14, 24]);
+  assertEquals([PLAYER_MAP[0].length, PLAYER_MAP.length], [14, 26]);
   assertStringIncludes(
     html,
     `.stone { position: relative; width: ${STONE_MAP[0].length * 2}px; height: ${STONE_MAP.length * 2}px;`,
@@ -454,12 +488,36 @@ Deno.test("graveyard markers are pixelArt box-shadows; tooltip is a GB textbox",
     `.stone.player { width: ${PLAYER_MAP[0].length * 2}px; height: ${PLAYER_MAP.length * 2}px; }`,
   );
   // the sprite rides HIGH on both sprite-bearing markers: on the slab it sits
-  // on the inset portrait plaque the map carves at rows 4-12 (y 8..26 CSS px),
-  // and on the stake it sits on the plank nailed at rows 1-8 (y 2..18) — never
+  // on the BIGGER inset portrait plaque the map now carves at rows 3-14
+  // (y 6..30 CSS px — exactly the sprite's margin-top 6px + height 24px), and
+  // on the stake it sits on the plank nailed at rows 1-8 (y 2..18) — never
   // overflowing the marker outline
-  assert(STONE_MAP[4].includes("4444444444"), "plaque top-shadow row high on the slab face");
-  assert(STONE_MAP[8].includes("433333333"), "recessed plaque field where the sprite sits");
-  assertStringIncludes(html, ".gsprite { position: relative; image-rendering: pixelated; height: 18px; margin-top: 8px; }");
+  assert(STONE_MAP[3].includes("444444444444"), "plaque top-shadow row right under the slab crown");
+  for (let r = 4; r <= 14; r++) {
+    assertEquals(STONE_MAP[r], ".K1143333333333122K.", `recessed plaque field row ${r} (the sprite's seat)`);
+  }
+  assert(!STONE_MAP[15].includes("3"), "the recess ends at row 14 — plain face below the plaque");
+  assertStringIncludes(
+    html,
+    ".gsprite { position: relative; image-rendering: pixelated; height: 24px; max-width: 32px; object-fit: contain; margin-top: 6px; }",
+  );
+  // wide-sprite proof: at 24px tall a 2:1 sprite wants 48px — wider than the
+  // whole 40px stone — so the width cap must pin every natural ratio inside
+  // the slab's K outline. Compute the outline interior from the map itself
+  // (K cols at the plaque rows) and check the contained render at 1:1 and 2:1.
+  const plaqueRow = STONE_MAP[8];
+  const inX0 = (plaqueRow.indexOf("K") + 1) * 2; // first interior CSS x
+  const inX1 = plaqueRow.lastIndexOf("K") * 2; // right outline's left edge
+  const stoneW = STONE_MAP[0].length * 2;
+  assertEquals([inX0, inX1], [4, 36], "slab outline interior at the plaque rows");
+  for (const ratio of [1, 2]) {
+    const w = Math.min(24 * ratio, 32); // height 24px, max-width 32px, contain
+    const x0 = (stoneW - w) / 2; // flex centers the sprite in the stone
+    assert(
+      x0 >= inX0 && x0 + w <= inX1,
+      `${ratio}:1 sprite (${w}px wide, x ${x0}..${x0 + w}) stays inside the slab outline`,
+    );
+  }
   assertStringIncludes(html, ".plank { position: absolute; left: 2px; top: 2px; width: 26px; height: 16px;");
   assertStringIncludes(html, ".stake .gsprite { height: 14px; margin: 0; }");
   // the tooltip is a mini Pokémon textbox: white, thick black double frame

@@ -306,9 +306,11 @@ export const CEMETERY_HTML = page(
 // dying-fluorescent-tube steps(1) flicker, nothing like the slow shift), a
 // corporate parking-lot lamp row on the lawn (tall double-arm posts, warm lit
 // heads, a hard-edged light pool on the grass at each foot; one lamp buzzes
-// like the bad windows, on its own period so they never sync), big darker
-// round-top trees as background set dressing BEHIND the lamp row (two tucked
-// in behind HQ's flanks, canopies peeking past the wings), a muted desaturated
+// like the bad windows, on its own period so they never sync), a grove of big
+// darker round-top trees as background set dressing BEHIND the lamp row (six
+// of them, unevenly spread, every one fully clear of HQ's horizontal span at
+// any viewport width, lifted off the lamps' ground line and scaled a notch
+// down so they sit further back), a muted desaturated
 // grass band with the
 // classic darker tile checker, scattered muted tufts and 2-frame blooming
 // LAVENDER flowers (steps(1) box-shadow swap), plus drifting blocky
@@ -412,32 +414,37 @@ const GB = {
   lampCore: "#f8f0b0", grassLit: "#7cb078",
 };
 
-// Lavender-Tower-style headstone (18×20): rounded slab over a subtle two-step
-// base, the full 4 grays lit from the top-left, with an inset portrait-plaque
-// recess HIGH on the face (rows 4-12 × cols 4-13: "4" top/left shadow, "3"
-// recess field, "1" light catch on the bottom/right edge) — the .gsprite sits
-// exactly on that plaque (top 8px, 20×18px in CSS), never resting at the base.
+// Lavender-Tower-style headstone (20×24): rounded slab over a subtle two-step
+// base, the full 4 grays lit from the top-left, with a BIG inset portrait-
+// plaque recess starting right under the crown (rows 3-14 × cols 4-15: "4"
+// top/left shadow, "3" recess field, "1" light catch on the bottom/right
+// edge) — the .gsprite sits exactly on that plaque (top 6px, 24px tall in
+// CSS), never resting at the base.
 export const STONE_MAP: readonly string[] = [
-  ".....KKKKKKKK.....",
-  "...KK11111122KK...",
-  "..K111111112222K..",
-  ".K11111111122222K.",
-  ".K11444444444422K.",
-  ".K11433333333122K.",
-  ".K11433333333122K.",
-  ".K11433333333122K.",
-  ".K11433333333122K.",
-  ".K11433333333122K.",
-  ".K11433333333122K.",
-  ".K11433333333122K.",
-  ".K11111111111122K.",
-  ".K21111112222233K.",
-  ".K22111222223333K.",
-  ".K22222222333333K.",
-  "KK22222223333333KK",
-  "K2222222333333344K",
-  "K2223333344444444K",
-  "KKKKKKKKKKKKKKKKKK",
+  "......KKKKKKKK......",
+  "....KK11111122KK....",
+  "..KK111111112222KK..",
+  ".K1144444444444422K.",
+  ".K1143333333333122K.",
+  ".K1143333333333122K.",
+  ".K1143333333333122K.",
+  ".K1143333333333122K.",
+  ".K1143333333333122K.",
+  ".K1143333333333122K.",
+  ".K1143333333333122K.",
+  ".K1143333333333122K.",
+  ".K1143333333333122K.",
+  ".K1143333333333122K.",
+  ".K1143333333333122K.",
+  ".K1111111111111122K.",
+  ".K2111111222222333K.",
+  ".K2211122222233333K.",
+  ".K2222222233333333K.",
+  "KK2222222233333333KK",
+  "K222222223333333344K",
+  "K222233333444444444K",
+  "K223333344444444444K",
+  "KKKKKKKKKKKKKKKKKKKK",
 ];
 const STONE_SHADOW = pixelArt(
   STONE_MAP,
@@ -473,11 +480,13 @@ export const STAKE_MAP: readonly string[] = [
 ];
 const STAKE_SHADOW = pixelArt(STAKE_MAP, { K: GB.ink, "1": GB.wood1, "2": GB.wood2, "3": GB.wood3 }, PX);
 
-// Player whiteout (14×24): the taller dark stone cross, still textless — a
-// notch more presence now: 4 shades top-left → bottom-right and a wider
-// two-step base sinking into the ground.
+// Player whiteout (14×26): the taller dark stone cross, still textless — 4
+// shades top-left → bottom-right and a wider two-step base sinking into the
+// ground; two rows taller than before so it keeps looming over the 24-row slab.
 export const PLAYER_MAP: readonly string[] = [
   "....KKKKKK....",
+  "....K1123K....",
+  "....K1123K....",
   "....K1123K....",
   "....K1123K....",
   "....K1123K....",
@@ -657,7 +666,7 @@ const LAMP_GLOW_SHADOW = pixelArt(LAMP_GLOW_MAP, { L: GB.winLit, C: GB.lampCore,
 // towers over the 30-px lamp posts. Three canopy shades a step darker than
 // the lawn mosses (highlight top-left → deep shadow underside), a few muted
 // blossom pixels, and a dark trunk with a root flare. Drawn in the .grove
-// layer BEHIND HQ and the lamp row — two of them tuck behind the wings.
+// layer BEHIND HQ and the lamp row, always fully clear of the building span.
 export const TREE_MAP: readonly string[] = [
   "............KKKKKKKK............",
   "..........KKaaaaaaaaKK..........",
@@ -774,8 +783,9 @@ ${WFLICK_CSS}
   font: 700 8px/1 ui-monospace, Menlo, Consolas, monospace; }
 /* the background grove: big darker trees as set dressing — same z-index as
    .bldg/.lot but FIRST in the DOM, so HQ and the lamp posts paint over them
-   (two canopies tuck in behind the building's flanks and peek past the
-   wings; the sign and door can never be covered) */
+   (every tree also keeps fully clear of the building's ±70px span at any
+   viewport width — the two nearest HQ are calc()-anchored to the same 50%
+   center the tower uses — so the sign and door can never be covered) */
 .grove { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 /* the parking lot: the lamp-post row on the lawn (behind the graves, in
    front of HQ); it keeps a center gap so the tower entrance stays visible.
@@ -793,7 +803,11 @@ ${WFLICK_CSS}
    windows, on its own period/phase so they never sync */
 .lamp-flicker::after { animation: lampBuzz 3.9s steps(1) infinite .2s; }
 @keyframes lampBuzz { 0%, 100% { opacity: 1; } 13% { opacity: 0; } 17% { opacity: 1; } 42% { opacity: 0; } 43% { opacity: 1; } 47% { opacity: 0; } 56% { opacity: 1; } 84% { opacity: 0; } 86% { opacity: 1; } }
-.tree { bottom: 34px; width: ${32 * PX}px; height: ${44 * PX}px; }
+/* grove trees ride a few game px above the lamps' bottom-28px ground line and
+   shrink a notch (bottom-anchored scale) — pushed further back in depth, still
+   towering over the 30-game-px lamp posts */
+.tree { bottom: 38px; width: ${32 * PX}px; height: ${44 * PX}px;
+  transform: scale(.9); transform-origin: 50% 100%; }
 .tree::before { box-shadow: ${TREE_SHADOW}; }
 /* scattered muted tufts + the synced 2-frame blooming lavender flowers */
 .decor { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
@@ -844,13 +858,16 @@ ${WFLICK_CSS}
    (sitting at -${PX}px both ways: the art is shifted one game px because an
    outer box-shadow is invisible over its own base box). Outlines are baked
    into the maps. The sprite IS the face of the grave — no text on stones. */
-.stone { position: relative; width: 36px; height: 40px; display: flex;
+.stone { position: relative; width: 40px; height: 48px; display: flex;
   align-items: flex-start; justify-content: center; }
 .stone::before { content: ""; position: absolute; left: -${PX}px; top: -${PX}px;
   width: ${PX}px; height: ${PX}px; box-shadow: ${STONE_SHADOW}; }
-/* the sprite sits HIGH on the slab like a portrait plaque — top 8px/height
-   18px is exactly the inset recess the stone map carves at rows 4-12 */
-.gsprite { position: relative; image-rendering: pixelated; height: 18px; margin-top: 8px; }
+/* the sprite sits HIGH on the slab like a portrait plaque — top 6px/height
+   24px is exactly the inset recess the stone map carves at rows 3-14; the
+   width cap + contain keep even a wide 2:1 sprite (48px natural at this
+   height) inside the slab's outline interior (x 4..36) instead of spilling
+   past the 40px stone */
+.gsprite { position: relative; image-rendering: pixelated; height: 24px; max-width: 32px; object-fit: contain; margin-top: 6px; }
 /* sacrifice = the cheap crooked wooden stake; the plank is just the seat for
    the small sprite (all the wood is part of the stake's pixel art) — nailed
    near the top (map rows 1-8), so the sprite rides high on the sign */
@@ -861,7 +878,7 @@ ${WFLICK_CSS}
 .stake .gsprite { height: 14px; margin: 0; }
 /* the trainer: the whole marker is the dark cross art; the .pcross child
    stays for server/client DOM parity but draws nothing itself */
-.stone.player { width: 28px; height: 48px; }
+.stone.player { width: 28px; height: 52px; }
 .stone.player::before { box-shadow: ${PLAYER_SHADOW}; }
 .mound { height: 4px; margin: ${PX}px -${PX}px 0;
   background: repeating-linear-gradient(90deg, ${GB.dirt2} 0 4px, ${GB.dirt1} 4px 8px); }
@@ -1038,9 +1055,12 @@ export function renderGraveyardPage(view: PublicState, opts: GraveyardOpts): str
   const body = `<div class="wrap">
   <div class="ground"></div>
   <div class="grove">
-    <i class="tree" style="left: calc(50% - 100px)"></i>
-    <i class="tree" style="left: calc(50% + 36px)"></i>
-    <i class="tree" style="left: 76%"></i>
+    <i class="tree" style="left: 2%"></i>
+    <i class="tree" style="left: 13%"></i>
+    <i class="tree" style="left: calc(50% - 158px)"></i>
+    <i class="tree" style="left: calc(50% + 84px)"></i>
+    <i class="tree" style="left: 71%"></i>
+    <i class="tree" style="left: 86%"></i>
   </div>
   <div class="bldg">
     <i class="wing wing-l"></i>
