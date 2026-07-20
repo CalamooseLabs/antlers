@@ -65,12 +65,18 @@
   };
 
   # denort runtime that `deno compile` needs for the target triple.
-  # NOTE: the URL is pinned to `deno.version`, so this hash must be refreshed
-  # whenever nixpkgs bumps deno (the denort release tracks the deno version).
-  # Last updated for deno 2.8.3.
+  # NOTE: the URL is pinned to `deno.version`, so this hash is deno-version-SPECIFIC and must
+  # be refreshed whenever the ambient nixpkgs bumps deno (the denort release tracks the deno
+  # version). The version comes from the CONSUMING flake's nixpkgs — when this is built inside
+  # cala-m-os (/etc/nixos), antlers' nixpkgs `follows` it, so the real target is that deno
+  # (currently 2.8.3 → the hash below). CAVEAT: antlers' OWN pinned nixpkgs may lag (standalone
+  # `nix build .#cobblemon-overlay` / `nix flake check` uses it) — if it resolves a different
+  # deno, this fetch will mismatch until antlers' lock is aligned (`nix flake update nixpkgs`).
+  # Refresh via: nix store prefetch-file "https://dl.deno.land/release/v<ver>/denort-<triple>.zip".
+  # Last matched: deno 2.8.3 (cala-m-os nixpkgs).
   denortZip = fetchurl {
     url = "https://dl.deno.land/release/v${deno.version}/denort-${target}.zip";
-    hash = "sha256-qpgM4qrhv9dx6og0e8oW4qEqiWdsO+DAR4yzvE1tYkE=";
+    hash = "sha256-IU0KQBDJxEMmqC6n/DeFwYmkPNg1Z9kaqk3OOWR1mVQ=";
   };
 
   # Sprite source: pinned msikma/pokesprite — the de-facto box-sprite archive
