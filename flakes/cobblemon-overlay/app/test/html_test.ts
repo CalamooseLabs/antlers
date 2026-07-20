@@ -199,21 +199,71 @@ Deno.test("graveyard renders all three stone variants, keeps the shell conventio
   assert(!html.includes("border-radius"), "pixel-art page: no border-radius curves");
 });
 
-Deno.test("graveyard scenery: GB tree line, checker grass, decor tiles, drifting mist", () => {
+Deno.test("graveyard scenery: Company tower, fence, Lavender grass/decor, drifting mist", () => {
   const html = renderGraveyardPage(graveyardView([]), { tooltips: false, max: 0 });
-  // tree line: two depth rows of repeating round-top pixel trees (repeat-x tiles)
-  assertStringIncludes(html, `class="treeline treeline-far"`);
-  assertStringIncludes(html, `class="treeline treeline-near"`);
-  assertStringIncludes(html, "background-repeat: repeat-x");
-  // flat grass band with the classic two-tone tile checker
-  assertStringIncludes(html, `class="ground"`);
-  assertStringIncludes(html, "conic-gradient");
-  // scattered decor: grass tufts + Crystal-style 2-frame blinking flowers
+  const rule = (sel: string) => {
+    const i = html.indexOf(sel + " { ");
+    assert(i >= 0, sel + " rule exists");
+    return html.slice(i, html.indexOf("}", i));
+  };
+  // the old tree line is gone — THE COMPANY, INC. looms in its place
+  assert(!html.includes("treeline"), "tree line replaced by the office tower");
+  assertStringIncludes(html, `class="bldg"`);
+  assertStringIncludes(html, `class="tower"`);
+  assertStringIncludes(html, `class="wing wing-l"`);
+  assertStringIncludes(html, `class="wing wing-r"`);
+  // the tower is build-time pixelArt() box-shadow in corporate blue-grays
+  const tower = rule(".tower");
+  assertStringIncludes(tower, "box-shadow:");
+  assertStringIncludes(tower, "#a0b0c8"); // light tower face
+  assertStringIncludes(tower, "#383848"); // dark office windows
+  assertStringIncludes(tower, "#f8d878"); // a handful of lit windows
+  assertStringIncludes(tower, "#101010"); // black pixel outline
+  // window flicker: slow steps(1) swap to a second frame of the SAME building
+  // that lights a different window set (people moving about the office)
+  assertStringIncludes(tower, "animation: officeShift 11s steps(1) infinite");
+  const flick = rule("@keyframes officeShift");
+  assertStringIncludes(flick, "box-shadow:");
+  assertStringIncludes(flick, "#f8d878");
+  const shadowOf = (r: string) => {
+    const s = r.indexOf("box-shadow:");
+    return r.slice(s, r.indexOf(";", s));
+  };
+  assert(shadowOf(tower) !== shadowOf(flick), "frame B lights a different window set");
+  assertEquals(
+    shadowOf(tower).length,
+    shadowOf(flick).length,
+    "flicker frames differ only in which windows are lit",
+  );
+  // the sign: legible plaque text flush on the building, GB textbox styling
+  assertStringIncludes(html, `class="csign"`);
+  assertStringIncludes(html, "THE COMPANY, INC.");
+  const sign = rule(".csign");
+  assertStringIncludes(sign, "border: 2px solid #101010");
+  assertStringIncludes(sign, "monospace");
+  // Lavender-style fence row (repeat-x pixelTile) in front of the tower,
+  // split around the center so the entrance stays visible
+  assertStringIncludes(html, `class="fence fence-l"`);
+  assertStringIncludes(html, `class="fence fence-r"`);
+  const fence = rule(".fence");
+  assertStringIncludes(fence, "background-repeat: repeat-x");
+  assertStringIncludes(fence, "linear-gradient(90deg");
+  assertStringIncludes(fence, "#b87838"); // fence wood
+  // desaturated Lavender grass checker
+  const ground = rule(".ground");
+  assertStringIncludes(ground, "conic-gradient");
+  assertStringIncludes(ground, "#689868");
+  assertStringIncludes(ground, "#5c8a5c");
+  // scattered decor: muted tufts + 2-frame blooming LAVENDER flowers
   assertStringIncludes(html, `class="tuft"`);
   assertStringIncludes(html, `class="flower"`);
+  assertStringIncludes(html, "#c0a0e0", "flower petals recolored to lavender");
   assertStringIncludes(html, "@keyframes bloom");
-  assertStringIncludes(html, "steps(1)", "the flower blink snaps between frames, GB-style");
-  // mist: two bands behind the stones, one thin band in front, looping keyframes
+  assertStringIncludes(html, "steps(1)", "the flower bloom snaps between frames, GB-style");
+  // mist: cool lavender-gray tint, two bands behind the stones + one in front,
+  // looping keyframes
+  assertStringIncludes(html, "rgba(216,208,232,.8)");
+  assert(!html.includes("rgba(248,248,248"), "mist is no longer plain white");
   assertStringIncludes(html, `class="fog fog-a"`);
   assertStringIncludes(html, `class="fog fog-b"`);
   assertStringIncludes(html, `class="fog fog-front"`);
@@ -224,6 +274,11 @@ Deno.test("graveyard scenery: GB tree line, checker grass, decor tiles, drifting
   assert(
     html.indexOf(`<div class="fog fog-front">`) > html.indexOf(`id="scene"`),
     "fog-front renders after the scene",
+  );
+  // the tower sits behind the graves in the DOM (scenery, not scene)
+  assert(
+    html.indexOf(`class="bldg"`) < html.indexOf(`id="scene"`),
+    "building renders before (behind) the graves",
   );
 });
 

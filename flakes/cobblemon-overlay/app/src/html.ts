@@ -292,14 +292,20 @@ export const CEMETERY_HTML = page(
 );
 
 // ---- /overlay/graveyard — a GAME BOY pixel graveyard SCENE (server-rendered) ----
-// Pokémon Yellow / Crystal overworld look for OBS: everything sits on the
+// LAVENDER TOWN mood, GBC overworld technique, for OBS: everything sits on the
 // 16×16-game-pixel tile grid at PX(=2) CSS px per game pixel, in a flat 3-4
 // shade GBC palette + #101010 outlines — no soft gradients, no alpha edges on
-// scenery. Scenery: a repeating round-top TREE LINE (two depth rows, tiled
-// edge to edge — everything above it stays transparent), a flat #78c850 grass
-// band with the classic darker tile checker, scattered grass tufts and
-// Crystal-style 2-frame blinking flowers (steps(1) box-shadow swap), plus
-// drifting blocky mist (two bands behind the stones, one thin band in front).
+// scenery. Scenery: THE COMPANY, INC. — the corporate antagonist of the
+// campaign — as ONE big pixelArt() office tower looming behind the yard
+// (cool blue-gray slab, stepped roofline + antenna, regular window grid with
+// a handful of lit windows that slowly SHIFTS between two frames of the same
+// map — steps(1), like people moving about the office — a sign plaque, and an
+// awning + dark-glass double-door entrance; two smaller darker wings give the
+// skyline depth, and everything above stays transparent), a Lavender-style
+// wooden fence row on the lawn, a muted desaturated grass band with the
+// classic darker tile checker, scattered muted tufts and 2-frame blooming
+// LAVENDER flowers (steps(1) box-shadow swap), plus drifting blocky
+// cool-tinted mist (two bands behind the stones, one thin band in front).
 // Markers are build-time pixelArt() box-shadows: the Lavender Town rounded-
 // top/stepped-base slab (faint/duplicate_release), a deliberately cheap
 // crooked wooden stake + plank sign (sacrifice), and the trainer's taller
@@ -376,7 +382,7 @@ export function pixelArt(map: readonly string[], colors: Record<string, string>,
 
 // Same pixel-map format, emitted as horizontally-tileable background layers
 // (one hard-stop linear-gradient per non-empty row, repeat-x) — for scenery
-// that must repeat edge to edge, like the tree line.
+// that must repeat edge to edge, like the fence row.
 function pixelTile(
   map: readonly string[],
   colors: Record<string, string>,
@@ -417,15 +423,21 @@ function pixelTile(
   };
 }
 
-// GBC-ish flat palette (Pokémon Yellow / Crystal overworld): 3-4 shades per
-// element + one near-black for outlines. The whole scene draws from here.
+// GBC-ish flat palette, pulled toward Lavender Town melancholy: 3-4 shades
+// per element + one near-black for outlines. The whole scene draws from here.
 const GB = {
   ink: "#101010",
   stone1: "#f8f8f8", stone2: "#a8a8a8", stone3: "#707070", stone4: "#484848",
-  leaf1: "#58c870", leaf2: "#309850", leaf3: "#186838", leaf4: "#104028",
-  grass: "#78c850", grassCheck: "#68b048",
+  // desaturated Lavender greens (grass checker, tufts, flower stems)
+  grass: "#689868", grassCheck: "#5c8a5c",
+  moss1: "#4a7a58", moss2: "#345c42",
+  // pale-purple flower petals/heart
+  lav1: "#c0a0e0", lav2: "#e8d8f8",
   dirt1: "#e8d8a0", dirt2: "#c8a868",
-  wood1: "#b87838", wood2: "#885828", wood3: "#583818",
+  wood1: "#b87838", wood2: "#885828",
+  // THE COMPANY, INC. — cool corporate blue-grays + window shades
+  bld1: "#a0b0c8", bld2: "#8090a8", bld3: "#586880", bld4: "#384858",
+  win: "#383848", winLit: "#f8d878",
 };
 
 // Lavender-Town-style headstone: rounded-top slab over a stepped base, 3 grays.
@@ -499,41 +511,103 @@ const PLAYER_MAP = [
 ];
 const PLAYER_SHADOW = pixelArt(PLAYER_MAP, { K: GB.ink, "1": GB.stone2, "2": GB.stone3, "3": GB.stone4 }, PX);
 
-// One 16×16 round-top bushy tree tile, tileable edge to edge (rows 5-9 run
-// full width so neighboring crowns touch; the dark bottom rows read as the
-// tree-row shadow band).
-const TREE_MAP = [
-  ".....KKKKKK.....",
-  "...KK111111KK...",
-  "..K1111111111K..",
-  ".K111211112111K.",
-  ".K112211221122K.",
-  "K11221112211122K",
-  "K12211221122112K",
-  "K22112211221122K",
-  "K22221122112222K",
-  "K22222222222222K",
-  "3K222222222222K3",
-  "33K2222222222K33",
-  "33KK22222222KK33",
-  "33333KWWXXK33333",
-  "33333KWWXXK33333",
-  "33333KKXXKK33333",
+// ---- THE COMPANY, INC. HQ tower (44×90 game px, one big pixelArt map) ----
+// Stepped roofline + antenna, a regular window grid, a dark sign band (the
+// legible HTML .csign plaque sits flush on it), and a ground-floor dark-glass
+// double door under a striped awning. The map is assembled from repeated row
+// strings so it stays rectangular by construction (pixelArt still throws on
+// ragged rows). Window chars: w = always dark; x / y = the two lit groups —
+// the SAME map is colored twice (frame A lights x, frame B lights y) to make
+// the slow window-flicker frames.
+const dots = (n: number) => ".".repeat(n);
+const TOWER_WIN_X = [5, 12, 19, 26, 33]; // left edge of each 3-px-wide window
+const TOWER_WALL = "K" + "1".repeat(36) + "222333K";
+function towerWindowRow(lights: string): string {
+  const row = TOWER_WALL.split("");
+  for (let i = 0; i < TOWER_WIN_X.length; i++) {
+    for (let dx = 0; dx < 3; dx++) row[TOWER_WIN_X[i] + dx] = lights[i];
+  }
+  return row.join("");
+}
+// per-floor window pattern, top floor first (5 windows per floor)
+const TOWER_FLOORS = [
+  "wwyww", "xwwww", "wwwwx", "wywww", "wwwww", "wwxwy", "wwwww",
+  "ywwwx", "wwwww", "wwyww", "xwwww", "wwwwy", "wwwww", "xwwww",
 ];
-const TREES_NEAR = pixelTile(
-  TREE_MAP,
-  { K: GB.ink, "1": GB.leaf1, "2": GB.leaf2, "3": GB.leaf3, W: GB.wood1, X: GB.wood2 },
-  PX,
-);
-// far row: one palette step darker, offset half a tile so crowns fill the gaps
-const TREES_FAR = pixelTile(
-  TREE_MAP,
-  { K: GB.ink, "1": GB.leaf2, "2": GB.leaf3, "3": GB.leaf4, W: GB.wood2, X: GB.wood3 },
-  PX,
-  8 * PX,
-);
+const TOWER_SLAB = dots(10) + "K" + "1".repeat(17) + "22333K" + dots(10);
+const TOWER_SIGN_BAND = "K" + "4".repeat(42) + "K";
+const TOWER_AWN = "K" + "1".repeat(12) + "K".repeat(18) + "1".repeat(6) + "222333K";
+const TOWER_AWN_BODY = "K" + "1".repeat(12) + "K" + "4411".repeat(4) + "K" + "1".repeat(6) + "222333K";
+const TOWER_DOOR = "K" + "1".repeat(14) + "KwwwwwKwwwwwK" + "1".repeat(9) + "222333K";
+const TOWER_DOOR_HANDLE = "K" + "1".repeat(14) + "Kwwww1K1wwwwK" + "1".repeat(9) + "222333K";
+const TOWER_MAP: readonly string[] = [
+  // antenna / spire
+  dots(21) + "KK" + dots(21),
+  dots(21) + "KK" + dots(21),
+  dots(19) + "K".repeat(6) + dots(19),
+  dots(21) + "KK" + dots(21),
+  dots(21) + "KK" + dots(21),
+  dots(21) + "KK" + dots(21),
+  // stepped roofline: narrow top slab, then the full-width main slab
+  dots(10) + "K".repeat(24) + dots(10),
+  TOWER_SLAB, TOWER_SLAB, TOWER_SLAB, TOWER_SLAB, TOWER_SLAB,
+  "K".repeat(10) + "K" + "1".repeat(17) + "22333K" + "K".repeat(10),
+  TOWER_WALL, TOWER_WALL,
+  // office floors: 2-px-tall windows, 2-px wall bands between floors
+  ...TOWER_FLOORS.flatMap((f) => {
+    const w = towerWindowRow(f);
+    return [w, w, TOWER_WALL, TOWER_WALL];
+  }),
+  // dark sign band (the .csign plaque overlays this)
+  TOWER_SIGN_BAND, TOWER_SIGN_BAND, TOWER_SIGN_BAND,
+  TOWER_SIGN_BAND, TOWER_SIGN_BAND, TOWER_SIGN_BAND,
+  // ground floor: striped awning over the dark-glass double door
+  TOWER_AWN,
+  TOWER_AWN_BODY, TOWER_AWN_BODY,
+  TOWER_AWN,
+  TOWER_DOOR, TOWER_DOOR, TOWER_DOOR,
+  TOWER_DOOR_HANDLE,
+  TOWER_DOOR, TOWER_DOOR, TOWER_DOOR,
+  TOWER_WALL,
+  "K".repeat(44),
+];
+const TOWER_COLORS = {
+  K: GB.ink, "1": GB.bld1, "2": GB.bld2, "3": GB.bld3, "4": GB.bld4, w: GB.win,
+};
+const TOWER_A_SHADOW = pixelArt(TOWER_MAP, { ...TOWER_COLORS, x: GB.winLit, y: GB.win }, PX);
+const TOWER_B_SHADOW = pixelArt(TOWER_MAP, { ...TOWER_COLORS, x: GB.win, y: GB.winLit }, PX);
 
-// Ground decor: a grass tuft and Crystal's 2-frame blinking flower.
+// Flanking wing: a much smaller, darker slab for skyline depth (windows all
+// dark — nobody works late in the wings).
+const WING_WALL = "K" + "3".repeat(11) + "444K";
+const WING_WIN = "K33ww33ww33ww44K";
+const WING_MAP: readonly string[] = [
+  "K".repeat(16),
+  WING_WALL,
+  ...[0, 1, 2, 3, 4, 5].flatMap(() => [WING_WIN, WING_WIN, WING_WALL, WING_WALL]),
+  WING_WALL,
+  "K".repeat(16),
+];
+const WING_SHADOW = pixelArt(WING_MAP, { K: GB.ink, "3": GB.bld3, "4": GB.bld4, w: GB.win }, PX);
+
+// Lavender-style wooden lawn fence: posts every 8 game px, two continuous
+// rails — a repeat-x pixelTile so it runs edge to edge in front of the tower.
+const FENCE_MAP = [
+  "..KK....",
+  ".K11K...",
+  "KKKKKKKK",
+  "21122222",
+  "KKKKKKKK",
+  ".K11K...",
+  "KKKKKKKK",
+  "21122222",
+  "KKKKKKKK",
+  ".K22K...",
+  ".KKKK...",
+];
+const FENCE = pixelTile(FENCE_MAP, { K: GB.ink, "1": GB.wood1, "2": GB.wood2 }, PX);
+
+// Ground decor: a muted grass tuft and the 2-frame blooming LAVENDER flower.
 const TUFT_MAP = [
   ".3..2.3.",
   ".3.23.2.",
@@ -541,7 +615,7 @@ const TUFT_MAP = [
   ".23232..",
   "..232...",
 ];
-const TUFT_SHADOW = pixelArt(TUFT_MAP, { "2": GB.leaf2, "3": GB.leaf3 }, PX);
+const TUFT_SHADOW = pixelArt(TUFT_MAP, { "2": GB.moss1, "3": GB.moss2 }, PX);
 const FLOWER_A_MAP = [
   ".PP..PP.",
   ".PPYYPP.",
@@ -560,56 +634,73 @@ const FLOWER_B_MAP = [
   "...33...",
   "..33.3..",
 ];
-const FLOWER_COLORS = { P: GB.stone1, Y: GB.dirt1, "3": GB.leaf3 };
+const FLOWER_COLORS = { P: GB.lav1, Y: GB.lav2, "3": GB.moss2 };
 const FLOWER_A_SHADOW = pixelArt(FLOWER_A_MAP, FLOWER_COLORS, PX);
 const FLOWER_B_SHADOW = pixelArt(FLOWER_B_MAP, FLOWER_COLORS, PX);
 
 const GRAVEYARD_CSS = `
 .wrap { position: fixed; inset: 0; }
-/* ---- GB scenery, bottom-anchored; above the tree line = transparent for OBS.
+/* ---- GB scenery, bottom-anchored; above the skyline = transparent for OBS.
    1 game px = ${PX} CSS px; flat colors, hard stops, black outlines only. ---- */
-/* flat grass band with the classic two-tone tile checker (8×8 game-px tiles) */
+/* muted Lavender grass band with the classic two-tone tile checker (8×8 tiles) */
 .ground { position: absolute; left: 0; right: 0; bottom: 0; height: 52px; z-index: 0;
   background: conic-gradient(${GB.grassCheck} 0 25%, ${GB.grass} 0 50%, ${GB.grassCheck} 0 75%, ${GB.grass} 0) 0 0 / 32px 32px; }
-/* repeating round-top tree line: one pixelTile() row per depth layer */
-.treeline { position: absolute; left: 0; right: 0; height: 32px; z-index: 1;
-  pointer-events: none; background-repeat: repeat-x; }
-.treeline-far { bottom: 52px;
-  background-image: ${TREES_FAR.image};
-  background-size: ${TREES_FAR.size};
-  background-position: ${TREES_FAR.position}; }
-.treeline-near { bottom: 40px;
-  background-image: ${TREES_NEAR.image};
-  background-size: ${TREES_NEAR.size};
-  background-position: ${TREES_NEAR.position}; }
-/* scattered grass tufts + Crystal's synced 2-frame blinking flowers */
+/* THE COMPANY, INC. HQ: one big pixelArt() tower looming behind the yard,
+   flanked by two darker wings. The lit-window pattern swaps between two
+   frames of the same map on a slow steps(1) cycle — office life after dark. */
+.bldg { position: absolute; bottom: 46px; left: 50%; margin-left: -44px;
+  width: 88px; height: 182px; z-index: 1; pointer-events: none; }
+.bldg i { position: absolute; width: ${PX}px; height: ${PX}px; }
+.wing { top: 124px; box-shadow: ${WING_SHADOW}; }
+.wing-l { left: -26px; }
+.wing-r { left: 82px; }
+.tower { left: 0; top: 0; box-shadow: ${TOWER_A_SHADOW};
+  animation: officeShift 11s steps(1) infinite; }
+@keyframes officeShift { 50% { box-shadow: ${TOWER_B_SHADOW}; } }
+/* the sign: a flat bordered plaque flush on the tower's dark band — HTML text
+   (not pixel-map letters) so it stays legible on stream at this scale */
+.csign { position: absolute; left: 50%; transform: translateX(-50%); bottom: 27px;
+  padding: 2px 3px; background: ${GB.bld4}; color: #f8f8f8;
+  border: 2px solid ${GB.ink}; white-space: nowrap;
+  font: 700 8px/1 ui-monospace, Menlo, Consolas, monospace; }
+/* Lavender-style fence row on the lawn (behind the graves, in front of HQ),
+   split around the center so the tower entrance stays visible */
+.fence { position: absolute; bottom: 30px; height: 22px;
+  z-index: 1; pointer-events: none; background-repeat: repeat-x;
+  background-image: ${FENCE.image};
+  background-size: ${FENCE.size};
+  background-position: ${FENCE.position}; }
+.fence-l { left: 0; right: 50%; margin-right: 32px; }
+.fence-r { left: 50%; right: 0; margin-left: 32px; }
+/* scattered muted tufts + the synced 2-frame blooming lavender flowers */
 .decor { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
 .tuft, .flower { position: absolute; width: ${PX}px; height: ${PX}px; }
 .tuft { bottom: 16px; box-shadow: ${TUFT_SHADOW}; }
 .flower { bottom: 20px; box-shadow: ${FLOWER_A_SHADOW};
   animation: bloom 1.4s steps(1) infinite; }
 @keyframes bloom { 50% { box-shadow: ${FLOWER_B_SHADOW}; } }
-/* ---- mist: blocky checker dashes (Sprout Tower / Ilex Forest style); each
-   band slides exactly one pattern period per loop, so the drift is seamless ---- */
+/* ---- mist: blocky checker dashes, cool lavender-gray tint and a touch more
+   present than the old white haze; each band slides exactly one pattern
+   period per loop, so the drift is seamless ---- */
 .fog { position: absolute; left: 0; right: 0; pointer-events: none;
   background-repeat: repeat-x; }
-.fog-a { z-index: 3; bottom: 18px; height: 16px; opacity: .28; background-image:
-  linear-gradient(90deg, rgba(248,248,248,.8) 0 24px, transparent 24px),
-  linear-gradient(90deg, transparent 0 16px, rgba(248,248,248,.6) 16px 32px),
-  linear-gradient(90deg, rgba(248,248,248,.7) 0 16px, transparent 16px 40px, rgba(248,248,248,.7) 40px 48px);
+.fog-a { z-index: 3; bottom: 18px; height: 16px; opacity: .34; background-image:
+  linear-gradient(90deg, rgba(216,208,232,.8) 0 24px, transparent 24px),
+  linear-gradient(90deg, transparent 0 16px, rgba(216,208,232,.6) 16px 32px),
+  linear-gradient(90deg, rgba(216,208,232,.7) 0 16px, transparent 16px 40px, rgba(216,208,232,.7) 40px 48px);
   background-size: 48px 4px, 32px 4px, 48px 4px;
   background-position: 0 2px, 0 6px, 0 10px;
   animation: fogA 48s linear infinite; }
 @keyframes fogA { to { background-position: -96px 2px, -96px 6px, -96px 10px; } }
-.fog-b { z-index: 3; bottom: 56px; height: 10px; opacity: .18; background-image:
-  linear-gradient(90deg, transparent 0 8px, rgba(248,248,248,.6) 8px 32px, transparent 32px),
-  linear-gradient(90deg, rgba(248,248,248,.4) 0 16px, transparent 16px);
+.fog-b { z-index: 3; bottom: 56px; height: 10px; opacity: .24; background-image:
+  linear-gradient(90deg, transparent 0 8px, rgba(216,208,232,.6) 8px 32px, transparent 32px),
+  linear-gradient(90deg, rgba(216,208,232,.4) 0 16px, transparent 16px);
   background-size: 48px 4px, 48px 4px;
   background-position: 0 2px, 0 6px;
   animation: fogB 64s linear infinite; }
 @keyframes fogB { to { background-position: 48px 2px, 48px 6px; } }
-.fog-front { z-index: 6; bottom: 2px; height: 8px; opacity: .22; background-image:
-  linear-gradient(90deg, rgba(248,248,248,.7) 0 16px, transparent 16px 32px, rgba(248,248,248,.45) 32px 40px, transparent 40px);
+.fog-front { z-index: 6; bottom: 2px; height: 8px; opacity: .26; background-image:
+  linear-gradient(90deg, rgba(216,208,232,.7) 0 16px, transparent 16px 32px, rgba(216,208,232,.45) 32px 40px, transparent 40px);
   background-size: 64px 4px;
   background-position: 0 2px;
   animation: fogFront 36s linear infinite; }
@@ -820,8 +911,14 @@ export function renderGraveyardPage(view: PublicState, opts: GraveyardOpts): str
   const stones = shown.map((m) => graveHtml(m, opts.tooltips)).join("");
   const body = `<div class="wrap">
   <div class="ground"></div>
-  <div class="treeline treeline-far"></div>
-  <div class="treeline treeline-near"></div>
+  <div class="bldg">
+    <i class="wing wing-l"></i>
+    <i class="wing wing-r"></i>
+    <i class="tower"></i>
+    <div class="csign">THE COMPANY, INC.</div>
+  </div>
+  <div class="fence fence-l"></div>
+  <div class="fence fence-r"></div>
   <div class="decor">
     <i class="tuft" style="left: 5%"></i>
     <i class="flower" style="left: 12%"></i>
@@ -1008,7 +1105,7 @@ h1 { font-size: 18px; letter-spacing: 1px; }
 <ul>
 <li><a href="/overlay/party">/overlay/party</a> — party bar (6 cards, sprites, HP)</li>
 <li><a href="/overlay/cemetery">/overlay/cemetery</a> — the graveyard (<a href="/overlay/cemetery?compact=1">?compact=1</a> = counter only)</li>
-<li><a href="/overlay/graveyard">/overlay/graveyard</a> — Game Boy pixel graveyard scene: tree line, blinking flowers, drifting mist, sprite-faced stones (<a href="/overlay/graveyard?tooltips=1">?tooltips=1</a> = cycling name + cause-of-death textbox, one grave at a time; ?max=N = newest N)</li>
+<li><a href="/overlay/graveyard">/overlay/graveyard</a> — Lavender-Town pixel graveyard scene: The Company, Inc. tower looming behind the graves (lit windows shift), fence row, blooming lavender flowers, drifting mist, sprite-faced stones (<a href="/overlay/graveyard?tooltips=1">?tooltips=1</a> = cycling name + cause-of-death textbox, one grave at a time; ?max=N = newest N)</li>
 <li><a href="/overlay/badges">/overlay/badges</a> — badges + level cap</li>
 <li><a href="/overlay/toasts">/overlay/toasts</a> — live event toasts</li>
 <li><a href="/status">/status</a> — debug view</li>
