@@ -195,7 +195,9 @@ body.noanim .grave { animation: none; }
   border-radius: 48px 48px 6px 6px;
   box-shadow: inset 0 -6px 10px rgba(0,0,0,.28), 0 2px 5px rgba(0,0,0,.55); }
 .gcross { position: absolute; top: 5px; left: 0; right: 0; font-size: 13px; color: #2b333c; }
-.gsprite { image-rendering: pixelated; height: 40px; }
+/* sprites ship trimmed (no transparent margins), so the art fills the 40px
+   height; the width cap + contain keep wide species inside the 96px stone */
+.gsprite { image-rendering: pixelated; height: 40px; max-width: 80px; object-fit: contain; }
 .gname { font-size: 12px; font-weight: 700; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
 .glvl { font-size: 10px; color: #2b333c; }
@@ -416,29 +418,30 @@ const GB = {
 
 // Lavender-Tower-style headstone (20×24): rounded slab over a subtle two-step
 // base, the full 4 grays lit from the top-left, with a BIG inset portrait-
-// plaque recess starting right under the crown (rows 3-14 × cols 4-15: "4"
-// top/left shadow, "3" recess field, "1" light catch on the bottom/right
-// edge) — the .gsprite sits exactly on that plaque (top 6px, 24px tall in
-// CSS), never resting at the base.
+// plaque recess starting right under the crown (rows 3-15 × cols 3-16: "4"
+// top/left shadow, "3" recess field, "1" light catch on the right edge, an
+// all-"1" catch row below) — the .gsprite box covers that plaque EXACTLY
+// (x 6..34, y 6..32 CSS px): sprites are trimmed at package-build time, so
+// the art fills the whole dark recess, never resting at the base.
 export const STONE_MAP: readonly string[] = [
   "......KKKKKKKK......",
   "....KK11111122KK....",
   "..KK111111112222KK..",
-  ".K1144444444444422K.",
-  ".K1143333333333122K.",
-  ".K1143333333333122K.",
-  ".K1143333333333122K.",
-  ".K1143333333333122K.",
-  ".K1143333333333122K.",
-  ".K1143333333333122K.",
-  ".K1143333333333122K.",
-  ".K1143333333333122K.",
-  ".K1143333333333122K.",
-  ".K1143333333333122K.",
-  ".K1143333333333122K.",
+  ".K1444444444444442K.",
+  ".K1433333333333312K.",
+  ".K1433333333333312K.",
+  ".K1433333333333312K.",
+  ".K1433333333333312K.",
+  ".K1433333333333312K.",
+  ".K1433333333333312K.",
+  ".K1433333333333312K.",
+  ".K1433333333333312K.",
+  ".K1433333333333312K.",
+  ".K1433333333333312K.",
+  ".K1433333333333312K.",
+  ".K1433333333333312K.",
   ".K1111111111111122K.",
   ".K2111111222222333K.",
-  ".K2211122222233333K.",
   ".K2222222233333333K.",
   "KK2222222233333333KK",
   "K222222223333333344K",
@@ -452,31 +455,34 @@ const STONE_SHADOW = pixelArt(
   PX,
 );
 
-// Sacrifice (16×20): still the deliberately cheap crooked wooden stake, now
-// with a third wood tone for real shading. The plank sign is nailed on skew
-// near the TOP (rows 1-8 → .plank at top 2px, 16px tall in CSS) so the sprite
-// rides high; an under-plank shadow row, a drifting post, a kicked-out foot.
+// Sacrifice (18×22): still the deliberately cheap crooked wooden stake, now
+// with a bigger plank so the trimmed sprite gets real estate. The plank sign
+// is nailed on skew near the TOP (rows 1-10 → .plank at top 2px, 20px tall in
+// CSS) so the sprite rides high; an under-plank shadow row, a drifting post,
+// a kicked-out foot.
 export const STAKE_MAP: readonly string[] = [
-  "......K12K......",
-  ".KKKKKKKKKKKKK..",
-  ".K11111111112K..",
-  ".K12111111122K..",
-  ".K11111111122K..",
-  "..K1111111122K..",
-  "..K1211112223K..",
-  "..K2222222233K..",
-  "..KKKKKKKKKKKK..",
-  "......K33K......",
-  "......K12K......",
-  "......K12K......",
-  ".....K12K.......",
-  ".....K12K.......",
-  ".....K22K.......",
-  ".....K223K......",
-  "....K1223K......",
-  "....K2233K......",
-  "....K233K.......",
-  ".....KKK........",
+  "........K12K......",
+  ".KKKKKKKKKKKKKKK..",
+  ".K1111111111112K..",
+  ".K1211111111122K..",
+  ".K1111111111122K..",
+  ".K1111111111122K..",
+  "..K111111111122K..",
+  "..K111111111122K..",
+  "..K121111112223K..",
+  "..K222222222233K..",
+  "..KKKKKKKKKKKKKK..",
+  "........K33K......",
+  "........K12K......",
+  "........K12K......",
+  ".......K12K.......",
+  ".......K12K.......",
+  ".......K22K.......",
+  ".......K223K......",
+  "......K1223K......",
+  "......K2233K......",
+  "......K233K.......",
+  ".......KKK........",
 ];
 const STAKE_SHADOW = pixelArt(STAKE_MAP, { K: GB.ink, "1": GB.wood1, "2": GB.wood2, "3": GB.wood3 }, PX);
 
@@ -862,20 +868,21 @@ ${WFLICK_CSS}
   align-items: flex-start; justify-content: center; }
 .stone::before { content: ""; position: absolute; left: -${PX}px; top: -${PX}px;
   width: ${PX}px; height: ${PX}px; box-shadow: ${STONE_SHADOW}; }
-/* the sprite sits HIGH on the slab like a portrait plaque — top 6px/height
-   24px is exactly the inset recess the stone map carves at rows 3-14; the
-   width cap + contain keep even a wide 2:1 sprite (48px natural at this
-   height) inside the slab's outline interior (x 4..36) instead of spilling
-   past the 40px stone */
-.gsprite { position: relative; image-rendering: pixelated; height: 24px; max-width: 32px; object-fit: contain; margin-top: 6px; }
+/* the sprite sits HIGH on the slab like a portrait plaque — the 28×26 box at
+   top 6px (flex-centered → x 6..34) is EXACTLY the inset recess the stone map
+   carves at rows 3-15 × cols 3-16; sprites are trimmed of their transparent
+   margins at package-build time, so the contained art covers the whole dark
+   plaque (extreme ratios letterbox inside it, never spilling past the slab) */
+.gsprite { position: relative; image-rendering: pixelated; width: 28px; height: 26px; object-fit: contain; margin-top: 6px; }
 /* sacrifice = the cheap crooked wooden stake; the plank is just the seat for
-   the small sprite (all the wood is part of the stake's pixel art) — nailed
-   near the top (map rows 1-8), so the sprite rides high on the sign */
-.stone.stake { width: 32px; height: 40px; }
+   the sprite (all the wood is part of the stake's pixel art) — nailed near
+   the top (map rows 1-10), so the sprite rides high on the sign */
+.stone.stake { width: 36px; height: 44px; }
 .stone.stake::before { box-shadow: ${STAKE_SHADOW}; }
-.plank { position: absolute; left: 2px; top: 2px; width: 26px; height: 16px;
+.plank { position: absolute; left: 2px; top: 2px; width: 30px; height: 20px;
   display: flex; align-items: center; justify-content: center; }
-.stake .gsprite { height: 14px; margin: 0; }
+/* the plank FACE (one game px inside the outline): 26×16, centered by .plank */
+.stake .gsprite { width: 26px; height: 16px; margin: 0; }
 /* the trainer: the whole marker is the dark cross art; the .pcross child
    stays for server/client DOM parity but draws nothing itself */
 .stone.player { width: 28px; height: 52px; }

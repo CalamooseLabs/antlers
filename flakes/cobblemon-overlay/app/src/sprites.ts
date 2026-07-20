@@ -134,8 +134,11 @@ export class SpriteStore {
       return new Response(data, {
         headers: {
           "content-type": "image/png",
-          // Sprites are immutable per package build — let OBS cache them.
-          "cache-control": "public, max-age=86400",
+          // Sprite URLs stay the same across package upgrades but the files
+          // change (e.g. the build-time trim) — a day-long cache left OBS
+          // showing stale art after a rebuild (hit live, 2026-07-19). Short
+          // max-age keeps stream-night load trivial without pinning old files.
+          "cache-control": "public, max-age=300",
         },
       });
     } catch {

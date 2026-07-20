@@ -473,7 +473,7 @@ Deno.test("graveyard markers are pixelArt box-shadows; tooltip is a GB textbox",
   // map ↔ CSS lockstep: each marker's box is exactly its map size at 2 CSS px
   // per game px (the ::before carrier compensates for the 1-game-px art shift)
   assertEquals([STONE_MAP[0].length, STONE_MAP.length], [20, 24]);
-  assertEquals([STAKE_MAP[0].length, STAKE_MAP.length], [16, 20]);
+  assertEquals([STAKE_MAP[0].length, STAKE_MAP.length], [18, 22]);
   assertEquals([PLAYER_MAP[0].length, PLAYER_MAP.length], [14, 26]);
   assertStringIncludes(
     html,
@@ -487,39 +487,53 @@ Deno.test("graveyard markers are pixelArt box-shadows; tooltip is a GB textbox",
     html,
     `.stone.player { width: ${PLAYER_MAP[0].length * 2}px; height: ${PLAYER_MAP.length * 2}px; }`,
   );
-  // the sprite rides HIGH on both sprite-bearing markers: on the slab it sits
-  // on the BIGGER inset portrait plaque the map now carves at rows 3-14
-  // (y 6..30 CSS px — exactly the sprite's margin-top 6px + height 24px), and
-  // on the stake it sits on the plank nailed at rows 1-8 (y 2..18) — never
-  // overflowing the marker outline
-  assert(STONE_MAP[3].includes("444444444444"), "plaque top-shadow row right under the slab crown");
-  for (let r = 4; r <= 14; r++) {
-    assertEquals(STONE_MAP[r], ".K1143333333333122K.", `recessed plaque field row ${r} (the sprite's seat)`);
+  // the sprite rides HIGH on both sprite-bearing markers, and its content box
+  // matches its housing EXACTLY — sprites are TRIMMED of their transparent
+  // margins at package-build time, so the box below IS the visible art.
+  // slab: the map carves the inset portrait plaque at rows 3-15 × cols 3-16
+  // ("4" top/left shadow, "3" field, "1" light catch on the right edge, an
+  // all-"1" catch row below)
+  assert(STONE_MAP[3].includes("44444444444444"), "plaque top-shadow row right under the slab crown");
+  for (let r = 4; r <= 15; r++) {
+    assertEquals(STONE_MAP[r], ".K1433333333333312K.", `recessed plaque field row ${r} (the sprite's seat)`);
   }
-  assert(!STONE_MAP[15].includes("3"), "the recess ends at row 14 — plain face below the plaque");
+  assert(!STONE_MAP[16].includes("3"), "the recess ends at row 15 — the light-catch face row sits below");
+  // recess box in CSS px (map pixel (x,y) → (2x, 2y) inside .stone): the
+  // .gsprite box must cover the whole dark plaque, so the trimmed art fills
+  // it edge to edge (contain letterboxes extreme ratios inside the recess)
+  const fieldRow = STONE_MAP[8];
+  const recessL = fieldRow.indexOf("4") * 2; // left-shadow col
+  const recessR = (fieldRow.lastIndexOf("1") + 1) * 2; // right light-catch col, inclusive
+  const recessT = 3 * 2; // the all-"4" top-shadow row
+  const recessB = (15 + 1) * 2; // last field row, inclusive
+  const recessW = recessR - recessL;
+  const recessH = recessB - recessT;
+  assertEquals([recessL, recessT, recessW, recessH], [6, 6, 28, 26], "the plaque recess box");
   assertStringIncludes(
     html,
-    ".gsprite { position: relative; image-rendering: pixelated; height: 24px; max-width: 32px; object-fit: contain; margin-top: 6px; }",
+    `.gsprite { position: relative; image-rendering: pixelated; width: ${recessW}px; height: ${recessH}px; object-fit: contain; margin-top: ${recessT}px; }`,
   );
-  // wide-sprite proof: at 24px tall a 2:1 sprite wants 48px — wider than the
-  // whole 40px stone — so the width cap must pin every natural ratio inside
-  // the slab's K outline. Compute the outline interior from the map itself
-  // (K cols at the plaque rows) and check the contained render at 1:1 and 2:1.
-  const plaqueRow = STONE_MAP[8];
-  const inX0 = (plaqueRow.indexOf("K") + 1) * 2; // first interior CSS x
-  const inX1 = plaqueRow.lastIndexOf("K") * 2; // right outline's left edge
+  // flex centering must drop the box exactly onto the recess, inside the K outline
   const stoneW = STONE_MAP[0].length * 2;
-  assertEquals([inX0, inX1], [4, 36], "slab outline interior at the plaque rows");
-  for (const ratio of [1, 2]) {
-    const w = Math.min(24 * ratio, 32); // height 24px, max-width 32px, contain
-    const x0 = (stoneW - w) / 2; // flex centers the sprite in the stone
-    assert(
-      x0 >= inX0 && x0 + w <= inX1,
-      `${ratio}:1 sprite (${w}px wide, x ${x0}..${x0 + w}) stays inside the slab outline`,
-    );
-  }
-  assertStringIncludes(html, ".plank { position: absolute; left: 2px; top: 2px; width: 26px; height: 16px;");
-  assertStringIncludes(html, ".stake .gsprite { height: 14px; margin: 0; }");
+  assertEquals((stoneW - recessW) / 2, recessL, "centered sprite box lands on the recess left edge");
+  const inX0 = (fieldRow.indexOf("K") + 1) * 2; // first interior CSS x
+  const inX1 = fieldRow.lastIndexOf("K") * 2; // right outline's left edge
+  assert(recessL >= inX0 && recessL + recessW <= inX1, "the sprite box stays inside the slab outline");
+  // stake: the plank outline spans rows 1-10 × cols 1-15 → the .plank box;
+  // the sprite box fills the plank FACE (one game px inside the outline)
+  assertEquals(STAKE_MAP[10], "..KKKKKKKKKKKKKK..", "plank bottom outline row");
+  const plankL = STAKE_MAP[1].indexOf("K") * 2;
+  const plankR = (STAKE_MAP[1].lastIndexOf("K") + 1) * 2;
+  const plankT = 1 * 2; // top outline row
+  const plankB = (10 + 1) * 2; // bottom outline row, inclusive
+  const plankW = plankR - plankL;
+  const plankH = plankB - plankT;
+  assertEquals([plankL, plankT, plankW, plankH], [2, 2, 30, 20], "the plank sign box");
+  assertStringIncludes(
+    html,
+    `.plank { position: absolute; left: ${plankL}px; top: ${plankT}px; width: ${plankW}px; height: ${plankH}px;`,
+  );
+  assertStringIncludes(html, `.stake .gsprite { width: ${plankW - 4}px; height: ${plankH - 4}px; margin: 0; }`);
   // the tooltip is a mini Pokémon textbox: white, thick black double frame
   // (border + ring), hard corners, black monospace text
   const tip = rule(".tip");

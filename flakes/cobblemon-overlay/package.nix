@@ -10,7 +10,10 @@
 # PLUS a sprites fixed-output fetch: a pinned rev of msikma/pokesprite (every
 # national-dex species as a small box-icon PNG keyed by slug). The gen-8 regular
 # icons + the dex→slug data file are installed to
-# $out/share/cobblemon-overlay/sprites, fetched at BUILD time so stream night
+# $out/share/cobblemon-overlay/sprites — TRIMMED of the large transparent
+# margins the 68×56 canvases carry (imagemagick, at install time, NOT in the
+# fetch FOD), so an icon's content box is its actual art and the overlay pages
+# can size sprites to their housings. Fetched at BUILD time so stream night
 # has zero internet dependency. Consumed by the root flake as
 # `packages.<system>.cobblemon-overlay`, paired with
 # `nixosModules.cobblemon-overlay` (./module.nix).
@@ -18,6 +21,7 @@
   stdenv,
   deno,
   unzip,
+  imagemagick,
   fetchurl,
   fetchFromGitHub,
   glibc,
@@ -87,7 +91,7 @@ in
     version = "1.0.0";
     inherit src;
 
-    nativeBuildInputs = [deno unzip];
+    nativeBuildInputs = [deno unzip imagemagick];
 
     # The compiled Deno binary is a prebuilt ELF; leave it unpatched/unstripped.
     dontAutoPatchELF = true;
@@ -131,6 +135,16 @@ in
       # variant subdir is intentionally skipped), + the dex→slug map that backs
       # the overlay's dex-number fallback. module.nix defaults spriteDir here.
       cp ${pokespriteSrc}/pokemon-gen8/regular/*.png $out/share/cobblemon-overlay/sprites/
+      # Trim the large transparent margins the 68×56 pokesprite canvases carry
+      # around the actual art, so an icon's content box IS its art and the
+      # overlay pages can size sprite boxes to their housings (the graveyard
+      # plaque/plank). Done HERE, on the installed copies — the fixed-output
+      # fetch above stays byte-identical. -strip + excluding the date/time PNG
+      # chunks keeps mogrify's output byte-stable across rebuilds (trim itself
+      # is deterministic for identical inputs).
+      chmod +w $out/share/cobblemon-overlay/sprites/*.png
+      mogrify -strip -define png:exclude-chunks=date,time -trim +repage \
+        $out/share/cobblemon-overlay/sprites/*.png
       cp ${pokespriteSrc}/data/pokemon.json $out/share/cobblemon-overlay/sprites/pokemon.json
     '';
 
