@@ -628,25 +628,32 @@ const LAMP_GLOW_MAP = LAMP_MAP.map((r) => r.replace(/[^LCg]/g, "."));
 const LAMP_SHADOW = pixelArt(LAMP_OFF_MAP, { K: GB.ink, "4": GB.bld4, w: GB.win }, PX);
 const LAMP_GLOW_SHADOW = pixelArt(LAMP_GLOW_MAP, { L: GB.winLit, C: GB.lampCore, g: GB.grassLit }, PX);
 
-// Standalone round-top GB tree (12×16 game px) for the lawn — the muted
-// Lavender mosses with a couple of pale-purple blossom pixels in the canopy.
+// Standalone round-top GB tree (18×23 game px) for the lawn — the muted
+// Lavender mosses with a few pale-purple blossom pixels in the canopy.
 const TREE_MAP: readonly string[] = [
-  "....KKKK....",
-  "..KKaaaaKK..",
-  ".KaaaaaaaaK.",
-  ".KaabaaapbK.",
-  "KaaaaaabaaaK",
-  "KabaaabaabaK",
-  "KaabababbabK",
-  "KbabpbbabbaK",
-  ".KabbbabbbK.",
-  ".KbbbbabbbK.",
-  "..KKbbbbKK..",
-  "....KttuK...",
-  "....KttuK...",
-  "....KttuK...",
-  "...KttuuuK..",
-  "...KKKKKKK..",
+  "......KKKKKK......",
+  "....KKaaaaaaKK....",
+  "...KaaaaaaaaaaK...",
+  "..KaaaaaaabaaaaK..",
+  ".KaaabaaaaaapbaaK.",
+  ".KaabaaabaaabaaaK.",
+  "KaaaaabaaabaaabaaK",
+  "KabaaabaabaabbaabK",
+  "KaabapbabbabaabbaK",
+  "KabaabbabbabbabaaK",
+  "KaabbababbbababbaK",
+  "KbabbabpbabbabbabK",
+  "KabbbababbabbbbabK",
+  ".KbabbbabbbababbK.",
+  ".KbbbabbbabbbbbaK.",
+  "..KbbbbabbbbbbK...",
+  "...KKbbbbbbbbKK...",
+  "......KttuuK......",
+  "......KttuuK......",
+  "......KttuuK......",
+  "......KttuuK......",
+  ".....KttuuuuK.....",
+  ".....KKKKKKKK.....",
 ];
 const TREE_SHADOW = pixelArt(
   TREE_MAP,
@@ -732,7 +739,7 @@ ${WFLICK_CSS}
    windows, on its own period/phase so they never sync */
 .lamp-flicker::after { animation: lampBuzz 3.9s steps(1) infinite .2s; }
 @keyframes lampBuzz { 0%, 100% { opacity: 1; } 13% { opacity: 0; } 17% { opacity: 1; } 42% { opacity: 0; } 43% { opacity: 1; } 47% { opacity: 0; } 56% { opacity: 1; } 84% { opacity: 0; } 86% { opacity: 1; } }
-.tree { bottom: 30px; width: ${12 * PX}px; height: ${16 * PX}px; }
+.tree { bottom: 28px; width: ${18 * PX}px; height: ${23 * PX}px; }
 .tree::before { box-shadow: ${TREE_SHADOW}; }
 /* scattered muted tufts + the synced 2-frame blooming lavender flowers */
 .decor { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
