@@ -172,6 +172,23 @@ with lib; let
     ${concatStringsSep "\n" (map chownSecret (attrValues cfg.secrets))}
   '';
 
+  # In systemd stage-1 (boot.initrd.systemd.enable) NixOS runs the system
+  # `activate` INSIDE the initrd (IN_NIXOS_SYSTEMD_STAGE1=true), which has no
+  # network — so a fetch there can only fail, and with failClosed=true its
+  # `exit 1` aborts activation BEFORE the `etc` snippet sets up /etc on the new
+  # root, leaving switch-root with "Switch root target contains no usable init".
+  # There is never a reason to fetch in the initrd, so make these snippets a
+  # no-op there. They still run normally during a real activation (stage-2 boot
+  # or a live `nixos-rebuild switch`); order a network-online oneshot to
+  # repopulate secrets at boot.
+  skipInInitrd = body: ''
+    if [ "''${IN_NIXOS_SYSTEMD_STAGE1:-}" = true ]; then
+      echo "[proton-secrets] initrd activation has no network — skipping (fetch runs post-switch-root)"
+    else
+    ${body}
+    fi
+  '';
+
   secretType = types.submodule ({config, ...}: {
     options = {
       name = mkOption {
@@ -339,18 +356,18 @@ in {
     (mkIf (!sysusersEnabled) {
       system.activationScripts = {
         protonSecretsNewGeneration = {
-          text = newGeneration;
+          text = skipInInitrd newGeneration;
           deps = ["specialfs"];
         };
         protonSecretsInstall = {
-          text = installSecrets;
+          text = skipInInitrd installSecrets;
           deps = ["protonSecretsNewGeneration" "specialfs"];
         };
         # So user passwords (hashedPasswordFile) can be sourced online during switch.
         users.deps = ["protonSecretsInstall"];
         # Ownership after users and groups exist.
         protonSecretsChown = {
-          text = chownSecrets;
+          text = skipInInitrd chownSecrets;
           deps = ["users" "groups"];
         };
         # Barrier other activation scripts can depend on.
