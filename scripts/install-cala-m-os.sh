@@ -46,6 +46,113 @@ echo " Installing Cala-M-OS host '$HOST_FLAKE' — version $VERSION"
 echo "=================================================="
 echo
 
+echo "Step Zero: Data Disks (preserve or reformat)"
+# Data disks are declared per-host in calamoose.install.dataDisks and are NOT
+# part of disko, so a reinstall never wipes them. We handle them HERE, BEFORE the
+# main disko wipe in Step One, because disko formats and mounts the OS disk by
+# /dev/disk/by-partlabel/disk-main-* — a preserved data drive that still carries
+# those same labels (e.g. from a previous NixOS install) would make by-partlabel
+# ambiguous across two disks, so disko could format/mount the WRONG disk. Any
+# clearing must therefore happen before disko runs. Only an explicit interactive
+# "wipe" ever destroys data; a non-interactive run always keeps.
+# The list is emitted by nix as TAB-separated "device<TAB>label<TAB>fsType" lines.
+if ! DATA_DISKS=$(nix eval --raw --impure \
+  --apply 'ds: builtins.concatStringsSep "\n" (map (d: d.device + "\t" + d.label + "\t" + d.fsType) ds)' \
+  "$FLAKE_REF#nixosConfigurations.$HOST_FLAKE.config.calamoose.install.dataDisks" \
+  2>/tmp/dataDisks.err); then
+  echo "  [install] could not read calamoose.install.dataDisks; assuming none. nix said:" >&2
+  sed 's/^/    /' /tmp/dataDisks.err >&2
+  DATA_DISKS=""
+fi
+if [ -z "$DATA_DISKS" ]; then
+  echo "  [install] No data disks declared for '$HOST_FLAKE'; nothing to do."
+else
+  # Iterate the disk list on FD 3 so the interactive prompt below still reads
+  # from the terminal (FD 0) rather than consuming the disk list.
+  while IFS=$'\t' read -r _dev _label _fstype <&3; do
+    [ -z "$_dev" ] && continue
+    echo
+    echo "  Data disk: $_dev"
+    echo "    target: label '$_label', filesystem $_fstype"
+    if [ ! -e "$_dev" ]; then
+      echo "    NOT present on this machine — skipping (nothing wiped)." >&2
+      continue
+    fi
+    _real=$(readlink -f "$_dev")
+    _curlabel=$(blkid -s LABEL -o value "$_dev" 2>/dev/null || true)
+    _stale=$(lsblk -rno PARTLABEL "$_real" 2>/dev/null | grep -c '^disk-main-' || true)
+    if [ "$_curlabel" = "$_label" ]; then
+      _default=K
+      echo "    Already formatted as '$_label' — its data will be KEPT."
+    elif [ "${_stale:-0}" -gt 0 ]; then
+      _default=W
+      echo "    WARNING: this disk still carries the OS layout's partitions"
+      echo "    (disk-main-*). They CLASH with the OS disk and would make /"
+      echo "    ambiguous, so it cannot be preserved as-is — it must be"
+      echo "    reformatted (recommended: W) before the install can proceed."
+    else
+      _default=K
+      echo "    No '$_label' filesystem found — not yet set up as the data drive."
+    fi
+    # Only an interactive terminal may trigger a wipe; a non-interactive run
+    # always keeps the disk (never destroys data unattended).
+    if [ -t 0 ] && [ "${INSTALL_DATA_NONINTERACTIVE:-0}" != "1" ]; then
+      read -rp "    [K]eep or [W]ipe & reformat this disk? [default $_default] " _ans || _ans=""
+      _ans=${_ans:-$_default}
+    else
+      _ans=$_default
+      [ "$_ans" = W ] && _ans=K
+      echo "    Non-interactive — keeping the disk untouched."
+    fi
+    case "$_ans" in
+    [Ww]*)
+      echo "    Wiping $_real and creating $_fstype filesystem '$_label'..."
+      wipefs -a "$_real" >/dev/null
+      sgdisk --zap-all "$_real" >/dev/null 2>&1 || true
+      case "$_fstype" in
+      ext4) mkfs.ext4 -F -L "$_label" "$_real" ;;
+      xfs) mkfs.xfs -f -L "$_label" "$_real" ;;
+      *)
+        echo "    ERROR: unsupported fsType '$_fstype' (add its mkfs + tool)." >&2
+        exit 1
+        ;;
+      esac
+      # Make the fresh filesystem writable by the primary user (uid 1000 = hub).
+      # Mount the device we just formatted DIRECTLY (no need to wait on udev's
+      # by-label symlink), and never let a transient mount failure abort the
+      # install now that the disk is already formatted.
+      _tmp=$(mktemp -d)
+      if mount "$_real" "$_tmp"; then
+        chown 1000:100 "$_tmp"
+        umount "$_tmp"
+        echo "    Done — '$_label' is ready and owned by uid 1000."
+      else
+        echo "    WARN: formatted OK but could not mount to set ownership;" >&2
+        echo "    run 'sudo chown hub:users /data' after the first boot." >&2
+      fi
+      rmdir "$_tmp" 2>/dev/null || true
+      ;;
+    *)
+      # KEEP. If the disk still carries clashing disk-main-* partlabels, keeping
+      # it would leave / (and resume=) ambiguous across two disks at every boot.
+      # Refuse rather than proceed into a corrupt/ambiguous install.
+      if [ "${_stale:-0}" -gt 0 ]; then
+        echo "    ERROR: refusing to KEEP $_real — it still carries disk-main-*" >&2
+        echo "    partlabels that clash with the OS disk and would make / ambiguous." >&2
+        echo "    Re-run and choose W to reformat it, or clear the labels yourself" >&2
+        echo "    (e.g. 'sgdisk --zap-all $_real') before installing." >&2
+        exit 1
+      fi
+      echo "    Keeping $_real untouched."
+      ;;
+    esac
+  done 3<<EOF
+$DATA_DISKS
+EOF
+fi
+echo "Step Zero Completed!"
+echo
+
 echo "Step One: Erasing and Formatting Disk"
 # disko is shipped on the installer ISO's PATH (iso/default.nix systemPackages),
 # so this stays offline-capable rather than fetching disko over the network.

@@ -64,18 +64,27 @@
 % Inline fill-in blank (for the many "____" spots in these forms).
 \newcommand{\fillin}[1][2.5cm]{\rule{#1}{0.4pt}}
 
+% \sigspace is the clear vertical room reserved ABOVE each signature rule so
+% there is somewhere to actually sign by hand. Tune it once here to loosen or
+% tighten every signature block in every document at the same time. (Leading
+% \vspace is discardable, so a block landing at the top of a page isn't shoved
+% down by it.)
+\newlength{\sigspace}
+\setlength{\sigspace}{0.5in}
+
 % A signature rule (default 3in) with an optional caption line beneath it.
 \newcommand{\sigline}[1][3in]{\rule{#1}{0.4pt}}
-% \sigblock{caption} -> a signature rule with a caption typeset below it.
+% \sigblock{caption} -> signing room, a signature rule, then a caption beneath
+% it. \nobreak keeps the caption glued to its rule across a page break.
 \newcommand{\sigblock}[1]{%
-	\par\noindent\sigline\par\nobreak\vspace{-0.3em}\noindent #1\par
+	\par\vspace{\sigspace}\noindent\sigline\par\nobreak\vspace{-0.3em}\noindent #1\par
 }
 
 % Two-up signature row: a full-width rule with two captions beneath it (left/right).
 % Shared by the board/shareholder consents, whose signature grid lists the directors
 % or shareholders two per line above a common signature rule.
 \newcommand{\sigpair}[2]{%
-	\par\vspace{2em}\noindent\rule{\textwidth}{0.4pt}\par\nobreak\vspace{0.2em}%
+	\par\vspace{\sigspace}\noindent\rule{\textwidth}{0.4pt}\par\nobreak\vspace{0.2em}%
 	\noindent\makebox[0.5\textwidth][l]{#1}\makebox[0.5\textwidth][l]{#2}\par
 }
 

@@ -56,6 +56,8 @@
   gptfdisk,
   dosfstools,
   parted,
+  e2fsprogs,
+  xfsprogs,
 }: let
   scriptsDir = ../../scripts;
 
@@ -69,7 +71,9 @@
   # so it is bundled like the `antlers` CLI: the script plus its completion under
   # one derivation.
   install-cala-m-os = let
-    app = mk "install-cala-m-os" [git nix util-linux coreutils findutils gawk gnused];
+    # util-linux → blkid/lsblk/wipefs/mount; gptfdisk → sgdisk; e2fsprogs/xfsprogs
+    # → mkfs.{ext4,xfs} for the Step One-B data-disk (re)format.
+    app = mk "install-cala-m-os" [git nix util-linux coreutils findutils gawk gnused gnugrep gptfdisk e2fsprogs xfsprogs];
     completion = scriptsDir + "/install-cala-m-os.completion.bash";
   in
     runCommandLocal "install-cala-m-os" {
