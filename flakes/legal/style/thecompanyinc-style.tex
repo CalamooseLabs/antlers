@@ -80,12 +80,20 @@
 	\par\vspace{\sigspace}\noindent\sigline\par\nobreak\vspace{-0.3em}\noindent #1\par
 }
 
-% Two-up signature row: a full-width rule with two captions beneath it (left/right).
-% Shared by the board/shareholder consents, whose signature grid lists the directors
-% or shareholders two per line above a common signature rule.
+% \siggutter is the horizontal gap between the two signature lines that share a
+% row in a two-up block, so the left and right signatures don't run together.
+\newlength{\siggutter}
+\setlength{\siggutter}{0.4in}
+\newlength{\sigcol}
+
+% Two-up signature row: two separate signature rules side by side (a \siggutter
+% gap between them) with a caption beneath each. Shared by the board/shareholder
+% consents, whose signature grid lists the directors or shareholders two per row.
 \newcommand{\sigpair}[2]{%
-	\par\vspace{\sigspace}\noindent\rule{\textwidth}{0.4pt}\par\nobreak\vspace{0.2em}%
-	\noindent\makebox[0.5\textwidth][l]{#1}\makebox[0.5\textwidth][l]{#2}\par
+	\setlength{\sigcol}{0.5\textwidth}\addtolength{\sigcol}{-0.5\siggutter}%
+	\par\vspace{\sigspace}\noindent%
+	\rule{\sigcol}{0.4pt}\hspace{\siggutter}\rule{\sigcol}{0.4pt}\par\nobreak\vspace{0.2em}%
+	\noindent\makebox[\sigcol][l]{#1}\hspace{\siggutter}\makebox[\sigcol][l]{#2}\par
 }
 
 % Exhibit / Schedule heading: centered "Exhibit <letter>" + underlined title.

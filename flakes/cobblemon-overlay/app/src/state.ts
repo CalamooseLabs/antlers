@@ -21,13 +21,14 @@
 //    lastIngestAt = 0, so the overlay is stale until the mod pushes again.
 
 import {
+  type Attacker,
   bool,
+  coerceAttacker,
   coerceDeaths,
   coercePartyMember,
   coerceProgress,
   type DeathCounters,
   type EventMsg,
-  type LossCause,
   type Message,
   num,
   type PartyMember,
@@ -35,7 +36,6 @@ import {
   type QuestInfo,
   type SnapshotMsg,
   str,
-  type WhiteoutReason,
   type WorldInfo,
   zeroDeaths,
   zeroProgress,
@@ -43,7 +43,7 @@ import {
 import { isError, log } from "./util.ts";
 
 // "pokemon" = a fallen party member (pokemon_lost); "player" = the TRAINER's own
-// grave, appended on every newly-accepted whiteout.
+// grave, appended on a whiteout OR a natural hardcore death (player_death).
 export type MemorialKind = "pokemon" | "player";
 
 export interface MemorialEntry {
@@ -52,9 +52,14 @@ export interface MemorialEntry {
   species: string; // "" for kind:"player"
   dex: number; // 0 for kind:"player"
   level: number; // 0 for kind:"player"
-  cause: LossCause | WhiteoutReason; // player graves carry the whiteout reason
+  // pokemon: the LossCause ("faint"|"sacrifice"|"duplicate_release"); player: a whiteout
+  // reason ("faint"|"flee"|"forfeit") OR a natural-death DamageSource id ("fall"|"mob"|…).
+  cause: string;
   attempt: number;
   ts: number; // server receive time
+  killer?: Attacker; // pokemon graves (faint): who/what KO'd it
+  killedBy?: string; // player graves (natural death): the attacking entity — escape it
+  detail?: string; // player graves (natural death): the full death message — escape it
 }
 
 // The broadcast/ring view of one accepted game event (envelope stripped).
@@ -107,12 +112,18 @@ function buildGameView(msg: EventMsg, ts: number, attempt: number): GameView {
       v.cause = msg.cause;
       v.pokemon = msg.pokemon;
       if (msg.deathsTotal !== undefined) v.deathsTotal = msg.deathsTotal;
+      if (msg.killer) v.killer = msg.killer;
       break;
     case "capture":
       v.pokemon = msg.pokemon;
       break;
     case "whiteout":
       v.reason = msg.reason;
+      break;
+    case "player_death":
+      v.cause = msg.deathCause;
+      if (msg.deathMessage) v.deathMessage = msg.deathMessage;
+      if (msg.killedBy) v.killedBy = msg.killedBy;
       break;
     case "badge":
       v.badgeId = msg.badgeId;
@@ -232,6 +243,7 @@ export class OverlayState {
           cause: msg.cause!,
           attempt: this.#attempt,
           ts: receivedAt,
+          ...(msg.killer ? { killer: msg.killer } : {}),
         });
         if (msg.deathsTotal !== undefined) this.#deaths.total = msg.deathsTotal;
         else this.#deaths.total += 1;
@@ -240,6 +252,24 @@ export class OverlayState {
         stateChanged = true;
         break;
       }
+      case "player_death":
+        // The TRAINER's own grave for a natural hardcore death (fall/lava/mob/…). A
+        // whiteout does NOT reach here — the mod filters it (it has its own event
+        // below), so a run-ending death yields exactly one player grave either way.
+        this.#memorial.push({
+          kind: "player",
+          name: this.#player || "Trainer",
+          species: "",
+          dex: 0,
+          level: 0,
+          cause: msg.deathCause || "death",
+          attempt: this.#attempt,
+          ts: receivedAt,
+          ...(msg.killedBy ? { killedBy: msg.killedBy } : {}),
+          ...(msg.deathMessage ? { detail: msg.deathMessage } : {}),
+        });
+        stateChanged = true;
+        break;
       case "whiteout":
         // The TRAINER's own headstone: named from the latest snapshot (fallback
         // "Trainer"), cause = the whiteout reason. The seq gate above already
@@ -418,29 +448,37 @@ export class OverlayState {
           const m = raw as Record<string, unknown>;
           const cause = str(m.cause, "faint");
           if (str(m.kind) === "player") {
+            // Player cause is free-form (a whiteout reason OR a natural-death id) —
+            // keep whatever was saved; killedBy/detail ride along when present.
+            const killedBy = str(m.killedBy);
+            const detail = str(m.detail);
             return [{
               kind: "player",
               name: str(m.name) || "Trainer",
               species: "",
               dex: 0,
               level: 0,
-              cause: (["faint", "flee", "forfeit"].includes(cause) ? cause : "faint") as WhiteoutReason,
+              cause,
               attempt: Math.max(1, num(m.attempt, 1)),
               ts: num(m.ts),
+              ...(killedBy ? { killedBy } : {}),
+              ...(detail ? { detail } : {}),
             }];
           }
           // no/unknown "kind" = a pre-"kind" persisted entry → pokemon grave
           const species = str(m.species);
           if (!species) return [];
+          const killer = coerceAttacker(m.killer);
           return [{
             kind: "pokemon",
             name: str(m.name) || species,
             species,
             dex: num(m.dex),
             level: num(m.level),
-            cause: (["faint", "sacrifice", "duplicate_release"].includes(cause) ? cause : "faint") as LossCause,
+            cause: ["faint", "sacrifice", "duplicate_release"].includes(cause) ? cause : "faint",
             attempt: Math.max(1, num(m.attempt, 1)),
             ts: num(m.ts),
+            ...(killer ? { killer } : {}),
           }];
         })
         : [];

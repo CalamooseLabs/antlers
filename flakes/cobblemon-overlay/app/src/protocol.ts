@@ -24,6 +24,7 @@ export type EventName =
   | "pokemon_lost"
   | "capture"
   | "whiteout"
+  | "player_death"
   | "badge"
   | "trainer_defeated"
   | "level_cap"
@@ -34,6 +35,7 @@ const EVENT_NAMES: readonly string[] = [
   "pokemon_lost",
   "capture",
   "whiteout",
+  "player_death",
   "badge",
   "trainer_defeated",
   "level_cap",
@@ -90,6 +92,17 @@ export interface PokemonRef {
   shiny: boolean;
 }
 
+// Who/what KO'd a party member — the `killer` on a faint-path pokemon_lost. The
+// mod resolves the enemy Pokémon that dealt the blow; `by` says wild vs trainer's.
+// Any field may be absent (unverified accessors) — all default, none is required.
+export interface Attacker {
+  by: "wild" | "trainer" | "unknown";
+  name: string; // attacking pokemon's display name — PLAYER/DATA CONTROLLED, escape it
+  species: string; // sprite key, e.g. "cobblemon:zubat" ("" = unknown)
+  dex: number; // national dex (sprite fallback key); 0 = unknown
+  trainer: string; // trainer's name when by="trainer" — DATA CONTROLLED, escape it ("" otherwise)
+}
+
 export interface BaseMsg {
   v: 1;
   session: string;
@@ -115,10 +128,15 @@ export interface EventMsg extends BaseMsg {
   // pokemon_lost
   cause?: LossCause;
   deathsTotal?: number;
+  killer?: Attacker; // who/what KO'd it (faint path only; omitted otherwise)
   // pokemon_lost / capture
   pokemon?: PokemonRef;
   // whiteout
   reason?: WhiteoutReason;
+  // player_death (a NON-whiteout hardcore death — fall/lava/mob/…)
+  deathCause?: string; // DamageSource short id: "fall" | "lava" | "mob" | …
+  deathMessage?: string; // full localized death message — DATA CONTROLLED, escape it
+  killedBy?: string; // the attacking entity's name, when there was one — escape it
   // badge
   badgeId?: string;
   badges?: number;
@@ -212,6 +230,17 @@ function coercePokemonRef(v: unknown): PokemonRef | null {
   return { species, dex: num(m.dex), name: str(m.name), level: num(m.level), shiny: bool(m.shiny) };
 }
 
+// The `killer` attacker on a pokemon_lost. Returns null when there is nothing
+// worth showing (an all-empty object), so the overlay just omits the "by …" line.
+export function coerceAttacker(v: unknown): Attacker | null {
+  const m = obj(v);
+  if (!m) return null;
+  const by = m.by === "wild" || m.by === "trainer" ? m.by : "unknown";
+  const a: Attacker = { by, name: str(m.name), species: str(m.species), dex: num(m.dex), trainer: str(m.trainer) };
+  if (a.by === "unknown" && !a.name && !a.species && !a.trainer) return null;
+  return a;
+}
+
 function err(error: string): ParseResult {
   return { ok: false, error };
 }
@@ -279,6 +308,8 @@ export function parseMessage(raw: unknown): ParseResult {
         if (typeof o.deathsTotal === "number" && Number.isFinite(o.deathsTotal) && o.deathsTotal >= 0) {
           msg.deathsTotal = o.deathsTotal;
         }
+        const killer = coerceAttacker(o.killer);
+        if (killer) msg.killer = killer;
         break;
       }
       case "capture": {
@@ -293,6 +324,16 @@ export function parseMessage(raw: unknown): ParseResult {
           return err(`invalid whiteout reason ${JSON.stringify(o.reason)}`);
         }
         msg.reason = reason as WhiteoutReason;
+        break;
+      }
+      case "player_death": {
+        // A non-whiteout hardcore death. Tolerant of every field: `cause` is a free
+        // DamageSource id (not an enum — new damage types must never break ingest).
+        msg.deathCause = str(o.cause) || "unknown";
+        const dm = str(o.deathMessage);
+        if (dm) msg.deathMessage = dm;
+        const kb = str(o.killedBy);
+        if (kb) msg.killedBy = kb;
         break;
       }
       case "badge": {

@@ -173,6 +173,72 @@ Deno.test("whiteout before any snapshot falls back to Trainer (+ default reason)
   assertEquals(v.memorial[0].cause, "faint");
 });
 
+Deno.test("player_death appends a natural-death player grave carrying cause + killer + message", () => {
+  const st = mkState();
+  st.apply(snapshot(), 1000); // player: "Cole"
+  const e = msg({
+    type: "event",
+    event: "player_death",
+    cause: "mob",
+    deathMessage: "Cole was slain by Zombie",
+    killedBy: "Zombie",
+  });
+  const r = st.apply(e, 1500);
+  assert(r.accepted && r.stateChanged);
+  const v = st.view(1500);
+  assertEquals(v.memorial.length, 1);
+  assertEquals(v.memorial[0], {
+    kind: "player",
+    name: "Cole",
+    species: "",
+    dex: 0,
+    level: 0,
+    cause: "mob",
+    attempt: 1,
+    ts: 1500,
+    killedBy: "Zombie",
+    detail: "Cole was slain by Zombie",
+  });
+  // a NON-whiteout death does not touch the whiteouts counter
+  assertEquals(v.deaths.whiteouts, 0);
+
+  // a dup'd player_death must not double-append the grave
+  const replay = st.apply(e, 2000);
+  assert(replay.dup && !replay.accepted);
+  assertEquals(st.view(2000).memorial.length, 1);
+});
+
+Deno.test("player_death with no cause/killer still records a grave (defaults)", () => {
+  const st = mkState();
+  st.apply(msg({ type: "event", event: "player_death" }), 1000);
+  const v = st.view(1000);
+  assertEquals(v.memorial.length, 1);
+  assertEquals(v.memorial[0].kind, "player");
+  assertEquals(v.memorial[0].name, "Trainer");
+  assertEquals(v.memorial[0].cause, "unknown");
+  assertEquals(v.memorial[0].killedBy, undefined);
+  assertEquals(v.memorial[0].detail, undefined);
+});
+
+Deno.test("pokemon_lost carries the killer onto its memorial entry", () => {
+  const st = mkState();
+  const e = lost("Vee", {
+    cause: "faint",
+    killer: { by: "trainer", trainer: "Rocket Grunt", species: "cobblemon:zubat", dex: 41, name: "Batty" },
+  });
+  st.apply(e, 1000);
+  const v = st.view(1000);
+  assertEquals(v.memorial.length, 1);
+  assertEquals(v.memorial[0].kind, "pokemon");
+  assertEquals(v.memorial[0].killer, {
+    by: "trainer",
+    name: "Batty",
+    species: "cobblemon:zubat",
+    dex: 41,
+    trainer: "Rocket Grunt",
+  });
+});
+
 Deno.test("staleness uses server receive time, never the mod's t field", () => {
   const st = mkState();
   // mod clock (t) is wildly in the past; server receives it "now"
@@ -256,6 +322,35 @@ Deno.test("persistence: player graves keep kind; pre-kind entries load as pokemo
     assertEquals(v.memorial[2].name, "Cole");
     assertEquals(v.memorial[2].cause, "flee");
     assertEquals(v.memorial[2].species, "");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("persistence: killer + natural-death cause survive a round-trip", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "cobblemon-overlay-test" });
+  try {
+    const st = mkState(dir);
+    st.apply(snapshot(), 1000); // player "Cole"
+    st.apply(
+      lost("Vee", { cause: "faint", killer: { by: "wild", species: "cobblemon:zubat", dex: 41, name: "Zubat" } }),
+      1500,
+    );
+    st.apply(
+      msg({ type: "event", event: "player_death", cause: "fall", deathMessage: "Cole fell from a high place" }),
+      1600,
+    );
+    await st.flush();
+
+    const st2 = mkState(dir);
+    await st2.load();
+    const v = st2.view(Date.now());
+    assertEquals(v.memorial.length, 2);
+    assertEquals(v.memorial[0].kind, "pokemon");
+    assertEquals(v.memorial[0].killer, { by: "wild", name: "Zubat", species: "cobblemon:zubat", dex: 41, trainer: "" });
+    assertEquals(v.memorial[1].kind, "player");
+    assertEquals(v.memorial[1].cause, "fall");
+    assertEquals(v.memorial[1].detail, "Cole fell from a high place");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

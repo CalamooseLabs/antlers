@@ -129,8 +129,37 @@ Deno.test("parses each event type", () => {
         assertEquals((m.pokemon as { name: string }).name, "Vee");
       },
     ],
+    [
+      ev("pokemon_lost", {
+        cause: "faint",
+        pokemon: { species: "eevee", dex: 133, name: "Vee", level: 20 },
+        killer: { by: "trainer", trainer: "Rocket Grunt", species: "cobblemon:zubat", dex: 41, name: "Batty" },
+      }),
+      (m) => {
+        const k = m.killer as { by: string; trainer: string; species: string; dex: number; name: string };
+        assertEquals(k.by, "trainer");
+        assertEquals(k.trainer, "Rocket Grunt");
+        assertEquals(k.name, "Batty");
+        assertEquals(k.dex, 41);
+      },
+    ],
     [ev("capture", { pokemon: { species: "zubat", dex: 41 } }), (m) => assertEquals((m.pokemon as { dex: number }).dex, 41)],
     [ev("whiteout", { reason: "flee" }), (m) => assertEquals(m.reason, "flee")],
+    [
+      ev("player_death", { cause: "lava", deathMessage: "Cole tried to swim in lava", killedBy: "" }),
+      (m) => {
+        assertEquals(m.deathCause, "lava");
+        assertEquals(m.deathMessage, "Cole tried to swim in lava");
+        assertEquals(m.killedBy, undefined);
+      },
+    ],
+    [
+      ev("player_death", { cause: "mob", deathMessage: "Cole was slain by Zombie", killedBy: "Zombie" }),
+      (m) => {
+        assertEquals(m.deathCause, "mob");
+        assertEquals(m.killedBy, "Zombie");
+      },
+    ],
     [ev("badge", { badgeId: "gyms/badge_1", badges: 3 }), (m) => {
       assertEquals(m.badgeId, "gyms/badge_1");
       assertEquals(m.badges, 3);
@@ -167,6 +196,17 @@ Deno.test("event validation edges", () => {
   assert(w.ok && w.msg.type === "event");
   assertEquals(w.msg.reason, "faint");
   assert(!parseMessage(ev("whiteout", { reason: "rage_quit" })).ok);
+  // player_death is fully tolerant: cause defaults, any DamageSource id is fine
+  const pd = parseMessage(ev("player_death"));
+  assert(pd.ok && pd.msg.type === "event");
+  assertEquals(pd.msg.deathCause, "unknown");
+  const pd2 = parseMessage(ev("player_death", { cause: "some_new_modded_damage" }));
+  assert(pd2.ok && pd2.msg.type === "event" && pd2.msg.deathCause === "some_new_modded_damage");
+  // a wild killer parses; an empty/garbage killer is dropped (nothing to show)
+  const k = parseMessage(ev("pokemon_lost", { pokemon: { species: "eevee" }, killer: { by: "wild", name: "Zubat" } }));
+  assert(k.ok && k.msg.type === "event" && k.msg.killer?.by === "wild" && k.msg.killer?.name === "Zubat");
+  const nok = parseMessage(ev("pokemon_lost", { pokemon: { species: "eevee" }, killer: {} }));
+  assert(nok.ok && nok.msg.type === "event" && nok.msg.killer === undefined);
   // level_cap requires a numeric cap
   assert(!parseMessage(ev("level_cap")).ok);
   assert(!parseMessage(ev("level_cap", { cap: "36" })).ok);

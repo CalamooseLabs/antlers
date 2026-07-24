@@ -12,6 +12,7 @@
 //  - CSS animations per the plan: HP bars tween on change, faint = grayscale +
 //    cross fade-in, toasts slide/fade, new headstones rise from the ground.
 
+import type { Attacker } from "./protocol.ts";
 import type { GameView, MemorialEntry, PublicState } from "./state.ts";
 import { escapeHtml } from "./util.ts";
 
@@ -45,6 +46,32 @@ function spriteImg(cls, species, dex) {
   return img;
 }
 function shortSpecies(s) { return String(s || '').replace(/^.*:/, ''); }
+// ---- cause-of-death vocabulary (shared by cemetery / graveyard / toasts) ----
+// reasonLabels: a whiteout grave's cause is the battle reason. deathCauseLabels:
+// a natural player_death grave's cause is a Minecraft DamageSource id. Both maps
+// MUST match REASON/DEATH label maps in html.ts. killerLabel/playerCause turn the
+// structured killer + cause into the short line the stones show.
+var reasonLabels = { faint: 'whiteout', flee: 'whiteout · fled', forfeit: 'whiteout · forfeit' };
+var deathCauseLabels = {
+  fall: 'fell', lava: 'burned in lava', inFire: 'burned', onFire: 'burned', hotFloor: 'burned',
+  drown: 'drowned', mob: 'slain', player: 'slain', arrow: 'shot down', trident: 'impaled',
+  fireball: 'fireballed', explosion: 'blown up', cactus: 'pricked to death',
+  sweetBerryBush: 'pricked to death', cramming: 'crammed', fallingBlock: 'crushed', anvil: 'crushed',
+  lightningBolt: 'struck by lightning', starve: 'starved', freeze: 'froze',
+  outOfWorld: 'fell out of the world', wither: 'withered away', magic: 'killed by magic',
+  flyIntoWall: 'hit a wall', dragonBreath: 'scorched by dragon breath', sonic_boom: 'sonic-boomed',
+  fireworks: 'went out with a bang', stalagmite: 'impaled on a stalagmite', dryout: 'dried out'
+};
+function killerLabel(k) {
+  if (!k) return '';
+  if (k.by === 'trainer' && k.trainer) return k.trainer + "'s " + (k.name || 'Pokémon');
+  return k.name || (k.by === 'wild' ? 'a wild Pokémon' : (k.by === 'trainer' ? 'a Trainer' : ''));
+}
+function playerCause(m) {
+  if (m.killedBy) return 'slain by ' + m.killedBy;
+  if (reasonLabels[m.cause]) return reasonLabels[m.cause];
+  return deathCauseLabels[m.cause] || m.cause || 'died';
+}
 `;
 
 function page(title: string, css: string, body: string, js: string): string {
@@ -201,6 +228,9 @@ body.noanim .grave { animation: none; }
 .gname { font-size: 12px; font-weight: 700; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
 .glvl { font-size: 10px; color: #2b333c; }
+/* who/what KO'd it (faint only) — a faint 3rd line under the level */
+.gkiller { font-size: 9px; color: #46525d; margin-top: 1px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
 .mound { height: 6px; margin: 2px -2px 0; background: linear-gradient(#3a4c31, #26331f);
   border-radius: 3px; }
 .stone.player { width: 112px; min-height: 104px; padding: 30px 8px 12px; color: #b7c1cc;
@@ -232,8 +262,9 @@ function stonesFor(attempt) {
   }
   return sec.getElementsByClassName('stones')[0];
 }
+// causeLabels is cemetery-local (past-tense stone verbs); reasonLabels /
+// deathCauseLabels / playerCause / killerLabel come from SHARED_JS.
 var causeLabels = { faint: 'fainted', sacrifice: 'sacrificed', duplicate_release: 'released' };
-var reasonLabels = { faint: 'whiteout', flee: 'whiteout · fled', forfeit: 'whiteout · forfeit' };
 function addStone(m) {
   var g = el('div', 'grave');
   var stone;
@@ -241,7 +272,7 @@ function addStone(m) {
     stone = el('div', 'stone player');
     var pc = el('div', 'pcross'); pc.textContent = '✝'; stone.appendChild(pc);
     var pn = el('div', 'gname'); pn.textContent = m.name || 'Trainer'; stone.appendChild(pn);
-    var rs = el('div', 'glvl'); rs.textContent = reasonLabels[m.cause] || 'whiteout'; stone.appendChild(rs);
+    var rs = el('div', 'glvl'); rs.textContent = playerCause(m); stone.appendChild(rs);
   } else {
     stone = el('div', 'stone');
     var cr = el('div', 'gcross'); cr.textContent = '✝'; stone.appendChild(cr);
@@ -253,6 +284,9 @@ function addStone(m) {
     var lv = el('div', 'glvl');
     lv.textContent = 'Lv ' + m.level + ' · ' + (causeLabels[m.cause] || m.cause);
     stone.appendChild(lv);
+    if (m.killer) {
+      var kl = el('div', 'gkiller'); kl.textContent = 'by ' + killerLabel(m.killer); stone.appendChild(kl);
+    }
   }
   g.appendChild(stone);
   g.appendChild(el('div', 'mound'));
@@ -619,11 +653,12 @@ for (const { floor, win } of FLICKER_WINDOWS) {
     }
   }
 }
-// per-cell buzz timing: different durations/phases so the tubes never sync
+// per-cell buzz timing: different durations/phases so the tubes never sync — long
+// periods so the buzz reads as an occasional slow stutter, not a strobe
 const WFLICK = FLICKER_WINDOWS.map((fw, i) => ({
   cell: towerWindowCell(fw.floor, fw.win),
   cls: ["wf-a", "wf-b", "wf-c"][i],
-  anim: ["tubeBuzz 2.9s steps(1) infinite", "tubeBuzz 3.7s steps(1) infinite .7s", "tubeBuzz 3.3s steps(1) infinite 1.3s"][i],
+  anim: ["tubeBuzz 6.3s steps(1) infinite", "tubeBuzz 8.1s steps(1) infinite 1.5s", "tubeBuzz 7.1s steps(1) infinite 2.7s"][i],
 }));
 const WFLICK_CSS = WFLICK.map((w) =>
   `.${w.cls} { left: ${w.cell.left}px; top: ${w.cell.top}px; animation: ${w.anim}; }`
@@ -807,7 +842,7 @@ ${WFLICK_CSS}
 .lamp::after { box-shadow: ${LAMP_GLOW_SHADOW}; }
 /* one bad lamp blinks its glow layer — same dying-tube treatment as the
    windows, on its own period/phase so they never sync */
-.lamp-flicker::after { animation: lampBuzz 3.9s steps(1) infinite .2s; }
+.lamp-flicker::after { animation: lampBuzz 8.5s steps(1) infinite .4s; }
 @keyframes lampBuzz { 0%, 100% { opacity: 1; } 13% { opacity: 0; } 17% { opacity: 1; } 42% { opacity: 0; } 43% { opacity: 1; } 47% { opacity: 0; } 56% { opacity: 1; } 84% { opacity: 0; } 86% { opacity: 1; } }
 /* grove trees ride a few game px above the lamps' bottom-28px ground line and
    shrink a notch (bottom-anchored scale) — pushed further back in depth, still
@@ -918,9 +953,10 @@ var tooltips = qs.get('tooltips') === '1';
 var maxRaw = qs.get('max') || '';
 var maxStones = /^[0-9]+$/.test(maxRaw) ? parseInt(maxRaw, 10) : 0;
 var scene = document.getElementById('scene');
-// cause labels — MUST match GRAVE_CAUSE_LABELS / WHITEOUT_LABELS in html.ts
+// cause labels — MUST match GRAVE_CAUSE_LABELS in html.ts; reasonLabels /
+// deathCauseLabels / playerCause / killerLabel live in SHARED_JS (server twins
+// WHITEOUT_LABELS / DEATH_CAUSE_LABELS / playerGraveCause / killerLabelServer).
 var causeLabels = { faint: 'fainted', sacrifice: 'sacrificed', duplicate_release: 'released' };
-var reasonLabels = { faint: 'whiteout', flee: 'whiteout · fled', forfeit: 'whiteout · forfeit' };
 // server-rendered sprites that 404'd: drop them (matches the client fallback)
 (function () {
   var imgs = [].slice.call(scene.getElementsByClassName('gsprite'));
@@ -942,13 +978,18 @@ function placeGrave(ts) {
   return { row: row, leftPct: 3 + ((h >>> 10) % 87), dx: ((h >>> 2) % 25) - 12, dy: rows[row][0], rot: ((h >>> 7) % 7) - 3, scale: rows[row][1] };
 }
 // tip content (nickname + how they died) — MUST match the tip branch of
-// graveHtml() in html.ts
+// graveHtml() in html.ts. Pokemon: cause + who KO'd it; player: the full death
+// message when there is one (natural death), else the short cause (whiteout).
 function tipFor(m) {
   var tip = el('div', 'tip');
   var n = el('b', 'tip-n');
   n.textContent = m.kind === 'player' ? (m.name || 'Trainer') : (m.name || shortSpecies(m.species));
   var c = el('span', 'tip-c');
-  c.textContent = m.kind === 'player' ? (reasonLabels[m.cause] || 'whiteout') : (causeLabels[m.cause] || m.cause);
+  if (m.kind === 'player') {
+    c.textContent = m.detail || playerCause(m);
+  } else {
+    c.textContent = (causeLabels[m.cause] || m.cause) + (m.killer ? ' · by ' + killerLabel(m.killer) : '');
+  }
   tip.appendChild(n); tip.appendChild(c);
   return tip;
 }
@@ -990,8 +1031,9 @@ function render(s) {
   known = s.memorial.length;
 }
 connect({ state: render });
-// Tooltip spotlight: one grave's name bubble at a time, a couple seconds each,
-// looping in burial order. Re-queries per tick so new graves join the rotation.
+// Tooltip spotlight: one grave's name bubble at a time, ~5 seconds each (slow
+// enough to actually read the cause of death), looping in burial order.
+// Re-queries per tick so new graves join the rotation.
 if (tooltips) {
   var cycleIdx = -1;
   var cycleTip = function () {
@@ -1002,12 +1044,14 @@ if (tooltips) {
     poss[cycleIdx].classList.add('tipshow');
   };
   cycleTip();
-  setInterval(cycleTip, 2500);
+  setInterval(cycleTip, 5000);
 }
 `;
 
 const ROW_CLASSES = ["g-back", "g-mid", "g-front"] as const;
-// cause labels — MUST match causeLabels / reasonLabels in GRAVEYARD_JS
+// cause labels — server twins of the SHARED_JS / GRAVEYARD_JS maps; MUST match:
+// GRAVE_CAUSE_LABELS ↔ causeLabels, WHITEOUT_LABELS ↔ reasonLabels,
+// DEATH_CAUSE_LABELS ↔ deathCauseLabels.
 const GRAVE_CAUSE_LABELS: Record<string, string> = {
   faint: "fainted",
   sacrifice: "sacrificed",
@@ -1018,6 +1062,28 @@ const WHITEOUT_LABELS: Record<string, string> = {
   flee: "whiteout · fled",
   forfeit: "whiteout · forfeit",
 };
+const DEATH_CAUSE_LABELS: Record<string, string> = {
+  fall: "fell", lava: "burned in lava", inFire: "burned", onFire: "burned", hotFloor: "burned",
+  drown: "drowned", mob: "slain", player: "slain", arrow: "shot down", trident: "impaled",
+  fireball: "fireballed", explosion: "blown up", cactus: "pricked to death",
+  sweetBerryBush: "pricked to death", cramming: "crammed", fallingBlock: "crushed", anvil: "crushed",
+  lightningBolt: "struck by lightning", starve: "starved", freeze: "froze",
+  outOfWorld: "fell out of the world", wither: "withered away", magic: "killed by magic",
+  flyIntoWall: "hit a wall", dragonBreath: "scorched by dragon breath", sonic_boom: "sonic-boomed",
+  fireworks: "went out with a bang", stalagmite: "impaled on a stalagmite", dryout: "dried out",
+};
+
+// Server twins of killerLabel / playerCause in SHARED_JS (kept identical so the
+// server-rendered stones and the SSE-appended ones read the same).
+function killerLabelServer(k: Attacker): string {
+  if (k.by === "trainer" && k.trainer) return `${k.trainer}'s ${k.name || "Pokémon"}`;
+  return k.name || (k.by === "wild" ? "a wild Pokémon" : (k.by === "trainer" ? "a Trainer" : ""));
+}
+function playerGraveCause(m: MemorialEntry): string {
+  if (m.killedBy) return `slain by ${m.killedBy}`;
+  if (WHITEOUT_LABELS[m.cause]) return WHITEOUT_LABELS[m.cause];
+  return DEATH_CAUSE_LABELS[m.cause] ?? m.cause ?? "died";
+}
 
 // One server-rendered grave. Classes and nesting MUST match addGrave()/tipFor()
 // in GRAVEYARD_JS (the SSE-append half of the same scene). EVERY player-
@@ -1030,8 +1096,9 @@ function graveHtml(m: MemorialEntry, tooltips: boolean): string {
     ? (m.name || "Trainer")
     : (m.name || m.species.replace(/^.*:/, "")); // shortSpecies, as in SHARED_JS
   const tipCause = m.kind === "player"
-    ? (WHITEOUT_LABELS[m.cause] ?? "whiteout")
-    : (GRAVE_CAUSE_LABELS[m.cause] ?? m.cause);
+    ? (m.detail ?? playerGraveCause(m)) // natural death → full message; whiteout → short cause
+    : (GRAVE_CAUSE_LABELS[m.cause] ?? m.cause) +
+      (m.killer ? ` · by ${killerLabelServer(m.killer)}` : "");
   const tip = tooltips
     ? `<div class="tip"><b class="tip-n">${escapeHtml(tipName)}</b>` +
       `<span class="tip-c">${escapeHtml(tipCause)}</span></div>`
@@ -1185,6 +1252,13 @@ const TOASTS_CSS = `
 .toast.whiteout .title { font-size: 26px; }
 @keyframes slam { from { transform: scale(2.2); opacity: 0; }
   to { transform: scale(1); opacity: 1; } }
+/* a natural hardcore death (fall/lava/mob/…): the same slam as a whiteout but
+   deeper red, with the death message as its subtitle */
+.toast.death { width: 100%; max-width: none; justify-content: center; text-align: center;
+  border: 2px solid #b3212a; background: rgba(40,8,10,.95);
+  letter-spacing: 3px; animation: slam .5s cubic-bezier(.2,1.4,.3,1) both; }
+.toast.death .title { font-size: 22px; }
+.toast.death .sub { font-size: 13px; letter-spacing: 1px; color: #d98a8f; }
 .toast.attempt { width: 100%; max-width: none; justify-content: center;
   border-left-color: #b18cff; background: rgba(38,23,64,.95);
   letter-spacing: 2px; }
@@ -1223,7 +1297,12 @@ function onGame(ev) {
   if (ev.event === 'pokemon_lost') {
     var t1 = makeToast('loss');
     withSprite(t1, p);
-    lines(t1, nm + ' has fallen', 'Lv ' + (p.level || '?') + ' · ' + (causeLabels[ev.cause] || ev.cause));
+    var lost = 'Lv ' + (p.level || '?') + ' · ' + (causeLabels[ev.cause] || ev.cause);
+    if (ev.killer) lost += ' · by ' + killerLabel(ev.killer);
+    lines(t1, nm + ' has fallen', lost);
+  } else if (ev.event === 'player_death') {
+    var td = makeToast('death');
+    lines(td, 'YOU DIED', ev.deathMessage || (ev.killedBy ? 'Slain by ' + ev.killedBy : (deathCauseLabels[ev.cause] || ev.cause || '')));
   } else if (ev.event === 'capture') {
     var t2 = makeToast('capture');
     withSprite(t2, p);
@@ -1270,7 +1349,7 @@ h1 { font-size: 18px; letter-spacing: 1px; }
 <ul>
 <li><a href="/overlay/party">/overlay/party</a> — party bar (6 cards, sprites, HP)</li>
 <li><a href="/overlay/cemetery">/overlay/cemetery</a> — the graveyard (<a href="/overlay/cemetery?compact=1">?compact=1</a> = counter only)</li>
-<li><a href="/overlay/graveyard">/overlay/graveyard</a> — Lavender-Town pixel graveyard scene: The Company, Inc. tower looming behind the graves (lit windows shift, a few buzz like dying tubes), a parking-lot lamp row (one flickering) against big backdrop trees, blooming lavender flowers, drifting mist, sprite-faced stones (<a href="/overlay/graveyard?tooltips=1">?tooltips=1</a> = cycling name + cause-of-death textbox, one grave at a time; ?max=N = newest N)</li>
+<li><a href="/overlay/graveyard">/overlay/graveyard</a> — Lavender-Town pixel graveyard scene: The Company, Inc. tower looming behind the graves (lit windows shift, a few buzz like dying tubes), a parking-lot lamp row (one flickering) against big backdrop trees, blooming lavender flowers, drifting mist, sprite-faced stones (<a href="/overlay/graveyard?tooltips=1">?tooltips=1</a> = cycling name + cause-of-death textbox, one grave at a time — who/what KO'd each Pokémon, and how the trainer themselves died; ?max=N = newest N)</li>
 <li><a href="/overlay/badges">/overlay/badges</a> — badges + level cap</li>
 <li><a href="/overlay/toasts">/overlay/toasts</a> — live event toasts</li>
 <li><a href="/status">/status</a> — debug view</li>

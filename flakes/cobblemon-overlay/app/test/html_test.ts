@@ -434,12 +434,12 @@ Deno.test("graveyard flicker: buzzing tower windows are pixel-aligned; one lamp 
     const gaps = mids.slice(1).map((s, i) => s - mids[i]);
     assert(new Set(gaps).size >= 3, name + " keyframe gaps are uneven, not a metronome");
   }
-  assertStringIncludes(html, "animation: tubeBuzz 2.9s steps(1) infinite;");
-  assertStringIncludes(html, "animation: tubeBuzz 3.7s steps(1) infinite .7s;");
-  assertStringIncludes(html, "animation: tubeBuzz 3.3s steps(1) infinite 1.3s;");
+  assertStringIncludes(html, "animation: tubeBuzz 6.3s steps(1) infinite;");
+  assertStringIncludes(html, "animation: tubeBuzz 8.1s steps(1) infinite 1.5s;");
+  assertStringIncludes(html, "animation: tubeBuzz 7.1s steps(1) infinite 2.7s;");
   // exactly one lamp in the row flickers, on its own period/phase
   assertStringIncludes(html, `class="lamp lamp-flicker"`);
-  assertStringIncludes(html, ".lamp-flicker::after { animation: lampBuzz 3.9s steps(1) infinite .2s; }");
+  assertStringIncludes(html, ".lamp-flicker::after { animation: lampBuzz 8.5s steps(1) infinite .4s; }");
 });
 
 Deno.test("graveyard markers are pixelArt box-shadows; tooltip is a GB textbox", () => {
@@ -591,6 +591,42 @@ Deno.test("graveyard bubbles carry the cause of death for every variant", () => 
   assertStringIncludes(on, `<b class="tip-n">Trainer</b><span class="tip-c">whiteout</span>`);
 });
 
+Deno.test("graveyard bubbles show who/what KO'd a Pokémon and how the trainer died", () => {
+  const view = graveyardView([
+    // wild KO
+    { kind: "pokemon", name: "Vee", species: "eevee", dex: 133, level: 11, cause: "faint", attempt: 1, ts: 1111, killer: { by: "wild", name: "Zubat", species: "cobblemon:zubat", dex: 41, trainer: "" } },
+    // trainer's mon KO
+    { kind: "pokemon", name: "Sparky", species: "pikachu", dex: 25, level: 14, cause: "faint", attempt: 1, ts: 1222, killer: { by: "trainer", name: "Batty", trainer: "Rocket Grunt", species: "cobblemon:zubat", dex: 41 } },
+    // natural death: full message shown
+    { kind: "player", name: "Cole", species: "", dex: 0, level: 0, cause: "mob", attempt: 1, ts: 2000, killedBy: "Zombie", detail: "Cole was slain by Zombie" },
+    // environmental death, no message → humanized cause
+    { kind: "player", name: "Cole", species: "", dex: 0, level: 0, cause: "lava", attempt: 1, ts: 2100 },
+  ]);
+  const on = renderGraveyardPage(view, { tooltips: true, max: 0 });
+  assertStringIncludes(on, `<b class="tip-n">Vee</b><span class="tip-c">fainted · by Zubat</span>`);
+  assertStringIncludes(on, `<b class="tip-n">Sparky</b><span class="tip-c">fainted · by Rocket Grunt&#39;s Batty</span>`);
+  assertStringIncludes(on, `<b class="tip-n">Cole</b><span class="tip-c">Cole was slain by Zombie</span>`);
+  assertStringIncludes(on, `<span class="tip-c">burned in lava</span>`);
+});
+
+Deno.test("graveyard: a hostile death message is escaped in the bubble", () => {
+  const evil = `<script>alert("x")</script>`;
+  const view = graveyardView([
+    { kind: "player", name: "Cole", species: "", dex: 0, level: 0, cause: "mob", attempt: 1, ts: 2000, detail: evil },
+  ]);
+  const on = renderGraveyardPage(view, { tooltips: true, max: 0 });
+  assert(!on.includes(evil), "raw death-message markup must never appear");
+  assert(!on.includes("<script>alert"), "no unescaped script tag anywhere");
+  assertStringIncludes(on, "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;");
+});
+
+Deno.test("toasts: loss shows the killer; a natural death gets its own YOU DIED toast", () => {
+  assertStringIncludes(TOASTS_HTML, ".toast.death");
+  assertStringIncludes(TOASTS_HTML, "'YOU DIED'");
+  assertStringIncludes(TOASTS_HTML, "ev.event === 'player_death'");
+  assertStringIncludes(TOASTS_HTML, "if (ev.killer) lost += ' · by ' + killerLabel(ev.killer);");
+});
+
 Deno.test("graveyard tooltips cycle one grave at a time (hidden at rest, spotlight class)", () => {
   const on = renderGraveyardPage(
     graveyardView([mon("Vee", "eevee", 133, 1111)]),
@@ -599,7 +635,7 @@ Deno.test("graveyard tooltips cycle one grave at a time (hidden at rest, spotlig
   // Bubbles ship hidden; only the cycler's tipshow class reveals one at a time.
   assertStringIncludes(on, "opacity: 0", ".tip must be hidden at rest");
   assertStringIncludes(on, ".gpos.tipshow .tip { opacity: 1; }");
-  assertStringIncludes(on, "setInterval(cycleTip, 2500)");
+  assertStringIncludes(on, "setInterval(cycleTip, 5000)");
   assertStringIncludes(on, "classList.remove('tipshow')");
   assert(
     on.indexOf("cycleTip();") < on.indexOf("setInterval(cycleTip"),
