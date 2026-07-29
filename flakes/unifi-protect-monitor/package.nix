@@ -40,10 +40,11 @@
 
   # denort runtime that `deno compile` needs for the target triple. Pinned to
   # `deno.version`; the denort release tracks deno, so refresh this hash whenever nixpkgs
-  # bumps deno. Last updated for deno 2.8.3 (same hash as vibe-server / robomoose).
+  # bumps deno. Last updated for deno 2.8.3 (real v2.8.3 denort-x86_64 zip; same
+  # hash as vibe-server / cobblemon-overlay / lanserver).
   denortZip = fetchurl {
     url = "https://dl.deno.land/release/v${deno.version}/denort-${target}.zip";
-    hash = "sha256-qpgM4qrhv9dx6og0e8oW4qEqiWdsO+DAR4yzvE1tYkE=";
+    hash = "sha256-IU0KQBDJxEMmqC6n/DeFwYmkPNg1Z9kaqk3OOWR1mVQ=";
   };
 in
   stdenv.mkDerivation {

@@ -94,7 +94,10 @@ export async function handler(req: Request, deps: Deps): Promise<Response> {
     const name = path.slice("/sprites/".length);
     // No nested paths: the slug sanitizer strips "/" anyway, but reject early.
     if (name.includes("/")) return json({ error: "not found" }, 404);
-    return await deps.sprites.serve(name, url.searchParams.get("dex"));
+    return await deps.sprites.serve(name, url.searchParams.get("dex"), {
+      shiny: url.searchParams.get("shiny") === "1",
+      aspects: (url.searchParams.get("form") ?? "").split(",").filter(Boolean),
+    });
   }
 
   return json({ error: "not found" }, 404);

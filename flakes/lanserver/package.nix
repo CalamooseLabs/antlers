@@ -27,8 +27,10 @@
     or (throw "lanserver: unsupported system ${system}");
 
   # Pre-resolve the Deno module graph as a fixed-output derivation. main.ts has
-  # no external dependencies today, so the output is empty and the hash is
-  # stable; keeping the step means added deps continue to build (FODs may fetch).
+  # no external dependencies, but `deno cache` still writes a source-keyed cache,
+  # so this hash must be refreshed whenever files under ./app change OR on a deno
+  # bump (unlike vibe-server, lanserver's output DID change 2.8.2 → 2.8.3).
+  # Keeping the step means added deps continue to build (FODs may fetch).
   denoCache = stdenv.mkDerivation {
     name = "lanserver-deno-cache";
     inherit src;
@@ -46,13 +48,16 @@
     '';
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-q3xpfINCm+gncze+AGzjibmpuN+4GT5ZBDb3O4aTgbA=";
+    outputHash = "sha256-1nEEnxCCsVqcYEifnMiLScglhV0l5bhtBb29lmZO+4s=";
   };
 
-  # denort runtime that `deno compile` needs for the target triple.
+  # denort runtime that `deno compile` needs for the target triple. Pinned to
+  # `deno.version`; the denort release tracks deno, so refresh this hash whenever
+  # nixpkgs bumps deno. Last updated for deno 2.8.3 (same v2.8.3 denort-x86_64 zip
+  # the other antlers Deno flakes pin).
   denortZip = fetchurl {
     url = "https://dl.deno.land/release/v${deno.version}/denort-${target}.zip";
-    hash = "sha256-qCuGkPfCb23wgFoRReAhCPQ3o6GtagWnIyuuAdqw7Ns=";
+    hash = "sha256-IU0KQBDJxEMmqC6n/DeFwYmkPNg1Z9kaqk3OOWR1mVQ=";
   };
 in
   stdenv.mkDerivation {

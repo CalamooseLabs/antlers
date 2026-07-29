@@ -36,6 +36,7 @@ import {
   type QuestInfo,
   type SnapshotMsg,
   str,
+  strArray,
   type WorldInfo,
   zeroDeaths,
   zeroProgress,
@@ -57,6 +58,8 @@ export interface MemorialEntry {
   cause: string;
   attempt: number;
   ts: number; // server receive time
+  shiny?: boolean; // pokemon graves: shiny variant (drives the grave sprite)
+  aspects?: string[]; // pokemon graves: Cobblemon aspects → regional-form grave sprite
   killer?: Attacker; // pokemon graves (faint): who/what KO'd it
   killedBy?: string; // player graves (natural death): the attacking entity — escape it
   detail?: string; // player graves (natural death): the full death message — escape it
@@ -243,6 +246,8 @@ export class OverlayState {
           cause: msg.cause!,
           attempt: this.#attempt,
           ts: receivedAt,
+          ...(p.shiny ? { shiny: true } : {}),
+          ...(p.aspects && p.aspects.length ? { aspects: p.aspects } : {}),
           ...(msg.killer ? { killer: msg.killer } : {}),
         });
         if (msg.deathsTotal !== undefined) this.#deaths.total = msg.deathsTotal;
@@ -469,6 +474,8 @@ export class OverlayState {
           const species = str(m.species);
           if (!species) return [];
           const killer = coerceAttacker(m.killer);
+          const shiny = bool(m.shiny);
+          const aspects = strArray(m.aspects);
           return [{
             kind: "pokemon",
             name: str(m.name) || species,
@@ -478,6 +485,8 @@ export class OverlayState {
             cause: ["faint", "sacrifice", "duplicate_release"].includes(cause) ? cause : "faint",
             attempt: Math.max(1, num(m.attempt, 1)),
             ts: num(m.ts),
+            ...(shiny ? { shiny: true } : {}),
+            ...(aspects.length ? { aspects } : {}),
             ...(killer ? { killer } : {}),
           }];
         })

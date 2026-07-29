@@ -39,10 +39,18 @@ function connect(handlers) {
   if (handlers.game) es.addEventListener('game', function (e) { handlers.game(JSON.parse(e.data)); });
   return es;
 }
-function spriteImg(cls, species, dex) {
+// p carries { species, dex, shiny?, aspects? } — the shiny flag + Cobblemon
+// aspects ride along so the server picks the regional-form / shiny box icon.
+function spriteUrl(p) {
+  var u = '/sprites/' + encodeURIComponent(String(p.species || '')) + '.png?dex=' + (p.dex > 0 ? Math.floor(p.dex) : 0);
+  if (p.shiny) u += '&shiny=1';
+  if (p.aspects && p.aspects.length) u += '&form=' + encodeURIComponent(p.aspects.join(','));
+  return u;
+}
+function spriteImg(cls, p) {
   var img = el('img', cls);
   img.alt = '';
-  img.src = '/sprites/' + encodeURIComponent(String(species || '')) + '.png?dex=' + (dex > 0 ? Math.floor(dex) : 0);
+  img.src = spriteUrl(p);
   return img;
 }
 function shortSpecies(s) { return String(s || '').replace(/^.*:/, ''); }
@@ -143,7 +151,7 @@ function setSprite(c, m) {
   if (c.key === key) return;
   c.key = key;
   c.sb.textContent = '';
-  var img = spriteImg('sprite', m.species, m.dex);
+  var img = spriteImg('sprite', m);
   (function (box, member) {
     img.addEventListener('error', function () {
       var t = el('div', 'sprite-fallback');
@@ -276,7 +284,7 @@ function addStone(m) {
   } else {
     stone = el('div', 'stone');
     var cr = el('div', 'gcross'); cr.textContent = '✝'; stone.appendChild(cr);
-    var img = spriteImg('gsprite', m.species, m.dex);
+    var img = spriteImg('gsprite', m);
     img.addEventListener('error', function () { img.remove(); });
     stone.appendChild(img);
     var nm = el('div', 'gname'); nm.textContent = m.name || shortSpecies(m.species);
@@ -1009,13 +1017,13 @@ function addGrave(m) {
   } else if (m.cause === 'sacrifice') {
     stone = el('div', 'stone stake');
     var plank = el('div', 'plank');
-    var simg = spriteImg('gsprite', m.species, m.dex);
+    var simg = spriteImg('gsprite', m);
     simg.addEventListener('error', function () { simg.remove(); });
     plank.appendChild(simg);
     stone.appendChild(plank);
   } else {
     stone = el('div', 'stone');
-    var img = spriteImg('gsprite', m.species, m.dex);
+    var img = spriteImg('gsprite', m);
     img.addEventListener('error', function () { img.remove(); });
     stone.appendChild(img);
   }
@@ -1105,7 +1113,9 @@ function graveHtml(m: MemorialEntry, tooltips: boolean): string {
     : "";
   const sprite = `<img class="gsprite" alt="" src="/sprites/${
     escapeHtml(encodeURIComponent(m.species))
-  }.png?dex=${m.dex > 0 ? Math.floor(m.dex) : 0}" />`;
+  }.png?dex=${m.dex > 0 ? Math.floor(m.dex) : 0}${m.shiny ? "&shiny=1" : ""}${
+    m.aspects && m.aspects.length ? `&form=${escapeHtml(encodeURIComponent(m.aspects.join(",")))}` : ""
+  }" />`;
   const stone = m.kind === "player"
     ? `<div class="stone player"><div class="pcross"></div></div>`
     : m.cause === "sacrifice"
@@ -1287,7 +1297,7 @@ function lines(t, title, sub) {
   t.appendChild(box);
 }
 function withSprite(t, p) {
-  var img = spriteImg('tsprite', p.species, p.dex);
+  var img = spriteImg('tsprite', p);
   img.addEventListener('error', function () { img.remove(); });
   t.appendChild(img);
 }
@@ -1375,7 +1385,9 @@ export function renderStatusPage(view: PublicState, extra: StatusExtras): string
 
   const partyRows = view.party.map((m) =>
     `<tr><td>${m.slot}</td><td>${escapeHtml(m.name || m.species)}</td>` +
-    `<td>${escapeHtml(m.species)}</td><td>${m.dex}</td><td>${m.level}</td>` +
+    `<td>${escapeHtml(m.species)}${
+      m.aspects && m.aspects.length ? ` (${escapeHtml(m.aspects.join(", "))})` : ""
+    }</td><td>${m.dex}</td><td>${m.level}</td>` +
     `<td>${m.hp}/${m.maxHp}</td><td>${m.fainted ? "✝" : ""}${m.shiny ? "★" : ""}</td></tr>`
   ).join("");
 

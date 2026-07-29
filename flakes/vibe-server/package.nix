@@ -55,10 +55,11 @@
   # denort runtime that `deno compile` needs for the target triple.
   # NOTE: the URL is pinned to `deno.version`, so this hash must be refreshed
   # whenever nixpkgs bumps deno (the denort release tracks the deno version).
-  # Last updated for deno 2.8.3.
+  # Last updated for deno 2.8.3 (real v2.8.3 denort-x86_64 zip; the same hash the
+  # cobblemon-overlay / unifi-protect-monitor / lanserver flakes now pin).
   denortZip = fetchurl {
     url = "https://dl.deno.land/release/v${deno.version}/denort-${target}.zip";
-    hash = "sha256-qpgM4qrhv9dx6og0e8oW4qEqiWdsO+DAR4yzvE1tYkE=";
+    hash = "sha256-IU0KQBDJxEMmqC6n/DeFwYmkPNg1Z9kaqk3OOWR1mVQ=";
   };
 in
   stdenv.mkDerivation {

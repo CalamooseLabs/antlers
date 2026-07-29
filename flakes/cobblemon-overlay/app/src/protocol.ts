@@ -79,6 +79,7 @@ export interface PartyMember {
   maxHp: number;
   fainted: boolean;
   shiny: boolean;
+  aspects?: string[]; // Cobblemon aspects (["hisuian"], …) → regional-form / shiny sprite
   gender: string;
   heldItem: string; // "" = none/unknown
 }
@@ -90,6 +91,7 @@ export interface PokemonRef {
   name: string; // nickname — PLAYER CONTROLLED
   level: number;
   shiny: boolean;
+  aspects?: string[]; // Cobblemon aspects → regional-form / shiny sprite
 }
 
 // Who/what KO'd a party member — the `killer` on a faint-path pokemon_lost. The
@@ -169,6 +171,20 @@ export function bool(v: unknown, d = false): boolean {
   return typeof v === "boolean" ? v : d;
 }
 
+// Cobblemon "aspects" (e.g. ["hisuian"], ["alolan", "female"]) — the tokens that
+// drive regional-form / shiny sprite selection in sprites.ts. Tolerant: a
+// non-array yields [], non-string / empty items are dropped, and the list is
+// capped so a hostile push can't balloon the party/memorial.
+export function strArray(v: unknown, max = 16): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const item of v) {
+    if (typeof item === "string" && item) out.push(item);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 function obj(v: unknown): Record<string, unknown> | null {
   return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
@@ -217,6 +233,7 @@ export function coercePartyMember(v: unknown, index = 0): PartyMember | null {
     maxHp: num(m.maxHp),
     fainted: bool(m.fainted),
     shiny: bool(m.shiny),
+    aspects: strArray(m.aspects),
     gender: str(m.gender),
     heldItem: str(m.heldItem),
   };
@@ -227,7 +244,14 @@ function coercePokemonRef(v: unknown): PokemonRef | null {
   if (!m) return null;
   const species = str(m.species);
   if (!species) return null;
-  return { species, dex: num(m.dex), name: str(m.name), level: num(m.level), shiny: bool(m.shiny) };
+  return {
+    species,
+    dex: num(m.dex),
+    name: str(m.name),
+    level: num(m.level),
+    shiny: bool(m.shiny),
+    aspects: strArray(m.aspects),
+  };
 }
 
 // The `killer` attacker on a pokemon_lost. Returns null when there is nothing
