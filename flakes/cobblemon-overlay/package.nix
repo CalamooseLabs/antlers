@@ -7,10 +7,12 @@
 # `deno compile`. app/src/main.ts has ZERO external imports, so the deno-cache
 # step needs no network and builds under the sandbox (its FOD output is empty).
 #
-# PLUS the box sprites VENDORED in ./sprites (from msikma/pokesprite — no external
-# fetch, no hash to maintain): the gen-8 regular icons (INCLUDING regional-form
-# slugs like growlithe-hisui.png), the parallel shiny/ icon set, + the dex→slug
-# data file are installed to $out/share/cobblemon-overlay/sprites — TRIMMED of the
+# PLUS the box sprites VENDORED in ./sprites (from msikma/pokesprite for gen 1–8
+# and the National Pokédex Version Delta project for gen 9 — no external fetch, no
+# hash to maintain): the gen 1–9 regular icons (INCLUDING regional-form slugs like
+# growlithe-hisui.png and gen-9 form slugs like ogerpon-wellspring-mask.png), the
+# parallel shiny/ icon set, + the dex→slug data file are installed to
+# $out/share/cobblemon-overlay/sprites — TRIMMED of the
 # large transparent margins the 68×56 canvases carry (imagemagick, at install
 # time), so an icon's content box is its actual art and the overlay pages can size
 # sprites to their housings. sprites.ts resolves a Pokémon's Cobblemon aspects →
@@ -79,11 +81,13 @@
     hash = "sha256-IU0KQBDJxEMmqC6n/DeFwYmkPNg1Z9kaqk3OOWR1mVQ=";
   };
 
-  # Sprite source: VENDORED in ./sprites (from msikma/pokesprite) — regular/ box
-  # icons keyed by slug incl. regional-form slugs (growlithe-hisui.png, …), the
-  # parallel shiny/ set, and pokemon.json (dex→slug map). No fetch, no hash. Sprite
-  # images are © Nintendo/Creatures/GAME FREAK (fan-work terms per ./sprites/LICENSE);
-  # pokesprite's own code/data are MIT — thanks to msikma. See ./sprites/README.md.
+  # Sprite source: VENDORED in ./sprites — regular/ box icons keyed by slug for
+  # national dex gen 1–9 incl. regional-form slugs (growlithe-hisui.png, …), the
+  # parallel shiny/ set, and pokemon.json (dex→slug map). No fetch, no hash. gen 1–8
+  # from msikma/pokesprite; gen 9 from the National Pokédex Version Delta project
+  # (resized to pokesprite's 68×56 canvas). Sprite images are © Nintendo/Creatures/
+  # GAME FREAK (fan-work terms per ./sprites/LICENSE); pokesprite's own code/data are
+  # MIT — thanks to msikma and the delta project. See ./sprites/README.md.
   spriteSrc = ./sprites;
 in
   stdenv.mkDerivation {
@@ -131,11 +135,11 @@ in
     installPhase = ''
       mkdir -p $out/bin $out/share/cobblemon-overlay/sprites/shiny
       install -m0755 cobblemon-overlay $out/bin/cobblemon-overlay
-      # gen-8 box icons, keyed by slug (regional-form slugs like growlithe-hisui.png
-      # are included; ./sprites already excludes the female/ variant subdir), the
-      # parallel shiny/ set (sprites.ts reads it for the shiny variants), + the
-      # dex→slug map that backs the overlay's dex-number fallback. module.nix
-      # defaults spriteDir to this dir.
+      # gen 1–9 box icons, keyed by slug (regional-form slugs like growlithe-hisui.png
+      # and gen-9 form slugs are included; ./sprites carries no female/ variant subdir
+      # — the overlay has no gender-based sprite selection), the parallel shiny/ set
+      # (sprites.ts reads it for the shiny variants), + the dex→slug map that backs the
+      # overlay's dex-number fallback. module.nix defaults spriteDir to this dir.
       cp ${spriteSrc}/regular/*.png $out/share/cobblemon-overlay/sprites/
       cp ${spriteSrc}/shiny/*.png $out/share/cobblemon-overlay/sprites/shiny/
       # Trim the large transparent margins the 68×56 pokesprite canvases carry

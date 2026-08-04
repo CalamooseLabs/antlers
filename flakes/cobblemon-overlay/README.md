@@ -86,11 +86,14 @@ when it detects a reset (the mod never sends it).
 `401` / `413` (body over 64 KiB) / `405`.
 
 **Sprites**: the mod only sends ids (`species` + `dex`). The overlay maps them
-to bundled [msikma/pokesprite](https://github.com/msikma/pokesprite) gen-8 box
-icons (fetched at *build* time — zero internet dependency on stream night):
-slug match first (lowercase, strip `cobblemon:`; a dash-less loose index covers
-`mrmime` → `mr-mime`), `dex` number as fallback, and a clean 404 otherwise —
-the pages then fall back to text, never a broken card.
+to bundled national-dex **gen 1–9** box icons ([msikma/pokesprite](https://github.com/msikma/pokesprite)
+for gen 1–8, the [National Pokédex Version Delta](https://www.deviantart.com/mbcmechachu/art/National-Pokedex-Icon-Dex-824897934)
+project for gen 9; vendored in `./sprites`, so zero internet dependency at build
+*or* stream time): slug match first (lowercase, strip `cobblemon:`; a dash-less
+loose index covers `mrmime` → `mr-mime`), `dex` number as fallback, and a clean
+404 otherwise — the pages then fall back to text, never a broken card. (Some
+gen-9 *alternate-form* icons ship but only render when the mod sends a matching
+Cobblemon aspect — see `sprites/README.md` and `src/sprites.ts` `FORM_ASPECTS`.)
 
 ## Endpoints
 
