@@ -64,6 +64,13 @@
     mkMoosefetch = pkgs.callPackage ./flakes/moosefetch/package.nix {};
     moosefetch = mkMoosefetch {};
 
+    # moosewire — dual-pane SSH/SCP file-mover TUI (Rust/ratatui). Left pane =
+    # local, right pane = a remote host reached over ONE ssh ControlMaster
+    # connection (one Yubikey touch); listings via `find`, copies via `scp`.
+    # The repo's first Rust package (rustPlatform.buildRustPackage). The baked
+    # host list is supplied downstream by cala-m-os's modules/moosewire.
+    moosewire = pkgs.callPackage ./flakes/moosewire/package.nix {};
+
     # proton-secrets — headless Proton Pass CLI (`pass-cli`) wrapper + an
     # agenix-shaped, activation-time secret-decryption NixOS module
     # (services.proton-secrets). The bundled proton-pass-cli is UNFREE.
@@ -74,11 +81,20 @@
     # create-doc/edit-doc wizard (docWizard). Consumed by every `thecompanyinc-*`
     # template and by the legal-folder PDF builders. Returns an attrset of these.
     legal = pkgs.callPackage ./flakes/legal/package.nix {};
+
+    # calman-sony — seamless "near-native app" launcher (FreeRDP RemoteApp) for
+    # Calman Home for Sony running in a BACKGROUND libvirt/QEMU Windows VM, plus
+    # the NixOS module that declares that VM (USB colorimeter hostdev + bridged
+    # NIC for Sony BRAVIA AutoCal) and a home-manager module for the launcher.
+    # SCAFFOLD — see flakes/calman-sony/README.md. package.nix returns a FUNCTION
+    # of config, like mkVibeWrapper / mkMoosefetch.
+    mkCalmanSony = pkgs.callPackage ./flakes/calman-sony/package.nix {};
+    calman-sony = mkCalmanSony {};
   in {
     # ---- Buildable packages: `nix build .#zed-editor`, `nix run .#zed-editor` ----
     packages.${system} =
       {
-        inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein moosefetch proton-secrets;
+        inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein moosefetch moosewire proton-secrets calman-sony;
         inherit unifi-protect-monitor unifi-protect-viewer;
         inherit cobblemon-overlay;
         # Re-export the raw Proton Pass CLI (binary `pass-cli`) for `nix run .#proton-pass-cli`.
@@ -208,7 +224,7 @@
     # e.g. inputs.antlers.lib.x86_64-linux.mkZedWrapper { ...zed settings... }
     #      inputs.antlers.lib.x86_64-linux.mkVibeWrapper { model = "opus"; ... }
     lib.${system} = {
-      inherit mkZedWrapper mkVibeWrapper mkMoosefetch scripts;
+      inherit mkZedWrapper mkVibeWrapper mkMoosefetch mkCalmanSony scripts;
       # Legal-doc builders: mkLegalDoc { src; } -> PDF derivation; docWizard -> create-doc/edit-doc;
       # thecompanyinc-style -> the canonical style derivation (its $out/tex on TEXINPUTS).
       inherit (legal) mkLegalDoc docWizard thecompanyinc-style;
@@ -228,7 +244,9 @@
         cobblemon-overlay = final.callPackage ./flakes/cobblemon-overlay/package.nix {};
         fadein = final.callPackage ./flakes/fadein/package.nix {};
         moosefetch = (final.callPackage ./flakes/moosefetch/package.nix {}) {};
+        moosewire = final.callPackage ./flakes/moosewire/package.nix {};
         proton-secrets = final.callPackage ./flakes/proton-secrets/package.nix {};
+        calman-sony = (final.callPackage ./flakes/calman-sony/package.nix {}) {};
         thecompanyinc-style = (final.callPackage ./flakes/legal/package.nix {}).thecompanyinc-style;
         thecompanyinc-doc-wizard = (final.callPackage ./flakes/legal/package.nix {}).docWizard;
       }
@@ -251,6 +269,8 @@
       moosefetch = import ./flakes/moosefetch/module.nix "system";
       # services.proton-secrets — activation-time secret decryption from Proton Pass.
       proton-secrets = import ./flakes/proton-secrets/module.nix self;
+      # services.calman-sony — background Windows VM running Calman Home for Sony.
+      calman-sony = import ./flakes/calman-sony/module.nix self;
     };
 
     # home-manager variants (install into home.packages).
@@ -259,6 +279,8 @@
       moosefetch = import ./flakes/moosefetch/module.nix "home";
       # programs.unifi-protect-viewer — the Wayland viewer with baked-in server/cameras defaults.
       unifi-protect-viewer = import ./flakes/unifi-protect-monitor/viewer-module.nix self;
+      # programs.calman-sony — the seamless RemoteApp launcher for Calman Home for Sony.
+      calman-sony = import ./flakes/calman-sony/home-module.nix self;
     };
 
     # ---- Explicit `nix run` targets ----
@@ -279,6 +301,14 @@
         moosefetch = {
           type = "app";
           program = "${moosefetch}/bin/moosefetch";
+        };
+        moosewire = {
+          type = "app";
+          program = "${moosewire}/bin/moosewire";
+        };
+        calman-sony = {
+          type = "app";
+          program = "${calman-sony}/bin/calman-sony";
         };
         unifi-protect-viewer = {
           type = "app";

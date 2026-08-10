@@ -1,0 +1,20 @@
+[package]
+name = "moosewire"
+version = "0.1.0"
+edition = "2021"
+description = "Dual-pane TUI that moves files between the local machine and a remote host over SSH/SCP"
+license = "MIT"
+
+[[bin]]
+name = "moosewire"
+path = "src/main.rs"
+
+[dependencies]
+# crossterm is re-exported as `ratatui::crossterm`, so we depend only on ratatui
+# to keep a single, version-consistent event/backend stack.
+ratatui = "0.29"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
