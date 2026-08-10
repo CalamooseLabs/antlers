@@ -1,0 +1,21 @@
+[package]
+name = "moosebroom"
+version = "0.1.0"
+edition = "2021"
+description = "TUI that finds and reclaims wasted disk space — Nix generations, caches, dev/container junk, and an ncdu-style disk scan"
+license = "MIT"
+
+[[bin]]
+name = "moosebroom"
+path = "src/main.rs"
+
+[dependencies]
+# crossterm is re-exported as `ratatui::crossterm`, so we depend only on ratatui
+# to keep a single, version-consistent event/backend stack (matches moosewire —
+# the lockfile is shared, ratatui + its transitive deps only).
+ratatui = "0.29"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

@@ -123,17 +123,42 @@ fn row(e: &crate::model::Entry, marked: bool, width: usize) -> ListItem<'static>
 
 fn render_gauge(frame: &mut Frame, area: Rect, app: &App) {
     let t = app.transfer.as_ref().unwrap();
-    let ratio = if t.total == 0 {
-        0.0
+    let ratio = t.ratio();
+    // Byte-level "45%  1.2G / 2.7G  ·  12M/s  ·  ETA 2:04" when the job could be
+    // sized; otherwise fall back to the item count.
+    let mut label = if t.total_bytes > 0 {
+        format!(
+            "{} {}  {:.0}%  {} / {}",
+            t.verb,
+            t.current,
+            ratio * 100.0,
+            human_size(t.bytes_done),
+            human_size(t.total_bytes),
+        )
     } else {
-        (t.done as f64 / t.total as f64).clamp(0.0, 1.0)
+        format!("{} {} ({}/{})", t.verb, t.current, t.done, t.total)
     };
-    let label = format!("{} {} ({}/{})", t.verb, t.current, t.done, t.total);
+    if t.rate > 1.0 {
+        label.push_str(&format!("  ·  {}/s", human_size(t.rate as u64)));
+    }
+    if let Some(eta) = t.eta_secs() {
+        label.push_str(&format!("  ·  ETA {}", hms(eta)));
+    }
     let gauge = Gauge::default()
         .gauge_style(Style::default().fg(ACTIVE).bg(Color::Black))
         .ratio(ratio)
         .label(label);
     frame.render_widget(gauge, area);
+}
+
+/// Format a duration in seconds as `M:SS` (or `H:MM:SS` past an hour).
+fn hms(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
 }
 
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {

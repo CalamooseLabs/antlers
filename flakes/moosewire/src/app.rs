@@ -8,7 +8,7 @@ use crate::local;
 use crate::model::{basename, join, parent, Entry, Side};
 use crate::pane::Pane;
 use crate::session::Session;
-use crate::transfer::{self, Direction, Job, Transfer, TransferMsg};
+use crate::transfer::{self, Direction, Job, Transfer};
 
 /// Yanked set, kept until replaced or cleared (yazi-style).
 struct Clip {
@@ -233,16 +233,9 @@ impl App {
         };
         let mut finished: Option<Result<usize, String>> = None;
         while let Ok(msg) = t.rx.try_recv() {
-            match msg {
-                TransferMsg::Current { done, total, name } => {
-                    t.done = done;
-                    t.total = total;
-                    t.current = name;
-                }
-                TransferMsg::Finished(res) => {
-                    finished = Some(res);
-                    break;
-                }
+            if let Some(res) = t.apply(msg) {
+                finished = Some(res);
+                break;
             }
         }
         if let Some(res) = finished {

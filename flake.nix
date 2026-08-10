@@ -71,6 +71,15 @@
     # host list is supplied downstream by cala-m-os's modules/moosewire.
     moosewire = pkgs.callPackage ./flakes/moosewire/package.nix {};
 
+    # moosebroom — storage-space cleaner-upper TUI (Rust/ratatui). Scans for
+    # reclaimable space in three categories (Nix generations/GC/store-optimise,
+    # caches & junk, dev/container junk), each shown with an estimate; mark and
+    # reclaim with a confirm. Plus an ncdu-style disk-usage scan mode to hunt
+    # large dirs/files. Reclaims by shelling out to the host's own nix /
+    # journalctl / docker (never a shell string built from a path). Second Rust
+    # crate here; shares moosewire's ratatui-only lockfile shape.
+    moosebroom = pkgs.callPackage ./flakes/moosebroom/package.nix {};
+
     # proton-secrets — headless Proton Pass CLI (`pass-cli`) wrapper + an
     # agenix-shaped, activation-time secret-decryption NixOS module
     # (services.proton-secrets). The bundled proton-pass-cli is UNFREE.
@@ -94,7 +103,7 @@
     # ---- Buildable packages: `nix build .#zed-editor`, `nix run .#zed-editor` ----
     packages.${system} =
       {
-        inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein moosefetch moosewire proton-secrets calman-sony;
+        inherit zed-editor plex-desktop antlers lanserver vibe vibe-server fadein moosefetch moosewire moosebroom proton-secrets calman-sony;
         inherit unifi-protect-monitor unifi-protect-viewer;
         inherit cobblemon-overlay;
         # Re-export the raw Proton Pass CLI (binary `pass-cli`) for `nix run .#proton-pass-cli`.
@@ -245,6 +254,7 @@
         fadein = final.callPackage ./flakes/fadein/package.nix {};
         moosefetch = (final.callPackage ./flakes/moosefetch/package.nix {}) {};
         moosewire = final.callPackage ./flakes/moosewire/package.nix {};
+        moosebroom = final.callPackage ./flakes/moosebroom/package.nix {};
         proton-secrets = final.callPackage ./flakes/proton-secrets/package.nix {};
         calman-sony = (final.callPackage ./flakes/calman-sony/package.nix {}) {};
         thecompanyinc-style = (final.callPackage ./flakes/legal/package.nix {}).thecompanyinc-style;
@@ -305,6 +315,10 @@
         moosewire = {
           type = "app";
           program = "${moosewire}/bin/moosewire";
+        };
+        moosebroom = {
+          type = "app";
+          program = "${moosebroom}/bin/moosebroom";
         };
         calman-sony = {
           type = "app";
