@@ -239,6 +239,64 @@ Deno.test("pokemon_lost carries the killer onto its memorial entry", () => {
   });
 });
 
+Deno.test("setAttempt pins the number and suppresses the next worldId auto-increment", () => {
+  const st = mkState();
+  st.apply(snapshot({ worldId: "w-1", deaths: { total: 1, whiteouts: 0, sacrifices: 0, duplicateReleases: 0 } }), 1000);
+  st.setAttempt(5);
+  assertEquals(st.view(1100).attempt, 5);
+  // the fresh clone's brand-new world would normally bank + bump to 6 — the pin
+  // nulled #worldId, so this snapshot ADOPTS it instead
+  const r = st.apply(
+    snapshot({ worldId: "w-2", deaths: { total: 0, whiteouts: 0, sacrifices: 0, duplicateReleases: 0 } }),
+    2000,
+  );
+  assert(!r.newAttempt, "pinned attempt adopts the new worldId rather than incrementing");
+  assertEquals(st.view(2000).attempt, 5);
+});
+
+Deno.test("setAttempt banks the previous save's deaths (with bank) and is idempotent (without)", () => {
+  const st = mkState();
+  st.apply(snapshot({ deaths: { total: 3, whiteouts: 1, sacrifices: 0, duplicateReleases: 0 } }), 1000);
+  st.setAttempt(2, { bank: true });
+  let v = st.view(1100);
+  assertEquals(v.attempt, 2);
+  assertEquals(v.campaign.total, 3, "previous save deaths banked once");
+  assertEquals(v.campaign.whiteouts, 1);
+  assertEquals(v.deaths.total, 0, "current-save counters restart after a banked set");
+  // the reconcile re-assert (bank omitted) must not re-bank
+  st.setAttempt(2);
+  st.setAttempt(2);
+  v = st.view(1200);
+  assertEquals(v.attempt, 2);
+  assertEquals(v.campaign.total, 3, "repeat set-to-N must never re-bank");
+});
+
+Deno.test("resetCampaign wipes to a fresh campaign and survives a round-trip", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "cobblemon-overlay-test" });
+  try {
+    const st = mkState(dir);
+    st.apply(snapshot({ worldId: "w-1", deaths: { total: 2, whiteouts: 1, sacrifices: 0, duplicateReleases: 0 } }), 1000);
+    st.apply(lost("Ripley"), 1500);
+    st.setAttempt(4);
+    st.resetCampaign();
+    let v = st.view(1600);
+    assertEquals(v.attempt, 1);
+    assertEquals(v.memorial.length, 0);
+    assertEquals(v.campaign.total, 0);
+    assertEquals(v.deaths.total, 0);
+    await st.flush();
+
+    const st2 = mkState(dir);
+    await st2.load();
+    v = st2.view(Date.now());
+    assertEquals(v.attempt, 1);
+    assertEquals(v.memorial.length, 0);
+    assertEquals(v.campaign.total, 0);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("staleness uses server receive time, never the mod's t field", () => {
   const st = mkState();
   // mod clock (t) is wildly in the past; server receives it "now"

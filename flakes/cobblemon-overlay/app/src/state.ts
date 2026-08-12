@@ -200,6 +200,67 @@ export class OverlayState {
     return this.#opts.stateDir ? `${this.#opts.stateDir}/state.json` : "";
   }
 
+  // ---- external control (button-authoritative sync + campaign reset) ----
+
+  // Pin the attempt number to an explicit value — the sync path: tci-run pushes
+  // the ABSOLUTE run number after every `new`, so the overlay follows its
+  // counter instead of guessing from worldId. Strictly idempotent (set-to-N,
+  // never increment) so repeat pushes and the reconcile re-assert are no-ops.
+  //
+  // CRUCIALLY nulls #worldId and clears #seeded: when the freshly-cloned run's
+  // first snapshot arrives carrying a brand-new worldId, #maybeBankAttempt takes
+  // the null-#worldId ADOPT branch (isNew stays false) instead of banking +
+  // incrementing on top of the pin — that is what stops the pushed number from
+  // double-counting to N+1 the moment the new world loads.
+  //
+  // `bank` folds the just-ended save's per-save deaths into the campaign totals
+  // and restarts the current-save counters (what a worldId-driven new attempt
+  // does in #maybeBankAttempt) — set it on a real new run, omit it on a re-assert.
+  setAttempt(n: number, opts: { bank?: boolean } = {}): boolean {
+    const next = Math.max(1, Math.floor(n));
+    // Strictly idempotent: re-asserting the current number (the reconcile tick, a
+    // duplicated push) is a pure no-op — no re-bank, no worldId churn, no persist,
+    // no SSE broadcast. Only an actual change nulls worldId to absorb the fresh
+    // world's next snapshot.
+    if (next === this.#attempt) return false;
+    if (opts.bank) {
+      this.#campaign.total += this.#deaths.total;
+      this.#campaign.whiteouts += this.#deaths.whiteouts;
+      this.#campaign.sacrifices += this.#deaths.sacrifices;
+      this.#campaign.duplicateReleases += this.#deaths.duplicateReleases;
+      this.#deaths = zeroDeaths();
+    }
+    this.#attempt = next;
+    this.#worldId = null;
+    this.#seeded = false;
+    this.#updatedAt = Date.now();
+    this.#schedulePersist();
+    return true;
+  }
+
+  // "Reset it all" (overlay side): wipe the campaign for a fresh start — attempt
+  // back to 1, cemetery/counters/party/progress cleared. Deliberately KEEPS
+  // #session/#lastSeq/#lastIngestAt so any in-flight snapshots from a still-open
+  // old world stay deduped and cannot resurrect the wiped state. Callers that
+  // need the wipe to survive an instant crash should `await flush()` after
+  // (the /control reset path does) rather than lean on the debounced persist.
+  resetCampaign(): void {
+    this.#attempt = 1;
+    this.#worldId = null;
+    this.#campaign = zeroDeaths();
+    this.#memorial = [];
+    this.#deaths = zeroDeaths();
+    this.#progress = zeroProgress();
+    this.#quest = null;
+    this.#party = [];
+    this.#seeded = false;
+    this.#player = "";
+    this.#location = "";
+    this.#world = null;
+    this.#updatedAt = Date.now();
+    this.#schedulePersist();
+  }
+
   // ---- ingest ----
 
   apply(msg: Message, receivedAt: number): ApplyResult {

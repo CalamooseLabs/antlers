@@ -136,7 +136,7 @@ in {
         && !cfg.localNetworkOnly
         && cfg.hostname != "127.0.0.1"
         && cfg.hostname != "::1")
-      "services.cobblemon-overlay: ingest is UNAUTHENTICATED (no tokenFile) and the port is open beyond restricted subnets — anyone who can reach it can spoof overlay state onto the stream. Set services.cobblemon-overlay.tokenFile, or set localNetworkOnly = true with localNetworkSubnets pinned to the mod host.";
+      "services.cobblemon-overlay: ingest AND the destructive /control route (set attempt / reset campaign) are UNAUTHENTICATED (no tokenFile) and the port is open beyond restricted subnets — anyone who can reach it can spoof overlay state onto the stream or wipe the cemetery mid-broadcast. Set services.cobblemon-overlay.tokenFile, or set localNetworkOnly = true with localNetworkSubnets pinned to the trusted hosts.";
 
     assertions = [
       {

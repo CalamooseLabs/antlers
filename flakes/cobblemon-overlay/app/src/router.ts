@@ -7,6 +7,7 @@ import type { OverlayConfig } from "./config.ts";
 import type { OverlayState } from "./state.ts";
 import type { SseHub } from "./sse.ts";
 import type { SpriteStore } from "./sprites.ts";
+import { handleControl } from "./control.ts";
 import { handleIngest } from "./ingest.ts";
 import {
   BADGES_HTML,
@@ -43,6 +44,17 @@ export async function handler(req: Request, deps: Deps): Promise<Response> {
   // The mod-facing ingest endpoint (the only non-GET route).
   if (path === "/ingest") {
     return await handleIngest(req, {
+      state: deps.state,
+      hub: deps.hub,
+      token: deps.token,
+      maxBodyBytes: deps.config.maxBodyBytes,
+    });
+  }
+
+  // The operator-facing control endpoint (sync attempt + reset campaign) — the
+  // only other non-GET route. Shares the ingest token gate (it is destructive).
+  if (path === "/control") {
+    return await handleControl(req, {
       state: deps.state,
       hub: deps.hub,
       token: deps.token,

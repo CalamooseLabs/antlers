@@ -36,8 +36,12 @@ in {
 
     rdpHost = mkOption {
       type = types.str;
-      default = "REPLACE_ME_GUEST_IP";
-      description = "The Windows VM's IP on your calibration LAN (bridged NIC).";
+      default = "";
+      description = ''
+        The Windows VM's IP. Leave "" to AUTO-DISCOVER it from libvirt
+        (`virsh domifaddr`) — you normally never set this. Provide an explicit
+        address only to override discovery.
+      '';
     };
 
     rdpUser = mkOption {
@@ -60,8 +64,8 @@ in {
 
     rdpTimeout = mkOption {
       type = types.ints.positive;
-      default = 120;
-      description = "Seconds to wait for the guest's RDP port before giving up.";
+      default = 180;
+      description = "Seconds to wait for IP discovery + the guest's RDP port before giving up.";
     };
   };
 

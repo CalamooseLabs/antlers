@@ -10,12 +10,48 @@ This flake dir ships three pieces (antlers convention: `package.nix` + a NixOS
 
 | File | Output | What it does |
 |------|--------|--------------|
-| `package.nix` | `packages.calman-sony`, `lib.mkCalmanSony`, `apps.calman-sony`, overlay | The `calman-sony` launcher: starts the VM, waits for RDP, opens Calman as a RemoteApp window. A function of config (host/user/app path). |
-| `module.nix` | `nixosModules.calman-sony` | `services.calman-sony` — declares the Windows VM: USB **hostdev** for the meter, **bridged** NIC, udev rule, domain define/autostart. |
+| `package.nix` | `packages.calman-sony`, `lib.mkCalmanSony`, `apps.calman-sony`, overlay | The `calman-sony` launcher (auto-discovers the guest IP, opens Calman as a RemoteApp window) **and** `calman-sony-setup` (first-run ISO wizard). A function of config. |
+| `module.nix` | `nixosModules.calman-sony` | `services.calman-sony` — declares the Windows VM: USB **hostdev** for the meter, **self-owned NAT network** (or an opt-in bridge), **auto-created disk**, an install CD drive, udev rule, domain define/autostart. |
 | `home-module.nix` | `homeManagerModules.calman-sony` | `programs.calman-sony` — installs the configured launcher + `.desktop` entry into a user's home. |
 
 Everything is **inert until enabled** (`enable` defaults to `false`), so it can be
 published without a Windows image present.
+
+## How little you have to configure
+
+The module is self-contained by default — a first bring-up needs almost nothing:
+
+- **Networking → nothing.** `networkMode = "nat"` (default) makes the module define
+  and start its **own** libvirt NAT network. Host→guest RDP works, and the guest
+  reaches the G1 / Sony TV outbound by IP. No host bridge, no NIC name.
+  - Need the guest on the TV's *actual subnet* for AutoCal? Set
+    `networkMode = "bridge"` **and** `uplink = "<physical NIC>"` and the module
+    creates a Linux bridge on it. ⚠️ Advanced/host-specific — it takes over that
+    NIC and can conflict with your host's network stack; don't point it at the
+    host's only uplink.
+- **Guest IP → nothing.** The launcher auto-discovers it via `virsh domifaddr`
+  (install the QEMU guest agent in the guest for the most reliable result).
+- **Disk → nothing.** Auto-created (`diskSizeGiB`, default 64) if missing.
+- **Windows user → default.** Name the guest user `calibrator` to match, or set
+  `programs.calman-sony.rdpUser`.
+
+What you *do* still provide: a Windows **Pro** ISO (once), and confirming
+`appPath` after Calman is installed.
+
+## First boot / installing Windows
+
+The VM keeps an (initially empty) CD drive and boots HD-first — a fresh empty disk
+falls through to the CD. Two ways to install:
+
+1. **Configured ISO:** set `services.calman-sony.installerIso = "…/Win11_Pro.iso"`;
+   it is inserted and booted on first start.
+2. **Interactive wizard:** run **`calman-sony-setup`** — it creates the disk if
+   needed, **asks for the ISO path**, inserts it, starts the VM, and opens the
+   SPICE console so you run Windows setup. Inside Windows: enable Remote Desktop,
+   create the `calibrator` user, install Calman. Then `calman-sony` takes over.
+
+(Optional: point `virtioWinIso` at `${pkgs.virtio-win}/share/virtio-win/virtio-win.iso`
+for a second driver CD if you switch `nicModel`/disk to virtio.)
 
 ## Why this works for *this* rig (and where it wouldn't)
 
@@ -45,27 +81,27 @@ passthrough is needed.
   OEM i1Display3 → a plain **HID** device (VID `0x0765`). HID is exactly the class
   Windows demotes out of RDP USB redirection, so a `<hostdev>` bind (owned by
   Calman for the whole run) is the robust path.
-- **Bridged NIC, never NAT.** Calman must reach the G1 *and* the TV by IP. A
-  NAT-isolated guest reaches neither — the single most common failure.
+- **Meter reachability by IP, subnet only if AutoCal needs it.** NAT (default)
+  lets Calman reach the G1/TV outbound and keeps host→guest RDP working with zero
+  setup; switch to `bridge` only if AutoCal requires the guest on the TV's subnet.
 - **No GPU passthrough.** See above — the PC never emits the pattern.
 
-## REPLACE_ME / CONFIRM checklist
+## Still-yours checklist
 
-Before enabling downstream:
+Almost everything now has a working default (see "How little you have to
+configure"). What genuinely remains:
 
-1. **`services.calman-sony.imagePath`** — path to your Windows **Pro** qcow2/raw
-   image (Pro is required for RDP/RemoteApp; Home won't do it). Windows 11 also
-   needs UEFI/OVMF + vTPM — add `<loader>`/`<tpm>` to the domain XML.
-2. **`services.calman-sony.meterProductId`** — run `lsusb -d 0765:` and use the
-   real PID. It is almost certainly **not** `0x5020` (that's the retail i1Display
-   Pro). The module asserts this is set.
-3. **`services.calman-sony.bridge`** — your host bridge on the calibration LAN.
-4. **`programs.calman-sony.rdpHost` / `rdpUser`** — the guest's LAN IP and a
-   Windows Pro user with RemoteApp rights.
-5. **`programs.calman-sony.appPath`** — confirm the exact install path of
-   `Calman.exe` inside the guest.
-6. **FreeRDP binary name** — the launcher calls `xfreerdp`; recent FreeRDP may
+1. **A Windows *Pro* ISO/image** — Pro is required for RDP/RemoteApp; Home won't
+   do it. Supply via `installerIso` or the `calman-sony-setup` wizard. (Windows 11
+   also needs UEFI/OVMF + vTPM — add `<loader>`/`<tpm>` to the domain XML.)
+2. **`programs.calman-sony.appPath`** — confirm the exact install path of
+   `Calman.exe` inside the guest, once installed.
+3. **FreeRDP binary name** — the launcher calls `xfreerdp`; recent FreeRDP may
    install `xfreerdp3`. Verify on the host.
+
+Optional: `networkMode = "bridge"` + `uplink` if AutoCal needs same-subnet;
+`rdpUser` if you don't name the Windows user `calibrator`. `meterProductId` is
+already `0x5020` (confirmed via `lsusb`).
 
 ## Residual risks
 
@@ -84,23 +120,19 @@ Per the antlers flow, push this to `github:CalamooseLabs/antlers` and bump the
 lock in cala-m-os **before** referencing it. Then in `/etc/nixos`:
 
 ```nix
-# NixOS layer (host that owns the calibration box)
+# NixOS layer (host that owns the calibration box) — NAT default: no networking to set up
 imports = [ inputs.antlers.nixosModules.calman-sony ];
 services.calman-sony = {
   enable = true;
-  imagePath = "/var/lib/libvirt/images/calman-sony.qcow2";
-  meterProductId = "0xXXXX";   # from `lsusb -d 0765:`
-  bridge = "br0";
+  # installerIso = "/var/lib/libvirt/images/Win11_Pro.iso";  # or use `calman-sony-setup`
   autostart = true;
+  # networkMode = "bridge"; uplink = "enp3s0";   # only if AutoCal needs same-subnet
 };
 
 # home-manager layer (the calibrating user)
 imports = [ inputs.antlers.homeManagerModules.calman-sony ];
-programs.calman-sony = {
-  enable = true;
-  rdpHost = "10.10.10.42";
-  rdpUser = "calibrator";
-};
+programs.calman-sony.enable = true;   # rdpHost auto-discovered; rdpUser defaults to "calibrator"
 ```
 
-Also add the calibration user to the `libvirtd` group on the host.
+Also add the calibration user to the `libvirtd` group on the host. Then:
+`calman-sony-setup` (install Windows + Calman once) → `calman-sony` (seamless app).
