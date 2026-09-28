@@ -16,8 +16,11 @@
 //    persisted forever across saves and restarts. Dedup'd events never
 //    double-append (the seq gate runs before any mutation). Entries persisted
 //    before "kind" existed load as kind:"pokemon" (backward compat);
-//  - debounced (~2s) ATOMIC persistence to stateDir/state.json (tmp file +
-//    Deno.rename), flushed on SIGTERM/SIGINT by main.ts; restored on boot with
+//  - debounced (~2s) ATOMIC persistence to stateDir/state.json (unique tmp
+//    file + fsync + Deno.rename via util.ts SerialWriter — serialized, so an
+//    overlapping flush can't rename a shared tmp away, and generation-counted,
+//    so a mutation during an in-flight write is never lost by a later flush),
+//    flushed on SIGTERM/SIGINT by main.ts; restored on boot with
 //    lastIngestAt = 0, so the overlay is stale until the mod pushes again.
 
 import {
@@ -41,7 +44,7 @@ import {
   zeroDeaths,
   zeroProgress,
 } from "./protocol.ts";
-import { isError, log } from "./util.ts";
+import { isError, log, SerialWriter } from "./util.ts";
 
 // "pokemon" = a fallen party member (pokemon_lost); "player" = the TRAINER's own
 // grave, appended on a whiteout OR a natural hardcore death (player_death).
@@ -180,12 +183,13 @@ export class OverlayState {
   // rolling event ring (debug/status only — never replayed over SSE)
   #events: GameView[] = [];
 
-  // debounced persist
+  // debounced persist (the writer owns dirty-tracking + serialization)
   #persistTimer: ReturnType<typeof setTimeout> | null = null;
-  #dirty = false;
+  #writer: SerialWriter;
 
   constructor(opts: StateOpts) {
     this.#opts = opts;
+    this.#writer = new SerialWriter(this.statePath, () => JSON.stringify(this.#doc()));
   }
 
   get attempt(): number {
@@ -446,29 +450,31 @@ export class OverlayState {
   // ---- persistence ----
 
   #schedulePersist(): void {
-    this.#dirty = true;
+    this.#writer.touch();
     if (!this.#opts.stateDir) return;
     if (this.#persistTimer !== null) return;
     this.#persistTimer = setTimeout(() => {
       this.#persistTimer = null;
-      this.#persist().catch((e) =>
+      this.#writer.flush().catch((e) =>
         log("error", "state persist failed", { err: isError(e) ? e.message : String(e) })
       );
     }, this.#opts.persistDebounceMs);
   }
 
   // Cancel any pending debounce timer and persist NOW (SIGTERM/SIGINT path).
+  // Safe to call concurrently with itself and with a timer-driven write: the
+  // writer serializes them and re-writes anything mutated mid-flight.
   async flush(): Promise<void> {
     if (this.#persistTimer !== null) {
       clearTimeout(this.#persistTimer);
       this.#persistTimer = null;
     }
-    if (!this.#opts.stateDir || !this.#dirty) return;
-    await this.#persist();
+    await this.#writer.flush();
   }
 
-  async #persist(): Promise<void> {
-    const doc = {
+  // The persisted document (captured synchronously at the start of each write).
+  #doc(): Record<string, unknown> {
+    return {
       version: 1,
       savedAt: Date.now(),
       attempt: this.#attempt,
@@ -484,12 +490,6 @@ export class OverlayState {
       progress: this.#progress,
       quest: this.#quest,
     };
-    // Atomic: write a tmp file in the same directory, then rename over.
-    const path = this.statePath;
-    const tmp = `${path}.tmp`;
-    await Deno.writeTextFile(tmp, JSON.stringify(doc));
-    await Deno.rename(tmp, path);
-    this.#dirty = false;
   }
 
   // Restore campaign + last snapshot from disk. lastIngestAt stays 0, so the

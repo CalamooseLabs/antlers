@@ -150,7 +150,10 @@
         '';
 
       # Offline Deno unit tests for cobblemon-overlay (protocol/ingest/state/
-      # SSE/XSS-escape/sprite-mapping). Zero external imports, so no network.
+      # SSE/XSS-escape/sprite-mapping, the channel-point effect queue + its
+      # loopback/token routing, the persistence-race regressions). Zero
+      # external imports, so no network — and no --allow-env: tested code
+      # must not read env vars.
       cobblemon-overlay-unit =
         pkgs.runCommand "cobblemon-overlay-unit" {
           nativeBuildInputs = [pkgs.deno];
@@ -165,9 +168,10 @@
         '';
 
       # Evaluate services.cobblemon-overlay in a container NixOS so a module
-      # regression fails `nix flake check` — forces the systemd unit + the
-      # generated /etc/cobblemon-overlay/config.json (mirrors the
-      # unifi-protect-monitor module check).
+      # regression fails `nix flake check` — forces the systemd unit (incl. the
+      # LoadCredential list + credential env vars) + the generated
+      # /etc/cobblemon-overlay/config.json (mirrors the unifi-protect-monitor
+      # module check).
       cobblemon-overlay-module = let
         sys = nixpkgs.lib.nixosSystem {
           inherit system;
@@ -181,17 +185,24 @@
                 openFirewall = true;
                 localNetworkOnly = true;
                 localNetworkSubnets = ["10.10.10.30/32"];
-                # Exercise the LoadCredential token staging path.
+                # Exercise the LoadCredential token staging path — both tokens.
                 tokenFile = "/run/secrets/cobblemon-overlay-token";
+                effects.tokenFile = "/run/secrets/cobblemon-overlay-effects-token";
               };
             }
           ];
         };
+        unit = sys.config.systemd.services.cobblemon-overlay.serviceConfig;
       in
         pkgs.runCommand "cobblemon-overlay-module-eval" {} ''
-          echo "${builtins.toString sys.config.systemd.services.cobblemon-overlay.serviceConfig.ExecStart}" > $out
+          echo "${builtins.toString unit.ExecStart}" > $out
+          echo "${builtins.toString unit.LoadCredential}" >> $out
+          echo "${builtins.toString unit.Environment}" >> $out
           cp ${sys.config.environment.etc."cobblemon-overlay/config.json".source} config.json
           cat config.json >> $out
+          grep -q 'effects-token:/run/secrets/cobblemon-overlay-effects-token' $out
+          grep -q 'COBBLEMON_OVERLAY_EFFECTS_TOKEN_FILE=%d/effects-token' $out
+          grep -q '"effectsEnabled":true' $out
         '';
 
       # Evaluate services.unifi-protect-monitor in a container NixOS so a module

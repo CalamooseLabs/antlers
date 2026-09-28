@@ -5,9 +5,11 @@
 #   nixosModules.cobblemon-overlay = import ./flakes/cobblemon-overlay/module.nix self
 # Exposes `services.cobblemon-overlay`. Patterned on unifi-protect-monitor's
 # module: renders /etc/cobblemon-overlay/config.json, runs the compiled Deno
-# binary under nix-ld in a hardened systemd unit. The optional ingest token is
-# staged via systemd LoadCredential (never in the store/config file) and pointed
-# at with COBBLEMON_OVERLAY_TOKEN_FILE.
+# binary under nix-ld in a hardened systemd unit. The optional ingest token and
+# the optional effects token (multichat's Bearer on the loopback-only
+# channel-point effect routes) are staged via systemd LoadCredential (never in
+# the store/config file) and pointed at with COBBLEMON_OVERLAY_TOKEN_FILE /
+# COBBLEMON_OVERLAY_EFFECTS_TOKEN_FILE.
 flake: {
   config,
   lib,
@@ -21,11 +23,22 @@ with lib; let
 
   quotePath = p: ''"${p}"'';
 
-  # Keys the app's config.ts loader merges over its DEFAULTS. The token file is
-  # deliberately NOT here — it arrives via the LoadCredential env var.
+  # Keys the app's config.ts loader merges over its DEFAULTS (flat — the merge
+  # is shallow). The token files are deliberately NOT here — they arrive via the
+  # LoadCredential env vars.
   configFile = pkgs.writeText "cobblemon-overlay-config.json" (builtins.toJSON {
     inherit (cfg) port hostname stateDir staleAfterSec eventLogSize spriteDir;
+    effectsEnabled = cfg.effects.enable;
+    effectLeaseSec = cfg.effects.leaseSec;
+    effectTtlSec = cfg.effects.ttlSec;
+    effectAcceptWindowSec = cfg.effects.acceptWindowSec;
+    maxOpenEffects = cfg.effects.maxOpen;
   });
+
+  # systemd credentials staged into the unit's %d (only the configured ones).
+  credentials =
+    optional (cfg.tokenFile != null) "token:${toString cfg.tokenFile}"
+    ++ optional (cfg.effects.tokenFile != null) "effects-token:${toString cfg.effects.tokenFile}";
 in {
   options.services.cobblemon-overlay = {
     enable = mkEnableOption "the cobblemon-overlay OBS stream-overlay web service";
@@ -123,6 +136,48 @@ in {
       default = true;
       description = "Enable nix-ld so the compiled Deno binary (a generic ELF) can run.";
     };
+
+    # Channel-point effect queue (app/src/effects.ts): multichat enqueues Twitch
+    # redemptions over LOOPBACK; the mod claims + reports them with the ingest
+    # token. No firewall change: the mod pulls over the existing port/subnet pin.
+    effects = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Accept channel-point effects from multichat (POST /effects) and lease them to the mod. false = enqueue answers 503 \"disabled\" and nothing new is leased (results/cancels/lookups still work; anything left expires → multichat refunds it).";
+      };
+
+      leaseSec = mkOption {
+        type = types.ints.positive;
+        default = 30;
+        description = "Seconds a claimed effect stays leased to the mod without an `accepted` result before it returns to pending and is redelivered (the mod dedups by redemption id).";
+      };
+
+      ttlSec = mkOption {
+        type = types.ints.between 30 3600;
+        default = 600;
+        description = "Default time-to-live of an effect when multichat's enqueue carries no ttlSec (a sent ttlSec is clamped to 30..3600). Unresolved effects expire 60s past it (→ refund).";
+      };
+
+      acceptWindowSec = mkOption {
+        type = types.ints.positive;
+        default = 45;
+        description = "POST /effects answers 503 \"game_offline\" (→ multichat refunds + auto-pauses the rewards) unless the mod has polled /effects/claim within this many seconds.";
+      };
+
+      maxOpen = mkOption {
+        type = types.ints.positive;
+        default = 100;
+        description = "Max open (not yet resolved) effects; beyond it POST /effects answers 429 \"queue_full\".";
+      };
+
+      tokenFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        example = "/run/secrets/cobblemon-overlay-effects-token";
+        description = "File whose contents are the Bearer token multichat must present on the multichat-facing effect routes (POST/GET /effects, /effects/<id>/cancel, /effects/health), read at runtime via systemd LoadCredential — never copied to the store. Those routes are loopback-only regardless; null = the loopback peer check alone. Set the SAME secret as multichat's channelPoints.overlayTokenFile. (The mod-facing /effects/claim + /effects/<id>/result use the ingest tokenFile.)";
+      };
+    };
   };
 
   config = mkIf cfg.enable {
@@ -136,7 +191,7 @@ in {
         && !cfg.localNetworkOnly
         && cfg.hostname != "127.0.0.1"
         && cfg.hostname != "::1")
-      "services.cobblemon-overlay: ingest AND the destructive /control route (set attempt / reset campaign) are UNAUTHENTICATED (no tokenFile) and the port is open beyond restricted subnets — anyone who can reach it can spoof overlay state onto the stream or wipe the cemetery mid-broadcast. Set services.cobblemon-overlay.tokenFile, or set localNetworkOnly = true with localNetworkSubnets pinned to the trusted hosts.";
+      "services.cobblemon-overlay: ingest, the destructive /control route (set attempt / reset campaign) AND the mod-facing channel-point routes (/effects/claim, /effects/<id>/result) are UNAUTHENTICATED (no tokenFile) and the port is open beyond restricted subnets — anyone who can reach it can spoof overlay state onto the stream, wipe the cemetery mid-broadcast, or steal/fake-resolve viewers' redemptions. Set services.cobblemon-overlay.tokenFile, or set localNetworkOnly = true with localNetworkSubnets pinned to the trusted hosts.";
 
     assertions = [
       {
@@ -174,10 +229,11 @@ in {
               "HOME=${cfg.stateDir}"
               "COBBLEMON_OVERLAY_CONFIG=/etc/cobblemon-overlay/config.json"
             ]
-            # The token is staged by LoadCredential into the per-unit credentials
-            # dir (%d), so the service never needs read access to the secret's
-            # real location and the path works under the sandbox below.
-            ++ optional (cfg.tokenFile != null) "COBBLEMON_OVERLAY_TOKEN_FILE=%d/token";
+            # The tokens are staged by LoadCredential into the per-unit
+            # credentials dir (%d), so the service never needs read access to
+            # the secrets' real locations and the paths work under the sandbox.
+            ++ optional (cfg.tokenFile != null) "COBBLEMON_OVERLAY_TOKEN_FILE=%d/token"
+            ++ optional (cfg.effects.tokenFile != null) "COBBLEMON_OVERLAY_EFFECTS_TOKEN_FILE=%d/effects-token";
 
           # Filesystem confinement is the real sandbox (the Deno binary is built
           # with broad --allow-read). NEVER set MemoryDenyWriteExecute or
@@ -202,8 +258,8 @@ in {
           SystemCallArchitectures = "native";
           RestrictAddressFamilies = ["AF_INET" "AF_INET6" "AF_UNIX"];
         }
-        // optionalAttrs (cfg.tokenFile != null) {
-          LoadCredential = ["token:${toString cfg.tokenFile}"];
+        // optionalAttrs (credentials != []) {
+          LoadCredential = credentials;
         };
     };
 

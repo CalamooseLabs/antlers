@@ -1,8 +1,9 @@
 // Server configuration: types, defaults, and loading from
 // /etc/cobblemon-overlay/config.json (override the path with
-// COBBLEMON_OVERLAY_CONFIG). The ingest auth token is NOT in the config file —
-// it is a file path staged by systemd LoadCredential and pointed at via the
-// COBBLEMON_OVERLAY_TOKEN_FILE environment variable (see module.nix).
+// COBBLEMON_OVERLAY_CONFIG). The auth tokens are NOT in the config file — they
+// are file paths staged by systemd LoadCredential and pointed at via the
+// COBBLEMON_OVERLAY_TOKEN_FILE (ingest) / COBBLEMON_OVERLAY_EFFECTS_TOKEN_FILE
+// (multichat-facing effect routes) environment variables (see module.nix).
 
 import { isError, log } from "./util.ts";
 
@@ -28,6 +29,27 @@ export interface OverlayConfig {
   // Directory of <slug>.png box sprites (+ optional pokemon.json dex map);
   // "" = sprites disabled, overlay cards fall back to text.
   spriteDir: string;
+
+  // ---- channel-point effect queue (effects.ts; persisted to stateDir/effects.json) ----
+  // Master switch. false = POST /effects answers 503 "disabled" and nothing new
+  // is leased to the mod (results/cancels/lookups still work, the sweeper still
+  // expires what is left so multichat refunds it).
+  effectsEnabled: boolean;
+  // How long a claimed effect stays leased to the mod without an `accepted`
+  // result before it returns to pending and is redelivered (the mod dedups by id).
+  effectLeaseSec: number;
+  // Default time-to-live of an enqueued effect when multichat sends no ttlSec
+  // (a sent ttlSec is clamped to 30..3600).
+  effectTtlSec: number;
+  // POST /effects answers 503 "game_offline" unless the mod has polled
+  // /effects/claim within this many seconds.
+  effectAcceptWindowSec: number;
+  // Max open (non-final) effects; more → POST /effects answers 429 "queue_full".
+  maxOpenEffects: number;
+  // File whose (trimmed) contents are the Bearer token multichat must present
+  // on the loopback-only effect routes; "" = loopback alone is the gate.
+  // COBBLEMON_OVERLAY_EFFECTS_TOKEN_FILE overrides (systemd LoadCredential path).
+  effectsTokenFile: string;
 }
 
 export const DEFAULTS: OverlayConfig = {
@@ -40,6 +62,12 @@ export const DEFAULTS: OverlayConfig = {
   maxBodyBytes: 65536,
   persistDebounceMs: 2000,
   spriteDir: "",
+  effectsEnabled: true,
+  effectLeaseSec: 30,
+  effectTtlSec: 600,
+  effectAcceptWindowSec: 45,
+  maxOpenEffects: 100,
+  effectsTokenFile: "",
 };
 
 export async function loadConfig(): Promise<OverlayConfig> {
@@ -60,5 +88,7 @@ export async function loadConfig(): Promise<OverlayConfig> {
   }
   const tokenEnv = Deno.env.get("COBBLEMON_OVERLAY_TOKEN_FILE");
   if (tokenEnv) cfg.tokenFile = tokenEnv;
+  const effectsTokenEnv = Deno.env.get("COBBLEMON_OVERLAY_EFFECTS_TOKEN_FILE");
+  if (effectsTokenEnv) cfg.effectsTokenFile = effectsTokenEnv;
   return cfg;
 }

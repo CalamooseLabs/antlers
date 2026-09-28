@@ -7,10 +7,13 @@
 // receive time, never `t`). The overlay dedups on per-session lastSeq; a new
 // session id resets tracking.
 //
-// Validation is STRICT on the envelope and the event discriminator, and
-// TOLERANT of unknown fields (ignored) and missing inner fields (defaulted) —
-// the mod may drop individual fields (unverified Cobblemon accessors) and that
-// must never break ingest. ZERO external imports.
+// Validation is STRICT on the envelope and on each known event's required
+// fields, and TOLERANT of unknown fields (ignored) and missing inner fields
+// (defaulted) — the mod may drop individual fields (unverified Cobblemon
+// accessors) and that must never break ingest. An event NAME this file doesn't
+// list is flagged `unknownEvent` (ingest: 200 {ok, ignored}, nothing applied)
+// rather than a hard error, so a newer mod can't wedge its own pusher on it.
+// ZERO external imports.
 
 export const PROTOCOL_VERSION = 1;
 
@@ -155,7 +158,12 @@ export interface EventMsg extends BaseMsg {
 
 export type Message = SnapshotMsg | EventMsg;
 
-export type ParseResult = { ok: true; msg: Message } | { ok: false; error: string };
+// `unknownEvent` is set (to the name) when the ONLY problem is an event name
+// this overlay doesn't know, on an otherwise valid v1 envelope — e.g. a newer
+// mod's `achievement`. /ingest acks that `200 {ok, ignored}` and applies
+// nothing: a 400 would make the mod's pusher retry it forever and freeze every
+// later push behind it (head-of-line wedge). Everything else stays a 400.
+export type ParseResult = { ok: true; msg: Message } | { ok: false; error: string; unknownEvent?: string };
 
 // ---- tolerant coercers (exported for reuse in state.ts restore) ----
 
@@ -315,7 +323,10 @@ export function parseMessage(raw: unknown): ParseResult {
 
   if (o.type === "event") {
     const name = str(o.event);
-    if (!EVENT_NAMES.includes(name)) return err(`unknown event ${JSON.stringify(o.event ?? null)}`);
+    if (!name) return err(`missing/invalid event ${JSON.stringify(o.event ?? null)}`);
+    if (!EVENT_NAMES.includes(name)) {
+      return { ok: false, error: `unknown event ${JSON.stringify(name)}`, unknownEvent: name };
+    }
     const event = name as EventName;
     const msg: EventMsg = { ...base, type: "event", event };
 

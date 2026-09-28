@@ -18,7 +18,7 @@
 import { readBodyLimited } from "./ingest.ts";
 import type { OverlayState } from "./state.ts";
 import type { SseHub } from "./sse.ts";
-import { json, log, parseBearerToken, timingSafeEqual } from "./util.ts";
+import { checkToken, json, log } from "./util.ts";
 
 export interface ControlDeps {
   state: OverlayState;
@@ -31,13 +31,7 @@ export interface ControlDeps {
 export async function handleControl(req: Request, deps: ControlDeps): Promise<Response> {
   if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
 
-  if (deps.token) {
-    const presented = parseBearerToken(req.headers.get("authorization")) ||
-      req.headers.get("x-overlay-token") || "";
-    if (!timingSafeEqual(presented, deps.token)) {
-      return json({ error: "unauthorized" }, 401);
-    }
-  }
+  if (!checkToken(req, deps.token)) return json({ error: "unauthorized" }, 401);
 
   const body = await readBodyLimited(req, deps.maxBodyBytes);
   if (body === null) return json({ error: "body too large" }, 413);

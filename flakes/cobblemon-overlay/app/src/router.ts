@@ -8,12 +8,14 @@ import type { OverlayState } from "./state.ts";
 import type { SseHub } from "./sse.ts";
 import type { SpriteStore } from "./sprites.ts";
 import { handleControl } from "./control.ts";
+import { type EffectQueue, handleEffects } from "./effects.ts";
 import { handleIngest } from "./ingest.ts";
 import {
   BADGES_HTML,
   CEMETERY_HTML,
   INDEX_HTML,
   PARTY_HTML,
+  REDEEMS_HTML,
   renderGraveyardPage,
   renderStatusPage,
   TOASTS_HTML,
@@ -23,9 +25,11 @@ import { json } from "./util.ts";
 export interface Deps {
   config: OverlayConfig;
   state: OverlayState;
-  hub: SseHub;
+  hub: Pick<SseHub, "connect" | "broadcastState" | "broadcastGame">;
   sprites: SpriteStore;
-  token: string;
+  effects: EffectQueue;
+  token: string; // ingest token ("" = open): /ingest, /control, the mod-facing effect routes
+  effectsToken: string; // multichat's Bearer on the loopback-only effect routes ("" = loopback alone)
 }
 
 function htmlPage(html: string): Response {
@@ -37,11 +41,14 @@ function htmlPage(html: string): Response {
   });
 }
 
-export async function handler(req: Request, deps: Deps): Promise<Response> {
+// `peerIp` is the RAW socket peer (Deno.serve's info.remoteAddr, threaded in by
+// main.ts) — it confines the multichat-facing effect routes to loopback. ""
+// (unknown) is treated as NOT loopback.
+export async function handler(req: Request, deps: Deps, peerIp = ""): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
 
-  // The mod-facing ingest endpoint (the only non-GET route).
+  // The mod-facing ingest endpoint (wire protocol v1 — see protocol.ts).
   if (path === "/ingest") {
     return await handleIngest(req, {
       state: deps.state,
@@ -51,14 +58,28 @@ export async function handler(req: Request, deps: Deps): Promise<Response> {
     });
   }
 
-  // The operator-facing control endpoint (sync attempt + reset campaign) — the
-  // only other non-GET route. Shares the ingest token gate (it is destructive).
+  // The operator-facing control endpoint (sync attempt + reset campaign).
+  // Shares the ingest token gate (it is destructive).
   if (path === "/control") {
     return await handleControl(req, {
       state: deps.state,
       hub: deps.hub,
       token: deps.token,
       maxBodyBytes: deps.config.maxBodyBytes,
+    });
+  }
+
+  // Channel-point effects (effects.ts owns the sub-routes, methods, and both
+  // auth rules): multichat enqueues/looks up/cancels/checks health over
+  // loopback; the mod claims + reports results with the ingest token.
+  if (path === "/effects" || path.startsWith("/effects/")) {
+    return await handleEffects(req, url, {
+      queue: deps.effects,
+      hub: deps.hub,
+      token: deps.token,
+      effectsToken: deps.effectsToken,
+      maxBodyBytes: deps.config.maxBodyBytes,
+      peerIp,
     });
   }
 
@@ -83,6 +104,7 @@ export async function handler(req: Request, deps: Deps): Promise<Response> {
   if (path === "/overlay/cemetery") return htmlPage(CEMETERY_HTML);
   if (path === "/overlay/badges") return htmlPage(BADGES_HTML);
   if (path === "/overlay/toasts") return htmlPage(TOASTS_HTML);
+  if (path === "/overlay/redeems") return htmlPage(REDEEMS_HTML);
 
   // Server-rendered scene (initial stones baked in; SSE appends the rest).
   if (path === "/overlay/graveyard") {
@@ -94,11 +116,19 @@ export async function handler(req: Request, deps: Deps): Promise<Response> {
   }
 
   if (path === "/status") {
-    return htmlPage(renderStatusPage(deps.state.view(Date.now()), {
+    const now = Date.now();
+    return htmlPage(renderStatusPage(deps.state.view(now), {
       events: deps.state.recentEvents(),
       spriteCount: deps.sprites.count,
       tokenConfigured: deps.token !== "",
       staleAfterSec: deps.config.staleAfterSec,
+      effects: {
+        now,
+        health: deps.effects.health(now),
+        records: deps.effects.list(),
+        modVersion: deps.effects.modVersion,
+        tokenConfigured: deps.effectsToken !== "",
+      },
     }));
   }
 

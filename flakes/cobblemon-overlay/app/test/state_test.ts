@@ -1,6 +1,7 @@
 // OverlayState tests: seq dedup, session reset, worldId→attempt banking (and
 // the counter-decrease fallback), memorial append (pokemon + player-whiteout
-// graves) + persistence round-trip, stale-after-restart.
+// graves) + persistence round-trip, stale-after-restart, and the two
+// persistence-race regressions (lost mid-write mutation, shared-tmp rename).
 
 import { OverlayState } from "../src/state.ts";
 import { parseMessage } from "../src/protocol.ts";
@@ -318,16 +319,10 @@ Deno.test("persistence round-trip: memorial + attempt survive, boots stale", asy
     st.apply(snapshot({ worldId: "w-2", deaths: { total: 0, whiteouts: 0, sacrifices: 0, duplicateReleases: 0 } }), 2000);
     await st.flush();
 
-    // state.json is real JSON on disk (atomic tmp+rename leaves no .tmp behind)
+    // state.json is real JSON on disk (atomic tmp+rename leaves no tmp behind)
     const onDisk = JSON.parse(await Deno.readTextFile(`${dir}/state.json`));
     assertEquals(onDisk.version, 1);
-    let tmpExists = true;
-    try {
-      await Deno.stat(`${dir}/state.json.tmp`);
-    } catch {
-      tmpExists = false;
-    }
-    assert(!tmpExists, "no tmp file left behind");
+    assertEquals(await tmpLeftovers(dir), [], "no tmp file left behind");
 
     const st2 = mkState(dir);
     await st2.load();
@@ -435,6 +430,89 @@ Deno.test("debounced persist timer is flushed cleanly (no dangling timer)", asyn
     await st.flush(); // cancels it + persists now
     const onDisk = JSON.parse(await Deno.readTextFile(`${dir}/state.json`));
     assertEquals(onDisk.player, "Cole");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// ---- persistence races (both reproduced against the pre-SerialWriter code) ----
+
+async function tmpLeftovers(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for await (const e of Deno.readDir(dir)) if (e.name.endsWith(".tmp")) out.push(e.name);
+  return out;
+}
+
+Deno.test("persistence race: a mutation during an in-flight write is not lost by a later flush", async () => {
+  // Old bug: the in-flight write cleared the dirty flag AFTER a newer mutation
+  // landed, so the next flush() (the SIGTERM path, /control reset) skipped it.
+  const dir = await Deno.makeTempDir({ prefix: "cobblemon-overlay-test" });
+  try {
+    const st = mkState(dir);
+    st.apply(snapshot({ player: "Alpha" }), 1000);
+    const inflight = st.flush(); // the write of "Alpha" is now in flight…
+    st.apply(snapshot({ player: "Bravo" }), 1001); // …and this lands mid-write
+    await inflight;
+    await st.flush();
+    const onDisk = JSON.parse(await Deno.readTextFile(`${dir}/state.json`));
+    assertEquals(onDisk.player, "Bravo", "the mid-write mutation must reach disk");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("persistence: a failed state.json write rejects flush, keeps everything dirty — the next flush writes it", async () => {
+  // state.json's writer has no rollback hook (unlike effects.json): a failed
+  // write only fails that flush; memory keeps every mutation and the next
+  // flush persists it.
+  const root = await Deno.makeTempDir({ prefix: "cobblemon-overlay-test" });
+  const dir = `${root}/state`;
+  await Deno.mkdir(dir);
+  try {
+    const st = mkState(dir);
+    st.apply(snapshot({ player: "Alpha" }), 1000);
+    await st.flush();
+    st.apply(snapshot({ player: "Bravo" }), 1001);
+    Deno.renameSync(dir, `${dir}.off`); // the disk goes away
+    let failed = false;
+    try {
+      await st.flush();
+    } catch {
+      failed = true;
+    }
+    assert(failed, "the failed write rejects flush()");
+    assertEquals(st.view(1002).player, "Bravo", "no rollback: memory keeps the mutation");
+    Deno.renameSync(`${dir}.off`, dir);
+    await st.flush();
+    const onDisk = JSON.parse(await Deno.readTextFile(`${dir}/state.json`));
+    assertEquals(onDisk.player, "Bravo", "still dirty → the next flush writes it");
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+Deno.test("persistence race: overlapping flushes serialize (no shared .tmp → rename NotFound)", async () => {
+  // Old bug: every persist wrote the same state.json.tmp, so two overlapping
+  // persists made the second rename reject with NotFound (a 500 on /control).
+  const dir = await Deno.makeTempDir({ prefix: "cobblemon-overlay-test" });
+  try {
+    const st = mkState(dir);
+    for (let round = 0; round < 20; round++) {
+      st.apply(snapshot({ player: `P${round}` }), 1000 + round);
+      const settled = await Promise.allSettled([st.flush(), st.flush(), st.flush()]);
+      assertEquals(settled.filter((r) => r.status === "rejected").length, 0, `round ${round}: no flush may reject`);
+    }
+    // mutations interleaved with a pile of overlapping flushes
+    const flushes: Promise<void>[] = [];
+    for (let i = 0; i < 20; i++) {
+      st.apply(snapshot({ player: `Q${i}` }), 2000 + i);
+      flushes.push(st.flush());
+    }
+    const settled = await Promise.allSettled(flushes);
+    assertEquals(settled.filter((r) => r.status === "rejected").length, 0);
+    const onDisk = JSON.parse(await Deno.readTextFile(`${dir}/state.json`));
+    assertEquals(onDisk.player, "Q19", "the last mutation wins on disk");
+    assertEquals(await tmpLeftovers(dir), [], "no tmp file left behind");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

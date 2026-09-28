@@ -1,4 +1,5 @@
-// Wire-protocol (v1) validator tests — strict envelope, tolerant innards.
+// Wire-protocol (v1) validator tests — strict envelope, tolerant innards, and
+// unknown event names flagged ignorable instead of failing hard.
 
 import { parseMessage } from "../src/protocol.ts";
 import { assert, assertEquals, assertStringIncludes } from "./assert.ts";
@@ -178,9 +179,36 @@ Deno.test("parses each event type", () => {
   }
 });
 
+Deno.test("an unknown event NAME on a valid envelope is flagged ignorable (not applied, never a hard 400)", () => {
+  for (const name of ["mystery_event", "achievement", "redeem"]) {
+    const r = parseMessage(ev(name, { anything: 1 }));
+    assert(!r.ok, `${name} must not parse into a message (nothing may apply it)`);
+    assertEquals(r.unknownEvent, name);
+  }
+  // …but a missing / non-string / empty name is a malformed event, and a bad
+  // envelope stays a bad envelope whatever the event name
+  for (
+    const bad of [
+      { v: 1, type: "event", session: "s-1", seq: 3, t: 1 },
+      ev(""),
+      { ...ev("x"), event: 42 },
+      { ...ev("achievement"), v: 2 },
+      { ...ev("achievement"), session: "" },
+      { ...ev("achievement"), seq: -1 },
+      { ...ev("achievement"), type: "wibble" },
+    ]
+  ) {
+    const r = parseMessage(bad);
+    assert(!r.ok, `should reject ${JSON.stringify(bad)}`);
+    assertEquals(r.unknownEvent, undefined, `not ignorable: ${JSON.stringify(bad)}`);
+  }
+  // a KNOWN event with bad fields is a real error, not an unknown name
+  const lc = parseMessage(ev("level_cap"));
+  assert(!lc.ok);
+  assertEquals(lc.unknownEvent, undefined);
+});
+
 Deno.test("event validation edges", () => {
-  // unknown event name → rejected
-  assert(!parseMessage(ev("mystery_event")).ok);
   // missing cause defaults to faint; invalid cause rejected
   const d = parseMessage(ev("pokemon_lost", { pokemon: { species: "eevee" } }));
   assert(d.ok, d.ok ? "" : d.error);

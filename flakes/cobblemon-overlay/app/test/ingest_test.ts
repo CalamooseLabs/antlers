@@ -1,5 +1,6 @@
 // POST /ingest tests: token gate (timing-safe), body cap, version check,
-// dup handling, and the SSE broadcast wiring.
+// unknown event names (acked + ignored, never a 400 wedge), dup handling, and
+// the SSE broadcast wiring.
 
 import { handleIngest, readBodyLimited } from "../src/ingest.ts";
 import { OverlayState } from "../src/state.ts";
@@ -110,6 +111,45 @@ Deno.test("a new attempt emits a synthetic new_attempt game event", async () => 
   const game = hub.games[0] as Record<string, unknown>;
   assertEquals(game.event, "new_attempt");
   assertEquals(game.attempt, 2);
+});
+
+Deno.test("unknown event name → 200 {ok, ignored}: nothing applied, and the pushes behind it still land", async () => {
+  // Regression: the mod's `achievement` event used to be a 400, which its
+  // pusher retries forever — freezing every later push (head-of-line wedge).
+  const hub = mkHub();
+  const deps = mkDeps(mkState(), hub);
+  await handleIngest(req(snapshot(1)), deps);
+  const before = JSON.stringify(deps.state.view(123456));
+  const res = await handleIngest(
+    req({ v: 1, type: "event", session: "s-1", seq: 2, t: 1, event: "achievement", advancement: "story/mine_stone" }),
+    deps,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: true, ignored: true });
+  assertEquals(hub.games.length, 0, "no game event");
+  assertEquals(hub.states.length, 1, "no state broadcast");
+  assertEquals(JSON.stringify(deps.state.view(123456)), before, "state untouched");
+  // the next push (seq 3) is applied normally
+  const next = await handleIngest(
+    req({ v: 1, type: "event", session: "s-1", seq: 3, t: 1, event: "capture", pokemon: { species: "zubat" } }),
+    deps,
+  );
+  assertEquals(next.status, 200);
+  assertEquals(await next.json(), { ok: true });
+  assertEquals(hub.games.length, 1);
+  // malformed stays a 400: a missing event name, a known event missing its fields, a bad envelope
+  for (
+    const bad of [
+      { v: 1, type: "event", session: "s-1", seq: 4, t: 1 },
+      { v: 1, type: "event", session: "s-1", seq: 4, t: 1, event: "level_cap" },
+      { v: 2, type: "event", session: "s-1", seq: 4, t: 1, event: "achievement" },
+      { v: 1, type: "event", session: "", seq: 4, t: 1, event: "achievement" },
+    ]
+  ) {
+    const r = await handleIngest(req(bad), deps);
+    assertEquals(r.status, 400, JSON.stringify(bad));
+    await r.body?.cancel();
+  }
 });
 
 Deno.test("protocol version mismatch → 400", async () => {

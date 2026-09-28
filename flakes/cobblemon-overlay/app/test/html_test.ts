@@ -1,6 +1,8 @@
 // HTML/XSS + sprite-mapping tests: escapeHtml, the server-rendered status and
 // graveyard pages, the client pages' safety conventions, and the sprite slug
-// sanitizer/fallback.
+// sanitizer/fallback — plus the /overlay/redeems memo page and the toasts page
+// EXECUTED against a tiny fake DOM (textContent-only rendering, the memo
+// stamping, unknown game events ignored) and the /status effects section.
 
 import { escapeHtml } from "../src/util.ts";
 import { sanitizeSlug, SpriteStore } from "../src/sprites.ts";
@@ -12,6 +14,7 @@ import {
   PARTY_HTML,
   pixelArt,
   PLAYER_MAP,
+  REDEEMS_HTML,
   renderGraveyardPage,
   renderStatusPage,
   STAKE_MAP,
@@ -132,7 +135,7 @@ Deno.test("end-to-end: hostile nickname via real ingest → state → status pag
 });
 
 Deno.test("overlay pages: transparent bg, SSE, textContent-only rendering", () => {
-  for (const html of [PARTY_HTML, CEMETERY_HTML, BADGES_HTML, TOASTS_HTML]) {
+  for (const html of [PARTY_HTML, CEMETERY_HTML, BADGES_HTML, TOASTS_HTML, REDEEMS_HTML]) {
     assertStringIncludes(html, "background: transparent");
     assertStringIncludes(html, "new EventSource('/events')");
     assert(!html.includes("innerHTML"), "player strings must go through textContent");
@@ -755,4 +758,280 @@ Deno.test("sprite serve 404s cleanly on traversal and misses", async () => {
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+// ---- client pages EXECUTED against a tiny fake DOM ----
+// Just enough DOM for the page JS: createElement, textContent (the ONLY way
+// text enters — there is no innerHTML), children, class lists, and captured
+// EventSource listeners + timers, so a test can dispatch SSE `game` events.
+
+class FakeEl {
+  tagName: string;
+  className = "";
+  children: FakeEl[] = [];
+  parent: FakeEl | null = null;
+  style: Record<string, string> = {};
+  src = "";
+  alt = "";
+  #text = "";
+
+  constructor(tag: string) {
+    this.tagName = tag;
+  }
+
+  get textContent(): string {
+    return this.#text + this.children.map((c) => c.textContent).join("");
+  }
+
+  set textContent(v: string) {
+    this.#text = String(v);
+    for (const c of this.children) c.parent = null;
+    this.children = [];
+  }
+
+  get firstChild(): FakeEl | null {
+    return this.children[0] ?? null;
+  }
+
+  appendChild(c: FakeEl): FakeEl {
+    c.remove();
+    c.parent = this;
+    this.children.push(c);
+    return c;
+  }
+
+  removeChild(c: FakeEl): FakeEl {
+    this.children = this.children.filter((x) => x !== c);
+    c.parent = null;
+    return c;
+  }
+
+  remove(): void {
+    if (this.parent) this.parent.removeChild(this);
+  }
+
+  addEventListener(): void {}
+
+  get classList() {
+    const list = () => this.className.split(/\s+/).filter(Boolean);
+    const set = (cs: string[]) => {
+      this.className = cs.join(" ");
+    };
+    return {
+      add: (...cs: string[]) => set([...new Set([...list(), ...cs])]),
+      remove: (...cs: string[]) => set(list().filter((c) => !cs.includes(c))),
+      toggle: (c: string, force?: boolean) => {
+        const on = force ?? !list().includes(c);
+        set(on ? [...new Set([...list(), c])] : list().filter((x) => x !== c));
+      },
+      contains: (c: string) => list().includes(c),
+    };
+  }
+}
+
+function runPage(html: string) {
+  const script = html.slice(html.lastIndexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
+  const stack = new FakeEl("div");
+  const listeners: Record<string, (e: { data: string }) => void> = {};
+  const timers = new Map<number, () => void>();
+  let nextTimer = 1;
+  const document = { getElementById: () => stack, createElement: (tag: string) => new FakeEl(tag), body: new FakeEl("body") };
+  class EventSource {
+    constructor(_url: string) {}
+    addEventListener(name: string, fn: (e: { data: string }) => void) {
+      listeners[name] = fn;
+    }
+  }
+  const setTimeoutFake = (fn: () => void) => {
+    timers.set(nextTimer, fn);
+    return nextTimer++;
+  };
+  const clearTimeoutFake = (id: number) => {
+    timers.delete(id);
+  };
+  new Function("document", "EventSource", "setTimeout", "clearTimeout", script)(
+    document,
+    EventSource,
+    setTimeoutFake,
+    clearTimeoutFake,
+  );
+  return {
+    stack,
+    game(ev: Record<string, unknown>) {
+      listeners.game({ data: JSON.stringify(ev) });
+    },
+    // fire every pending timer (and whatever those schedule) until none remain
+    drainTimers() {
+      while (timers.size) {
+        const fns = [...timers.values()];
+        timers.clear();
+        for (const fn of fns) fn();
+      }
+    },
+  };
+}
+
+Deno.test("redeems page: a redeem files a PENDING memo built only from textContent", () => {
+  const page = runPage(REDEEMS_HTML);
+  const evil = `<img src=x onerror=alert(1)>`;
+  page.game({ event: "redeem", ts: 1, id: "r1", viewer: evil, reward: "Budget Cuts", effect: "potion", cost: 750 });
+  assertEquals(page.stack.children.length, 1);
+  const memo = page.stack.children[0];
+  assert(memo.classList.contains("memo") && memo.classList.contains("pending"));
+  const text = memo.textContent;
+  assertStringIncludes(text, "The Company, Inc.");
+  assertStringIncludes(text, `MEMO — ${evil} filed: Budget Cuts`, "the hostile name is inert TEXT");
+  assertStringIncludes(text, "FORM POTION · 750 pts");
+  assertStringIncludes(text, "PENDING REVIEW");
+});
+
+Deno.test("redeems page: effect_result stamps the SAME memo APPROVED / DENIED + REFUNDED", () => {
+  const page = runPage(REDEEMS_HTML);
+  page.game({ event: "redeem", ts: 1, id: "ok1", viewer: "Alice", reward: "Budget Cuts", effect: "potion", cost: 750 });
+  page.game({ event: "redeem", ts: 2, id: "no1", viewer: "Bob", reward: "Butterfingers", effect: "drop_held_item" });
+  page.game({ event: "redeem", ts: 3, id: "arm1", viewer: "Cy", reward: "Mandatory Meeting", effect: "forfeit_turns" });
+
+  page.game({ event: "effect_result", ts: 4, id: "ok1", status: "applied", reason: "", detail: "Slowness II for 45s" });
+  page.game({ event: "effect_result", ts: 5, id: "no1", status: "rejected", reason: "empty_hand", detail: "" });
+  page.game({ event: "effect_result", ts: 6, id: "arm1", status: "armed", reason: "", detail: "" });
+  assertEquals(page.stack.children.length, 3, "results re-stamp existing memos, never add cards");
+
+  const [ok, no, arm] = page.stack.children;
+  assert(ok.classList.contains("approved") && !ok.classList.contains("pending"));
+  assertStringIncludes(ok.textContent, "APPROVED");
+  assertStringIncludes(ok.textContent, "Slowness II for 45s");
+  assert(!ok.textContent.includes("REFUNDED"));
+
+  assert(no.classList.contains("denied"));
+  assertStringIncludes(no.textContent, "DENIEDREFUNDED"); // two stamp lines
+  assertStringIncludes(no.textContent, "Nothing in hand to confiscate.");
+
+  assert(arm.classList.contains("approved"), "armed is APPROVED (Twitch FULFILLED)");
+  assertStringIncludes(arm.textContent, "Scheduled at the next opportunity.");
+});
+
+Deno.test("redeems page: a cancel reads by its reason — fulfilled_externally is CLOSED + NO ACTION, never REFUNDED", () => {
+  const page = runPage(REDEEMS_HTML);
+  const cases: [string, string, string][] = [
+    ["ext", "fulfilled_externally", "canceled"],
+    ["ext2", "fulfilled_externally", "rejected"], // cancel-requested, then the mod stood down
+    ["ref", "refunded", "canceled"],
+    ["man", "manual", "canceled"],
+    ["tmo", "timeout", "expired"],
+  ];
+  for (const [id] of cases) {
+    page.game({ event: "redeem", ts: 1, id, viewer: "Eve", reward: "Magikarp Mandate", effect: "magikarp_mandate" });
+  }
+  for (const [id, reason, status] of cases) {
+    page.game({ event: "effect_result", ts: 2, id, status, reason, detail: "" });
+  }
+  const [ext, ext2, ref, man, tmo] = page.stack.children;
+  for (const c of [ext, ext2]) {
+    assert(c.classList.contains("closed") && !c.classList.contains("denied") && !c.classList.contains("pending"));
+    assertStringIncludes(c.textContent, "CLOSEDNO ACTION"); // two stamp lines
+    assertStringIncludes(c.textContent, "Closed by management. No action taken.");
+    assert(!c.textContent.includes("REFUNDED"), "the points were SPENT — never claim a refund");
+    assert(!c.textContent.includes("DENIED"));
+  }
+  for (const c of [ref, man, tmo]) {
+    assert(c.classList.contains("denied"));
+    assertStringIncludes(c.textContent, "DENIEDREFUNDED");
+  }
+  assertStringIncludes(ref.textContent, "Request withdrawn.");
+  assertStringIncludes(man.textContent, "Withdrawn by management.");
+  assertStringIncludes(tmo.textContent, "Request died in committee.");
+  // one that ran despite the cancel is APPROVED, whatever the reason
+  page.game({ event: "effect_result", ts: 3, id: "ran", status: "applied", reason: "fulfilled_externally", detail: "" });
+  assert(page.stack.children.at(-1)!.classList.contains("approved"));
+});
+
+Deno.test("redeems page: a result with no memo on screen files a pre-stamped one; stack capped; memos retire", () => {
+  const page = runPage(REDEEMS_HTML);
+  for (const status of ["expired", "canceled"]) {
+    page.game({
+      event: "effect_result",
+      ts: 1,
+      id: `late-${status}`,
+      viewer: "Dana",
+      reward: "Lights Out",
+      effect: "potion",
+      status,
+      reason: status === "expired" ? "timeout" : "canceled",
+      detail: "",
+    });
+  }
+  assertEquals(page.stack.children.length, 2);
+  assert(page.stack.children[0].classList.contains("denied"));
+  assertStringIncludes(page.stack.children[0].textContent, "Request died in committee.");
+  assertStringIncludes(page.stack.children[1].textContent, "Request withdrawn.");
+  assertStringIncludes(page.stack.children[1].textContent, "REFUNDED");
+
+  // a burst never grows past 5 memos (and never touches /overlay/toasts at all)
+  for (let i = 0; i < 12; i++) {
+    page.game({ event: "redeem", ts: 10 + i, id: `b${i}`, viewer: "V", reward: "Hop To It", effect: "force_jump" });
+  }
+  assertEquals(page.stack.children.length, 5);
+  assertStringIncludes(page.stack.children[4].textContent, "Hop To It");
+
+  // non-memo game events are ignored
+  page.game({ event: "pokemon_lost", ts: 99, cause: "faint", pokemon: { species: "eevee", name: "Vee" } });
+  assertEquals(page.stack.children.length, 5);
+
+  page.drainTimers();
+  assertEquals(page.stack.children.length, 0, "every memo leaves after its timer");
+});
+
+Deno.test("toasts page ignores the redeem / effect_result game events (they belong to /overlay/redeems)", () => {
+  const page = runPage(TOASTS_HTML);
+  page.game({ event: "redeem", ts: 1, id: "r1", viewer: "Alice", reward: "Budget Cuts", effect: "potion" });
+  page.game({ event: "effect_result", ts: 2, id: "r1", status: "applied", reason: "", detail: "" });
+  assertEquals(page.stack.children.length, 0, "no toast for effect events — loss/death toasts are never evicted by them");
+  // (sanity: the harness does drive the real toast code)
+  page.game({ event: "capture", ts: 3, attempt: 1, pokemon: { species: "zubat", dex: 41, name: "Batty", level: 4 } });
+  assertEquals(page.stack.children.length, 1);
+  assertStringIncludes(page.stack.children[0].textContent, "Caught Batty!");
+});
+
+Deno.test("status page: the effects section escapes every viewer/mod-controlled string", () => {
+  const evil = `<script>alert("fx")</script>`;
+  const html = renderStatusPage(hostileView(), {
+    events: [],
+    spriteCount: 0,
+    tokenConfigured: false,
+    staleAfterSec: 15,
+    effects: {
+      now: 100_000,
+      health: { ok: true, enabled: true, accepting: true, lastPollAgoMs: 1500, ready: true, open: 1, pending: 0 },
+      records: [{
+        id: "abcdef12-0000-4000-8000-000000000000",
+        effect: "potion",
+        params: {},
+        viewer: evil,
+        viewerLogin: evil,
+        reward: evil,
+        cost: 750,
+        simulated: true,
+        createdAt: 40_000,
+        expiresAt: 700_000,
+        status: "rejected",
+        deliveries: 2,
+        reason: evil,
+        detail: evil,
+        updatedAt: 90_000,
+        cancelRequested: true,
+        cancelReason: "fulfilled_externally",
+      }],
+      modVersion: evil,
+      tokenConfigured: false,
+    },
+  });
+  assert(!html.includes(`<script>alert("fx")`), "no raw effect string reaches the page");
+  assertStringIncludes(html, "&lt;script&gt;alert(&quot;fx&quot;)&lt;/script&gt;");
+  assertStringIncludes(html, "<h2>channel-point effects</h2>");
+  assertStringIncludes(html, `<td title="abcdef12-0000-4000-8000-000000000000">abcdef12</td>`);
+  assertStringIncludes(html, "rejected (cancel requested) [sim]");
+  assertStringIncludes(html, " · cancel: fulfilled_externally — ", "the cancel reason is shown next to the mod's");
+  assertStringIncludes(html, "<td>2</td><td>60s</td>", "deliveries + age");
+  assertStringIncludes(html, "ACCEPTING");
+  assertStringIncludes(html, "loopback only");
 });

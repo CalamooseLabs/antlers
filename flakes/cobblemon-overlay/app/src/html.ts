@@ -5,13 +5,15 @@
 //  - These are TS template literals: the page JS must NOT contain backticks or
 //    "${" (string concatenation only) or TS would interpolate it.
 //  - Every player-controlled string (nicknames, quest names, location, trainer
-//    names) is rendered client-side via textContent (never innerHTML), and
+//    names — and Twitch viewer names / reward titles / effect details on the
+//    redeem memos) is rendered client-side via textContent (never innerHTML), and
 //    server-side (renderStatusPage) through escapeHtml — that is the XSS gate.
 //  - Overlay pages have a TRANSPARENT background (OBS browser sources) and are
 //    served with Cache-Control: no-store (see router.ts).
 //  - CSS animations per the plan: HP bars tween on change, faint = grayscale +
 //    cross fade-in, toasts slide/fade, new headstones rise from the ground.
 
+import type { EffectHealth, EffectRecord } from "./effects.ts";
 import type { Attacker } from "./protocol.ts";
 import type { GameView, MemorialEntry, PublicState } from "./state.ts";
 import { escapeHtml } from "./util.ts";
@@ -1338,6 +1340,151 @@ export const TOASTS_HTML = page(
   TOASTS_JS,
 );
 
+// ---- /overlay/redeems — channel-point redemption memos ----
+// Its OWN OBS source with its own stack, so a burst of redemptions can never
+// evict a loss/death toast from /overlay/toasts. Each `redeem` files a The
+// Company, Inc. interoffice memo ("MEMO — <viewer> filed: <reward>") stamped
+// PENDING REVIEW; the matching `effect_result` (by redemption id) re-stamps it
+// APPROVED (applied/armed) or DENIED + REFUNDED (rejected/expired/canceled)
+// with the mod's detail — except a cancel whose reason is
+// `fulfilled_externally` (completed in the Twitch queue: points spent, nothing
+// ran), stamped CLOSED + NO ACTION, never REFUNDED. Styled after the
+// thecompanyinc-* legal documents (Century Schoolbook on paper, rule lines)
+// plus a rubber stamp. Deliberately
+// NOT inside .wrap: a refund resolving while the game feed is stale must still
+// read at full strength. Viewer names/reward titles → textContent only.
+
+const REDEEMS_CSS = `
+.stack { display: flex; flex-direction: column; gap: 12px; align-items: flex-end;
+  padding: 12px; width: 100%; }
+.memo { width: 440px; max-width: 100%; padding: 9px 16px 11px;
+  background: #f4efe2; color: #1c1b17; border: 1px solid #cbc2a8; border-top: 5px solid #1c2a40;
+  border-radius: 2px; box-shadow: 0 6px 18px rgba(0,0,0,.55);
+  font: 14px/1.35 "Century Schoolbook", "TeX Gyre Schola", "New Century Schoolbook", "C059", Georgia, serif;
+  animation: memoIn .5s cubic-bezier(.2,.9,.25,1.1) both; }
+.memo.sim { border-top-color: #857d66; }
+.memo.leaving { animation: memoOut .6s ease both; }
+@keyframes memoIn { from { transform: translateX(120%) rotate(3deg); opacity: 0; }
+  to { transform: none; opacity: 1; } }
+@keyframes memoOut { to { transform: translateX(30%); opacity: 0; } }
+.mhead { display: flex; justify-content: space-between; gap: 8px; padding-bottom: 3px;
+  border-bottom: 1.5px solid #1c1b17; font-size: 11px; letter-spacing: 2px;
+  font-variant: small-caps; color: #3b382d; }
+.mtitle { margin-top: 6px; font-weight: 700; font-size: 16px; overflow-wrap: anywhere; }
+.mrow { margin-top: 1px; font-size: 11px; letter-spacing: .5px; color: #5a5545; }
+.mfoot { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-top: 7px; padding-top: 6px; border-top: 1px solid #cbc2a8; }
+.mdetail { min-width: 0; font-size: 12px; font-style: italic; color: #3b382d; overflow-wrap: anywhere; }
+.stamp { flex: 0 0 auto; padding: 3px 9px; border: 3px double currentColor; border-radius: 3px;
+  font: 700 13px/1.15 "Courier New", Courier, monospace; letter-spacing: 2px; text-align: center;
+  color: #857d66; transform: rotate(-6deg); opacity: .85; }
+.stamp .s2 { display: block; font-size: 10px; letter-spacing: 3px; }
+.memo.pending .stamp { animation: review 1.6s ease-in-out infinite; }
+@keyframes review { 50% { opacity: .35; } }
+.memo.approved .stamp { color: #1e6b3a; animation: stampIn .35s cubic-bezier(.2,1.4,.3,1) both; }
+.memo.denied .stamp { color: #b3212a; animation: stampIn .35s cubic-bezier(.2,1.4,.3,1) both; }
+.memo.closed .stamp { color: #1c2a40; animation: stampIn .35s cubic-bezier(.2,1.4,.3,1) both; }
+@keyframes stampIn { from { transform: rotate(-6deg) scale(2.4); opacity: 0; }
+  to { transform: rotate(-6deg) scale(1); opacity: .92; } }
+`;
+
+const REDEEMS_JS = `
+var stack = document.getElementById('stack');
+var memos = {}; // redemption id -> on-screen memo, so its effect_result stamps the right card
+var PENDING_MS = 20000; // an unresolved memo stays up this long (a later result files a fresh one)
+var RESOLVED_MS = 7000;
+// Company-voice denial reasons for the mod's / sweeper's / multichat's cancel
+// reason codes (anything else is shown de-underscored).
+var denyReasons = {
+  empty_hand: 'Nothing in hand to confiscate.',
+  protected_item: 'Item is protected company property.',
+  nothing_to_shuffle: 'Hotbar already maximally disorganized.',
+  no_eligible_pokemon: 'No eligible staff to write up.',
+  empty_party: 'No staff on payroll.',
+  pc_full: 'Records storage is full.',
+  invalid_params: 'Form filled out incorrectly.',
+  unknown_effect: 'No such policy on file.',
+  no_spawn_spot: 'No office space for the contractor.',
+  canceled: 'Request withdrawn.',
+  refunded: 'Request withdrawn.',
+  manual: 'Withdrawn by management.',
+  timeout: 'Request died in committee.',
+  error: 'Clerical error.'
+};
+function reasonText(r) { return r ? (denyReasons[r] || String(r).replace(/_/g, ' ')) : 'Request denied.'; }
+function formLabel(effect) { return 'FORM ' + String(effect || '?').toUpperCase().replace(/_/g, '-'); }
+function retire(c, ms) {
+  clearTimeout(c.timer);
+  c.timer = setTimeout(function () {
+    if (memos[c.id] === c) delete memos[c.id]; // a result during the fade files a fresh memo
+    c.root.classList.add('leaving');
+    setTimeout(function () { c.root.remove(); }, 600);
+  }, ms);
+}
+function fileMemo(ev) {
+  var root = el('div', 'memo pending' + (ev.simulated ? ' sim' : ''));
+  var head = el('div', 'mhead');
+  var co = el('span'); co.textContent = 'The Company, Inc.';
+  var kind = el('span'); kind.textContent = ev.simulated ? 'Internal Memorandum · Drill' : 'Internal Memorandum';
+  head.appendChild(co); head.appendChild(kind); root.appendChild(head);
+  var title = el('div', 'mtitle');
+  title.textContent = 'MEMO — ' + (ev.viewer || 'a viewer') + ' filed: ' + (ev.reward || 'a request');
+  root.appendChild(title);
+  var row = el('div', 'mrow');
+  row.textContent = formLabel(ev.effect) + (ev.cost > 0 ? ' · ' + Number(ev.cost).toLocaleString('en-US') + ' pts' : '');
+  root.appendChild(row);
+  var foot = el('div', 'mfoot');
+  var detail = el('div', 'mdetail'); detail.textContent = 'Routed to the appropriate department.';
+  var stamp = el('div', 'stamp'); stamp.textContent = 'PENDING REVIEW';
+  foot.appendChild(detail); foot.appendChild(stamp); root.appendChild(foot);
+  stack.appendChild(root);
+  while (stack.children.length > 5) {
+    var old = stack.firstChild;
+    for (var k in memos) {
+      if (memos[k].root === old) { clearTimeout(memos[k].timer); delete memos[k]; }
+    }
+    stack.removeChild(old);
+  }
+  var c = { id: String(ev.id || ''), root: root, detail: detail, stamp: stamp, timer: 0 };
+  if (c.id) memos[c.id] = c;
+  retire(c, PENDING_MS);
+  return c;
+}
+function resolveMemo(c, ev) {
+  var ok = ev.status === 'applied' || ev.status === 'armed';
+  // completed in the Twitch queue: the points are SPENT and nothing ran, so
+  // it is closed, never "refunded"
+  var closed = !ok && ev.reason === 'fulfilled_externally';
+  c.root.classList.remove('pending');
+  c.root.classList.add(ok ? 'approved' : (closed ? 'closed' : 'denied'));
+  c.stamp.textContent = '';
+  var s1 = el('span', 's1'); s1.textContent = ok ? 'APPROVED' : (closed ? 'CLOSED' : 'DENIED');
+  c.stamp.appendChild(s1);
+  if (!ok) { var s2 = el('span', 's2'); s2.textContent = closed ? 'NO ACTION' : 'REFUNDED'; c.stamp.appendChild(s2); }
+  if (closed) c.detail.textContent = 'Closed by management. No action taken.';
+  else c.detail.textContent = ev.detail ||
+    (ok ? (ev.status === 'armed' ? 'Scheduled at the next opportunity.' : 'Effective immediately.') : reasonText(ev.reason));
+  retire(c, RESOLVED_MS);
+}
+function onGame(ev) {
+  if (ev.event === 'redeem') {
+    fileMemo(ev);
+  } else if (ev.event === 'effect_result') {
+    // a result for a memo no longer on screen (timed out, evicted, or filed
+    // before this source loaded) files a fresh, already-stamped one
+    resolveMemo(memos[String(ev.id || '')] || fileMemo(ev), ev);
+  }
+}
+connect({ game: onGame });
+`;
+
+export const REDEEMS_HTML = page(
+  "redeems — cobblemon-overlay",
+  REDEEMS_CSS,
+  `<div class="stack" id="stack"></div>`,
+  REDEEMS_JS,
+);
+
 // ---- / — tiny index of what's here ----
 
 export const INDEX_HTML = `<!DOCTYPE html>
@@ -1362,6 +1509,7 @@ h1 { font-size: 18px; letter-spacing: 1px; }
 <li><a href="/overlay/graveyard">/overlay/graveyard</a> — Lavender-Town pixel graveyard scene: The Company, Inc. tower looming behind the graves (lit windows shift, a few buzz like dying tubes), a parking-lot lamp row (one flickering) against big backdrop trees, blooming lavender flowers, drifting mist, sprite-faced stones (<a href="/overlay/graveyard?tooltips=1">?tooltips=1</a> = cycling name + cause-of-death textbox, one grave at a time — who/what KO'd each Pokémon, and how the trainer themselves died; ?max=N = newest N)</li>
 <li><a href="/overlay/badges">/overlay/badges</a> — badges + level cap</li>
 <li><a href="/overlay/toasts">/overlay/toasts</a> — live event toasts</li>
+<li><a href="/overlay/redeems">/overlay/redeems</a> — channel-point redemption memos (one The Company, Inc. memo per redeem, stamped APPROVED, DENIED + REFUNDED, or CLOSED + NO ACTION when completed in the Twitch queue; its own source so bursts never evict the toasts)</li>
 <li><a href="/status">/status</a> — debug view</li>
 <li><a href="/api/state.json">/api/state.json</a> — raw state</li>
 </ul>
@@ -1371,11 +1519,55 @@ h1 { font-size: 18px; letter-spacing: 1px; }
 
 // ---- /status — server-rendered debug page (auto-refresh) ----
 
+// The channel-point effect queue's slice of /status (router.ts builds it).
+export interface EffectsStatus {
+  now: number;
+  health: EffectHealth;
+  records: EffectRecord[]; // newest first
+  modVersion: string;
+  tokenConfigured: boolean;
+}
+
 export interface StatusExtras {
   events: GameView[];
   spriteCount: number;
   tokenConfigured: boolean;
   staleAfterSec: number;
+  effects?: EffectsStatus;
+}
+
+// "42s" / "17m" / "5h" — the effects table's age column.
+function ago(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 120) return `${s}s`;
+  if (s < 7200) return `${Math.round(s / 60)}m`;
+  return `${Math.round(s / 3600)}h`;
+}
+
+// Every viewer/mod-controlled string (viewer, reward, reason, detail, even the
+// id + effect) goes through escapeHtml.
+function renderEffectsSection(fx: EffectsStatus): string {
+  const row = (k: string, v: string) =>
+    `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`;
+  const h = fx.health;
+  const rows = fx.records.slice(0, 50).map((r) => {
+    const status = r.status + (r.cancelRequested ? " (cancel requested)" : "") + (r.simulated ? " [sim]" : "");
+    const reason = [r.reason ?? "", r.cancelReason ? `cancel: ${r.cancelReason}` : ""].filter(Boolean).join(" · ") +
+      (r.detail ? ` — ${r.detail}` : "");
+    return `<tr><td title="${escapeHtml(r.id)}">${escapeHtml(r.id.slice(0, 8))}</td>` +
+      `<td>${escapeHtml(r.effect)}</td><td>${escapeHtml(r.viewer)}</td><td>${escapeHtml(status)}</td>` +
+      `<td>${escapeHtml(reason)}</td><td>${r.deliveries}</td><td>${escapeHtml(ago(fx.now - r.createdAt))}</td></tr>`;
+  }).join("");
+  return `<h2>channel-point effects</h2>
+<table>
+${row("queue", h.enabled ? (h.accepting ? "ACCEPTING" : "NOT accepting (mod not polling)") : "DISABLED")}
+${row("last mod poll", h.lastPollAgoMs === null ? "never" : `${ago(h.lastPollAgoMs)} ago`)}
+${row("mod ready", h.ready ? "yes" : "no")}
+${row("mod version", fx.modVersion || "?")}
+${row("open / pending", `${h.open} / ${h.pending}`)}
+${row("effects auth", fx.tokenConfigured ? "loopback + token" : "loopback only")}
+</table>
+<table><tr><th>id</th><th>effect</th><th>viewer</th><th>status</th><th>reason</th><th>deliveries</th><th>age</th></tr>${rows}</table>`;
 }
 
 export function renderStatusPage(view: PublicState, extra: StatusExtras): string {
@@ -1467,6 +1659,7 @@ ${row("ingest auth", extra.tokenConfigured ? "token" : "OPEN (no token)")}
 <table><tr><th>slot</th><th>name</th><th>species</th><th>dex</th><th>lv</th><th>hp</th><th></th></tr>${partyRows}</table>
 <h2>memorial (last 15)</h2>
 <table><tr><th>attempt</th><th>name</th><th>species</th><th>lv</th><th>cause</th><th>when</th></tr>${memorialRows}</table>
+${extra.effects ? renderEffectsSection(extra.effects) : ""}
 <h2>recent events (newest first)</h2>
 <ul>
 ${eventRows}

@@ -12,38 +12,45 @@
 // to stateDir/state.json (debounced + atomic, flushed on SIGTERM/SIGINT), and
 // serves transparent OBS browser-source overlay pages that follow the state
 // live over SSE. Staleness is judged by SERVER receive time, never the mod's
-// clock. Modules: config, protocol (the wire contract), ingest, state, sse,
-// sprites, html, router, util — this file just wires them together.
+// clock. It also hosts the durable channel-point EFFECT QUEUE between multichat
+// (loopback) and the mod (effects.ts, stateDir/effects.json). Modules: config,
+// protocol (the wire contract), ingest, control, effects, state, sse, sprites,
+// html, router, util — this file just wires them together.
 
 import { loadConfig } from "./config.ts";
 import { OverlayState } from "./state.ts";
 import { SseHub, Watchdog } from "./sse.ts";
 import { SpriteStore } from "./sprites.ts";
+import { EffectQueue, effectResultEvent } from "./effects.ts";
 import { type Deps, handler } from "./router.ts";
 import { isError, log } from "./util.ts";
+
+// A token file (staged by systemd LoadCredential; see module.nix). "" when not
+// configured. A configured-but-unreadable/empty file is fatal — silently coming
+// up unauthenticated would defeat the point.
+async function readTokenFile(path: string, what: string): Promise<string> {
+  if (!path) return "";
+  let token = "";
+  try {
+    token = (await Deno.readTextFile(path)).trim();
+  } catch (e) {
+    log("error", `cannot read ${what}`, { path, err: isError(e) ? e.message : String(e) });
+    Deno.exit(1);
+  }
+  if (!token) {
+    log("error", `${what} is empty`, { path });
+    Deno.exit(1);
+  }
+  return token;
+}
 
 async function main(): Promise<void> {
   const config = await loadConfig();
 
-  // Ingest token (staged by systemd LoadCredential; see module.nix). A
-  // configured-but-unreadable/empty token file is fatal — silently coming up
-  // unauthenticated would defeat the point.
-  let token = "";
-  if (config.tokenFile) {
-    try {
-      token = (await Deno.readTextFile(config.tokenFile)).trim();
-    } catch (e) {
-      log("error", "cannot read tokenFile", {
-        path: config.tokenFile,
-        err: isError(e) ? e.message : String(e),
-      });
-      Deno.exit(1);
-    }
-    if (!token) {
-      log("error", "tokenFile is empty", { path: config.tokenFile });
-      Deno.exit(1);
-    }
-  }
+  // The ingest token (/ingest, /control, the mod-facing effect routes) and the
+  // effects token (multichat's Bearer on the loopback-only effect routes).
+  const token = await readTokenFile(config.tokenFile, "tokenFile");
+  const effectsToken = await readTokenFile(config.effectsTokenFile, "effectsTokenFile");
 
   if (config.stateDir) {
     await Deno.mkdir(config.stateDir, { recursive: true }).catch(() => {});
@@ -64,6 +71,19 @@ async function main(): Promise<void> {
   const hub = new SseHub(() => state.view(Date.now()), watchdog);
   hub.startTimers();
 
+  const effects = new EffectQueue({
+    stateDir: config.stateDir,
+    enabled: config.effectsEnabled,
+    leaseSec: config.effectLeaseSec,
+    ttlSec: config.effectTtlSec,
+    acceptWindowSec: config.effectAcceptWindowSec,
+    maxOpen: config.maxOpenEffects,
+  });
+  await effects.load(); // leased → pending (redelivered; the mod dedups by id)
+  // The 5s sweeper: lease expiry → pending, overdue → expired (the memo cards
+  // resolve DENIED + REFUNDED; multichat refunds on its next lookup).
+  effects.startTimers((rec) => hub.broadcastGame(effectResultEvent(rec, Date.now())));
+
   const ac = new AbortController();
   let shuttingDown = false;
   const shutdown = (sig: string) => {
@@ -71,8 +91,13 @@ async function main(): Promise<void> {
     shuttingDown = true;
     log("info", "shutting down — flushing state", { sig });
     hub.stopTimers();
-    state.flush()
-      .catch((e) => log("error", "final flush failed", { err: isError(e) ? e.message : String(e) }))
+    effects.stopTimers();
+    Promise.all([
+      state.flush()
+        .catch((e) => log("error", "final flush failed", { err: isError(e) ? e.message : String(e) })),
+      effects.flush()
+        .catch((e) => log("error", "final effects flush failed", { err: isError(e) ? e.message : String(e) })),
+    ])
       .finally(() => {
         ac.abort();
         setTimeout(() => Deno.exit(0), 200);
@@ -89,20 +114,26 @@ async function main(): Promise<void> {
     port: config.port,
     sprites: sprites.count,
     auth: token ? "token" : "open",
+    effects: config.effectsEnabled ? (effectsToken ? "loopback+token" : "loopback") : "disabled",
     stateDir: config.stateDir || "(persistence disabled)",
   });
 
-  const deps: Deps = { config, state, hub, sprites, token };
+  const deps: Deps = { config, state, hub, sprites, effects, token, effectsToken };
   await Deno.serve(
     { port: config.port, hostname: config.hostname, signal: ac.signal, onListen: () => {} },
-    (req) =>
-      handler(req, deps).catch((e) => {
+    (req, info) => {
+      // The RAW socket peer (no proxy in front) — gates the loopback-only
+      // multichat-facing effect routes.
+      const ra = info.remoteAddr;
+      const peerIp = ra && "hostname" in ra ? ra.hostname : "";
+      return handler(req, deps, peerIp).catch((e) => {
         log("error", "request error", { err: isError(e) ? e.message : String(e) });
         return new Response(JSON.stringify({ error: "Internal error" }), {
           status: 500,
           headers: { "content-type": "application/json" },
         });
-      }),
+      });
+    },
   ).finished;
 }
 
