@@ -251,7 +251,7 @@
     };
 
     # ---- Overlay so NixOS / home-manager configs can consume directly ----
-    overlays.default = final: _prev:
+    overlays.default = final: prev:
       {
         antlers = final.callPackage ./flakes/antlers/package.nix {};
         antlers-zed-editor = (final.callPackage ./flakes/zed-editor/package.nix {}) {};
@@ -271,7 +271,12 @@
         thecompanyinc-style = (final.callPackage ./flakes/legal/package.nix {}).thecompanyinc-style;
         thecompanyinc-doc-wizard = (final.callPackage ./flakes/legal/package.nix {}).docWizard;
       }
-      // (final.callPackages ./flakes/scripts/package.nix {});
+      # `prev`, not `final`: this spread decides the overlay's attribute NAMES,
+      # and names that depend on `final` are an infinite recursion inside any
+      # package set the overlay is applied to (nixpkgs.overlays, import nixpkgs
+      # { overlays }). The scripts' inputs are stock nixpkgs packages, so the
+      # previous stage has everything they need.
+      // (prev.callPackages ./flakes/scripts/package.nix {});
 
     # ---- NixOS modules ----
     # inputs.antlers.nixosModules.{lanserver,vibe,vibe-server}

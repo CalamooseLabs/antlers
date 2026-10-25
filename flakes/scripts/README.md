@@ -65,6 +65,18 @@ inherited `$PATH`, so they resolve from the host or ISO the script runs on.
 | `plex-restore`       | Restores Plex `Preferences.xml` + the newest DB snapshot; `--list`/`--from <dir>`/`--prefs-only`; `/identity` health-check. Re-execs under `sudo`. | `coreutils findutils util-linux systemd curl gnugrep` |
 | `plex-backup`        | Snapshots Plex `Preferences.xml` + a verified `sqlite3 .backup` of the library/blobs DBs to `<BACKUP_DIR>/automated`, with `PLEX_RETENTION` rotation. | `coreutils findutils util-linux sqlite` |
 
+### `cala-installer` (the ISO's TUI) and hosts without `wipeAllDisks`
+
+`cala-installer` offers every host and machine of the flake: its built-in lists
+are a snapshot, the installer image exports live ones (`CALA_INSTALLER_*`,
+computed from the flake by cala-m-os `iso/installer.nix`), and once the network
+is up it re-reads both from `INSTALL_FLAKE_REF` (`nixosConfigurations` minus the
+installer images; the `machines/{workstations,vms}` directories). A host whose
+`calamoose.install.wipeAllDisks` is `false` (a cloud VM whose disk can't be
+pinned by-id, a dual-boot box) can't be wiped unattended by `install-cala-m-os`;
+the TUI then runs `disko --mode destroy,format,mount` itself — disko lists the
+device(s) and asks for a typed `yes` — and hands off with `INSTALL_SKIP_DISKO=1`.
+
 ### `install-cala-m-os` (bundled completion)
 
 `install-cala-m-os` is built specially: rather than the bare `writeShellApplication`,
@@ -91,7 +103,8 @@ the same vars the module bakes as defaults via `makeWrapper --set-default`:
 | `chromium-ephemeral` | `CHROMIUM_EPHEMERAL_BIN` (`chromium`)                                                                                                                                                                                 |
 | `bridge-internet`    | `BRIDGE_IP_RANGE` (`10.0.0`), `BRIDGE_NETMASK` (`24`), `BRIDGE_LEASE_TIME` (`24h`), `BRIDGE_DHCP_PORT` (`5353`) — plus `-i`/`-e`/`-r`/`-n`/`-t` flags                                                                |
 | `flash-iso`          | `FLASH_ISO_FLAKE` (git toplevel of `$PWD`), `FLASH_ISO_ATTR` (`nixosConfigurations.iso.config.system.build.isoImage`), `FLASH_ISO_TITLE` (`Cala-M-OS ISO Flash Tool`)                                                |
-| `install-cala-m-os`  | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `INSTALL_VERSION_ATTR`, `INSTALL_TARGET_DIR`, `INSTALL_MNT_DIR`, `INSTALL_PREFETCH_REL`, `INSTALL_PASSWD_USERS`                                                            |
+| `install-cala-m-os`  | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `INSTALL_VERSION_ATTR`, `INSTALL_TARGET_DIR`, `INSTALL_MNT_DIR`, `INSTALL_PREFETCH_REL`, `INSTALL_PASSWD_USERS`, `INSTALL_SKIP_DISKO` (`0`; `1` = target already partitioned + mounted) — the completion reads `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated) over its built-in lists |
+| `cala-installer`     | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `CALA_SELF_CLONE_DIR` (`/root/cala-m-os-self`), `CALA_NET_WAIT_SECS` (`15`), `CALA_LIST_TIMEOUT_SECS` (`120`), `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated picker lists; the ISO exports them from its flake, and once online the TUI refreshes them from `INSTALL_FLAKE_REF` itself), `PROTON_PASS_SESSION_DIR`, `PROTON_PASS_KEY_PROVIDER`, `PROTON_PASS_PAT_FILE` |
 | `gpg-key-import`     | `GPG_KEY_FILE` (`/run/agenix/yubigpg.asc`), `GPG_KEY_ID` (`50D56BF0B93CA212`)                                                                                                                                        |
 | `remote-kvm`         | `REMOTE_KVM_TARGETS` (newline-separated `name dns ip`), `REMOTE_KVM_DEFAULT` (`broadcast`), `REMOTE_KVM_PROFILE_DIR` (`$HOME/.local/share/remote-kvm`) — plus a positional target arg                                |
 | `pi-imager`          | `PI_IMAGER_QT_STYLE_OVERRIDE` (`fusion`), `PI_IMAGER_QT_QPA_PLATFORM` (`wayland`)                                                                                                                                    |
