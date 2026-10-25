@@ -742,18 +742,26 @@ main() {
   # asks before it touches anything, and it reports the real error if there is
   # one. A pre-set INSTALL_SKIP_DISKO=1 (a hand-partitioned target) is honoured.
   local wipe_all="" wipe_err=""
+  wipe_err=$(mktemp)
+  if ! wipe_all=$(MACHINE_OVERRIDE="$MACHINE" nix eval --impure \
+    "$ref#nixosConfigurations.$HOST.config.calamoose.install.wipeAllDisks" 2>"$wipe_err"); then
+    warn "Could not read calamoose.install.wipeAllDisks for '$HOST' from $ref:"
+    warn "$(grep -v '^[[:space:]]*$' "$wipe_err" | tail -n2 | tr '\n' ' ')"
+    warn "Treating it as false: disko will show what it would erase and ask first."
+    wipe_all=false
+  fi
+  rm -f "$wipe_err"
   if [ "${INSTALL_SKIP_DISKO:-0}" = "1" ]; then
-    info "INSTALL_SKIP_DISKO=1: assuming the target is already partitioned and mounted at /mnt."
-  else
-    wipe_err=$(mktemp)
-    if ! wipe_all=$(MACHINE_OVERRIDE="$MACHINE" nix eval --impure \
-      "$ref#nixosConfigurations.$HOST.config.calamoose.install.wipeAllDisks" 2>"$wipe_err"); then
-      warn "Could not read calamoose.install.wipeAllDisks for '$HOST' from $ref:"
-      warn "$(grep -v '^[[:space:]]*$' "$wipe_err" | tail -n2 | tr '\n' ' ')"
-      warn "Treating it as false: disko will show what it would erase and ask first."
-      wipe_all=false
+    if [ "$wipe_all" = "true" ]; then
+      # The backend only honours INSTALL_SKIP_DISKO for wipeAllDisks=false hosts;
+      # a wipeAllDisks=true host is wiped by disko --yes-wipe-all-disks regardless.
+      warn "INSTALL_SKIP_DISKO=1 is set, but '$HOST' has calamoose.install.wipeAllDisks = true:"
+      warn "install-cala-m-os will still wipe its disko-owned disk(s) unattended."
+      gum confirm "Continue and let the backend wipe them?" || die "Aborted."
+    else
+      info "INSTALL_SKIP_DISKO=1: assuming the target is already partitioned and mounted at /mnt."
     fi
-    rm -f "$wipe_err"
+  else
     if [ "$wipe_all" = "false" ]; then
       gum style --border rounded --padding "1 2" --margin "1 0" --foreground 11 \
         "Host '$HOST' does not allow an unattended disk wipe (calamoose.install.wipeAllDisks = false)." \

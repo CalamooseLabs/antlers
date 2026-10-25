@@ -27,7 +27,7 @@ is `x86_64-linux`, the flake's only system):
 | `packages.<system>.<script>`              | each script as its own buildable package (`scripts` merged in via `// scripts`)     |
 | `apps.<system>.<script>`                  | a `nix run .#<script>` target per command (`mapAttrs` over `scripts`)               |
 | `lib.<system>.scripts`                    | the raw derivation set, for downstream reuse                                         |
-| `overlays.default.<script>`               | each script added to the overlay (`// (callPackages ./flakes/scripts/package.nix {})`) |
+| `overlays.default.<script>`               | each script added to the overlay — names from antlers' own `scripts` set, values built lazily with `final.callPackages`, because names that depend on the consumer's `final`/`prev` recurse inside nixpkgs |
 | `nixosModules.antlers-scripts`            | `programs.antlers-scripts` — **system** variant (`environment.systemPackages`)      |
 | `homeManagerModules.antlers-scripts`      | `programs.antlers-scripts` — **home** variant (`home.packages`)                     |
 
@@ -90,8 +90,11 @@ optional machine override is exported as `MACHINE_OVERRIDE` and persisted to
 ## Env-var overrides
 
 Every script reads its tunables from the environment, so an override needs **no
-rebuild** — set the var inline (`CONFIG_PATH=/srv/cfg rebuild-config`). These are
-the same vars the module bakes as defaults via `makeWrapper --set-default`:
+rebuild** — set the var inline (`CONFIG_PATH=/srv/cfg rebuild-config`). For the
+module-managed scripts these are the same vars the module bakes as defaults via
+`makeWrapper --set-default`; `cala-installer` has no `programs.antlers-scripts`
+options at all — it ships only on the installer image, which sets its vars
+(including the `CALA_INSTALLER_*` lists) through `environment.variables`:
 
 | Command              | Env vars (default)                                                                                                                                                                                                  |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -103,7 +106,7 @@ the same vars the module bakes as defaults via `makeWrapper --set-default`:
 | `chromium-ephemeral` | `CHROMIUM_EPHEMERAL_BIN` (`chromium`)                                                                                                                                                                                 |
 | `bridge-internet`    | `BRIDGE_IP_RANGE` (`10.0.0`), `BRIDGE_NETMASK` (`24`), `BRIDGE_LEASE_TIME` (`24h`), `BRIDGE_DHCP_PORT` (`5353`) — plus `-i`/`-e`/`-r`/`-n`/`-t` flags                                                                |
 | `flash-iso`          | `FLASH_ISO_FLAKE` (git toplevel of `$PWD`), `FLASH_ISO_ATTR` (`nixosConfigurations.iso.config.system.build.isoImage`), `FLASH_ISO_TITLE` (`Cala-M-OS ISO Flash Tool`)                                                |
-| `install-cala-m-os`  | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `INSTALL_VERSION_ATTR`, `INSTALL_TARGET_DIR`, `INSTALL_MNT_DIR`, `INSTALL_PREFETCH_REL`, `INSTALL_PASSWD_USERS`, `INSTALL_SKIP_DISKO` (`0`; `1` = target already partitioned + mounted) — the completion reads `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated) over its built-in lists |
+| `install-cala-m-os`  | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `INSTALL_VERSION_ATTR`, `INSTALL_TARGET_DIR`, `INSTALL_MNT_DIR`, `INSTALL_PREFETCH_REL`, `INSTALL_PASSWD_USERS`, `INSTALL_SKIP_DISKO` (`0`; `1` = target already partitioned + mounted — honoured only for hosts whose `calamoose.install.wipeAllDisks` is false; a `wipeAllDisks = true` host is always wiped by disko `--yes-wipe-all-disks`) — the completion reads `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated) over its built-in lists |
 | `cala-installer`     | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `CALA_SELF_CLONE_DIR` (`/root/cala-m-os-self`), `CALA_NET_WAIT_SECS` (`15`), `CALA_LIST_TIMEOUT_SECS` (`120`), `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated picker lists; the ISO exports them from its flake, and once online the TUI refreshes them from `INSTALL_FLAKE_REF` itself), `PROTON_PASS_SESSION_DIR`, `PROTON_PASS_KEY_PROVIDER`, `PROTON_PASS_PAT_FILE` |
 | `gpg-key-import`     | `GPG_KEY_FILE` (`/run/agenix/yubigpg.asc`), `GPG_KEY_ID` (`50D56BF0B93CA212`)                                                                                                                                        |
 | `remote-kvm`         | `REMOTE_KVM_TARGETS` (newline-separated `name dns ip`), `REMOTE_KVM_DEFAULT` (`broadcast`), `REMOTE_KVM_PROFILE_DIR` (`$HOME/.local/share/remote-kvm`) — plus a positional target arg                                |
