@@ -27,7 +27,7 @@ is `x86_64-linux`, the flake's only system):
 | `packages.<system>.<script>`              | each script as its own buildable package (`scripts` merged in via `// scripts`)     |
 | `apps.<system>.<script>`                  | a `nix run .#<script>` target per command (`mapAttrs` over `scripts`)               |
 | `lib.<system>.scripts`                    | the raw derivation set, for downstream reuse                                         |
-| `overlays.default.<script>`               | each script added to the overlay (`// (callPackages ./flakes/scripts/package.nix {})`) |
+| `overlays.default.<script>`               | each script added to the overlay — names from antlers' own `scripts` set, values built lazily with `final.callPackages`, because names that depend on the consumer's `final`/`prev` recurse inside nixpkgs |
 | `nixosModules.antlers-scripts`            | `programs.antlers-scripts` — **system** variant (`environment.systemPackages`)      |
 | `homeManagerModules.antlers-scripts`      | `programs.antlers-scripts` — **home** variant (`home.packages`)                     |
 
@@ -65,7 +65,29 @@ inherited `$PATH`, so they resolve from the host or ISO the script runs on.
 | `plex-restore`       | Restores Plex `Preferences.xml` + the newest DB snapshot; `--list`/`--from <dir>`/`--prefs-only`; `/identity` health-check. Re-execs under `sudo`. | `coreutils findutils util-linux systemd curl gnugrep` |
 | `plex-backup`        | Snapshots Plex `Preferences.xml` + a verified `sqlite3 .backup` of the library/blobs DBs to `<BACKUP_DIR>/automated`, with `PLEX_RETENTION` rotation. | `coreutils findutils util-linux sqlite` |
 
-### `cala-installer` (the ISO's TUI) and hosts without `wipeAllDisks`
+### `cala-installer` (the ISO's TUI): updating it in place, and hosts without `wipeAllDisks`
+
+The top menu's **"Update the installer (pull the latest from the flake)"** builds
+`$INSTALL_FLAKE_REF#installer-tools` (`CALA_INSTALLER_UPDATE_ATTR` overrides the
+attribute; cala-m-os `iso/tools.nix` defines it per architecture: this TUI, the
+token-aware `install-cala-m-os` shim + backend, `cala-nix-token`), puts its `bin/`
+first on `PATH` and re-executes the TUI from it — so an old ISO or stick runs
+today's installer without being reflashed. Nothing lands outside the nix store;
+a reboot is back to the image's own tools. Offline, or on a flake without that
+package, it just keeps the current TUI. Before building it runs `cala-nix-token`
+(the install media's Proton PAT → GitHub token) when present: the update itself
+only touches public inputs, but the install that follows needs the token for a
+host with a private flake input.
+
+The no-network menu has **"Hetzner Cloud: set the static address"** for a
+custom-ISO boot on Hetzner Cloud, whose routed network (a /32 behind the
+off-subnet gateway 172.31.1.1) may not come up over DHCP during an ISO install,
+as Hetzner's own docs warn: it asks for the server's IPv4 (and optionally an IPv6
+from its /64) and creates the NetworkManager connection Hetzner documents — the
+/32, the gateway with an explicit host route, Hetzner's resolvers, IPv6 via
+fe80::1. `CALA_HETZNER_GATEWAY4/6` and `CALA_HETZNER_DNS4/6` override the
+constants. This is the installer's own network; the installed host brings its own.
+
 
 `cala-installer` offers every host and machine of the flake: its built-in lists
 are a snapshot, the installer image exports live ones (`CALA_INSTALLER_*`,
@@ -90,8 +112,11 @@ optional machine override is exported as `MACHINE_OVERRIDE` and persisted to
 ## Env-var overrides
 
 Every script reads its tunables from the environment, so an override needs **no
-rebuild** — set the var inline (`CONFIG_PATH=/srv/cfg rebuild-config`). These are
-the same vars the module bakes as defaults via `makeWrapper --set-default`:
+rebuild** — set the var inline (`CONFIG_PATH=/srv/cfg rebuild-config`). For the
+module-managed scripts these are the same vars the module bakes as defaults via
+`makeWrapper --set-default`; `cala-installer` has no `programs.antlers-scripts`
+options at all — it ships only on the installer image, which sets its vars
+(including the `CALA_INSTALLER_*` lists) through `environment.variables`:
 
 | Command              | Env vars (default)                                                                                                                                                                                                  |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -103,8 +128,8 @@ the same vars the module bakes as defaults via `makeWrapper --set-default`:
 | `chromium-ephemeral` | `CHROMIUM_EPHEMERAL_BIN` (`chromium`)                                                                                                                                                                                 |
 | `bridge-internet`    | `BRIDGE_IP_RANGE` (`10.0.0`), `BRIDGE_NETMASK` (`24`), `BRIDGE_LEASE_TIME` (`24h`), `BRIDGE_DHCP_PORT` (`5353`) — plus `-i`/`-e`/`-r`/`-n`/`-t` flags                                                                |
 | `flash-iso`          | `FLASH_ISO_FLAKE` (git toplevel of `$PWD`), `FLASH_ISO_ATTR` (`nixosConfigurations.iso.config.system.build.isoImage`), `FLASH_ISO_TITLE` (`Cala-M-OS ISO Flash Tool`)                                                |
-| `install-cala-m-os`  | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `INSTALL_VERSION_ATTR`, `INSTALL_TARGET_DIR`, `INSTALL_MNT_DIR`, `INSTALL_PREFETCH_REL`, `INSTALL_PASSWD_USERS`, `INSTALL_SKIP_DISKO` (`0`; `1` = target already partitioned + mounted) — the completion reads `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated) over its built-in lists |
-| `cala-installer`     | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `CALA_SELF_CLONE_DIR` (`/root/cala-m-os-self`), `CALA_NET_WAIT_SECS` (`15`), `CALA_LIST_TIMEOUT_SECS` (`120`), `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated picker lists; the ISO exports them from its flake, and once online the TUI refreshes them from `INSTALL_FLAKE_REF` itself), `PROTON_PASS_SESSION_DIR`, `PROTON_PASS_KEY_PROVIDER`, `PROTON_PASS_PAT_FILE` |
+| `install-cala-m-os`  | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `INSTALL_VERSION_ATTR`, `INSTALL_TARGET_DIR`, `INSTALL_MNT_DIR`, `INSTALL_PREFETCH_REL`, `INSTALL_PASSWD_USERS`, `INSTALL_SKIP_DISKO` (`0`; `1` = target already partitioned + mounted — honoured only for hosts whose `calamoose.install.wipeAllDisks` is false; a `wipeAllDisks = true` host is always wiped by disko `--yes-wipe-all-disks`) — the completion reads `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated) over its built-in lists |
+| `cala-installer`     | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `CALA_SELF_CLONE_DIR` (`/root/cala-m-os-self`), `CALA_NET_WAIT_SECS` (`15`), `CALA_LIST_TIMEOUT_SECS` (`120`), `CALA_INSTALLER_UPDATE_ATTR` (`installer-tools`, the flake package "Update the installer" builds), `CALA_HETZNER_GATEWAY4` (`172.31.1.1`), `CALA_HETZNER_GATEWAY6` (`fe80::1`), `CALA_HETZNER_DNS4` (`185.12.64.1,185.12.64.2`), `CALA_HETZNER_DNS6` (the IPv6 pair), `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated picker lists; the ISO exports them from its flake, and once online the TUI refreshes them from `INSTALL_FLAKE_REF` itself), `PROTON_PASS_SESSION_DIR`, `PROTON_PASS_KEY_PROVIDER`, `PROTON_PASS_PAT_FILE` |
 | `gpg-key-import`     | `GPG_KEY_FILE` (`/run/agenix/yubigpg.asc`), `GPG_KEY_ID` (`50D56BF0B93CA212`)                                                                                                                                        |
 | `remote-kvm`         | `REMOTE_KVM_TARGETS` (newline-separated `name dns ip`), `REMOTE_KVM_DEFAULT` (`broadcast`), `REMOTE_KVM_PROFILE_DIR` (`$HOME/.local/share/remote-kvm`) — plus a positional target arg                                |
 | `pi-imager`          | `PI_IMAGER_QT_STYLE_OVERRIDE` (`fusion`), `PI_IMAGER_QT_QPA_PLATFORM` (`wayland`)                                                                                                                                    |

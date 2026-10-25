@@ -32,6 +32,13 @@ export PROTON_PASS_KEY_PROVIDER="${PROTON_PASS_KEY_PROVIDER:-fs}"
 # read + backend eval below then resolve the current default-branch HEAD.
 export NIX_CONFIG="tarball-ttl = 0"
 
+# "Update the installer": the flake package that holds the current installer
+# tools for this architecture (cala-m-os iso/tools.nix → packages.<system>.
+# installer-tools: the TUI, the token-aware install-cala-m-os shim + backend,
+# cala-nix-token). update_installer() builds it from $FLAKE_REF and re-launches
+# the TUI from it, so an old image runs today's installer without being reflashed.
+UPDATE_ATTR="${CALA_INSTALLER_UPDATE_ATTR:-installer-tools}"
+
 # ---------------------------------------------------------------------------
 # gum theme — the stock palette (faint grey headers, a 256-colour pink cursor,
 # dark-blue accents) is nearly unreadable on the installer's black VT console
@@ -127,6 +134,55 @@ banner() {
   printf '\033c' 2>/dev/null || true
   gum style --border double --padding "1 3" --margin "1 0" --foreground 14 \
     "Cala-M-OS Installer" "$(uname -srm)"
+  # Running from tools pulled off the flake rather than the image's own copy.
+  [ -z "${CALA_INSTALLER_UPDATED:-}" ] ||
+    info "Updated installer tools in use: ${CALA_INSTALLER_UPDATED}"
+}
+
+# ---------------------------------------------------------------------------
+# Update the installer from the flake
+# ---------------------------------------------------------------------------
+# Builds $FLAKE_REF#$UPDATE_ATTR (the current cala-installer + install-cala-m-os
+# shim/backend + cala-nix-token for this architecture), puts its bin/ first on
+# PATH and re-executes the TUI from it. Everything the new TUI calls by name —
+# install-cala-m-os (→ the shim → the backend) — resolves to the update; disko,
+# nix, proton-secrets and the rest still come from the image. Nothing is written
+# outside the nix store, so a reboot is back to the image's own tools. A
+# failure (offline, a flake without the package) just keeps the current TUI.
+update_installer() {
+  local ref="$FLAKE_REF" out="" err=""
+  # Evaluating the Cala-M-OS flake reaches its private inputs (the lock is
+  # verified against them), so the GitHub token from the media's Proton PAT
+  # has to be in the live nix.conf first — the same cala-nix-token the
+  # install shim runs. Best effort: media without a PAT simply has none.
+  if command -v cala-nix-token >/dev/null 2>&1 && ! cala-nix-token; then
+    warn "No GitHub token from the media PAT; the update will fail if the flake has private inputs."
+  fi
+  err=$(mktemp)
+  # gum spin captures stdout (the store path); nix's progress goes to $err.
+  # shellcheck disable=SC2016  # the child shell, not this one, expands $1/$2
+  if ! out=$(gum spin --show-output --spinner dot --title "Pulling the latest installer from $ref…" -- \
+    bash -c 'nix build --refresh --no-link --print-out-paths "$1" 2>"$2"' _ "$ref#$UPDATE_ATTR" "$err"); then
+    warn "Could not build $ref#$UPDATE_ATTR:"
+    warn "$(grep -v '^[[:space:]]*$' "$err" | tail -n3 | tr '\n' ' ')"
+    warn "Is the network up, and does that flake export the package? Keeping this image's installer."
+    rm -f "$err"
+    return 1
+  fi
+  rm -f "$err"
+  out=$(printf '%s\n' "$out" | grep '^/nix/store/' | tail -n1)
+  if [ -z "$out" ] || [ ! -x "$out/bin/cala-installer" ]; then
+    warn "$ref#$UPDATE_ATTR did not produce bin/cala-installer; keeping this image's installer."
+    return 1
+  fi
+  if [ "$out/bin/cala-installer" -ef "$(readlink -f "$0")" ]; then
+    info "This installer is already the latest ($out)."
+    return 0
+  fi
+  info "Installer tools updated: $out — relaunching."
+  export PATH="$out/bin:$PATH"
+  export CALA_INSTALLER_UPDATED="$out"
+  exec "$out/bin/cala-installer" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -187,6 +243,76 @@ announce_online() {
   fi
 }
 
+# Hetzner Cloud's network is routed (Layer 3): the server's IPv4 is a /32 and
+# the gateway, 172.31.1.1, is outside it. Hetzner's DHCP does hand all of that
+# out, but Hetzner itself warns that a custom-ISO install may not pick the
+# gateway up automatically — so when the live ISO comes up without a route,
+# set the address by hand, the way Hetzner documents it: the /32, the gateway
+# with an explicit host route to it (NetworkManager adds one on its own today
+# but warns that will change), Hetzner's resolvers, and optionally the static
+# IPv6 (/64 from the Cloud Console, gateway fe80::1 — Hetzner sends no router
+# advertisements). The address is the one the Cloud Console shows. This is only
+# the INSTALLER's network; the installed host's comes from its own config
+# (machines/modules/hetzner-cloud in Cala-M-OS).
+HETZNER_GATEWAY4="${CALA_HETZNER_GATEWAY4:-172.31.1.1}"
+HETZNER_GATEWAY6="${CALA_HETZNER_GATEWAY6:-fe80::1}"
+HETZNER_DNS4="${CALA_HETZNER_DNS4:-185.12.64.1,185.12.64.2}"
+HETZNER_DNS6="${CALA_HETZNER_DNS6:-2a01:4ff:ff00::add:1,2a01:4ff:ff00::add:2}"
+
+hetzner_static_network() {
+  command -v nmcli >/dev/null 2>&1 || { warn "nmcli unavailable."; return 1; }
+  local -a nics=()
+  mapfile -t nics < <(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2 == "ethernet" {print $1}')
+  if [ "${#nics[@]}" -eq 0 ]; then
+    warn "No ethernet device found."
+    return 1
+  fi
+  local nic="${nics[0]}"
+  if [ "${#nics[@]}" -gt 1 ]; then
+    nic=$(gum choose --header "Public NIC:" "${nics[@]}") || return 1
+  fi
+  local ip4=""
+  ip4=$(gum input --header "Hetzner Cloud IPv4 of this server (Cloud Console → Networking):" \
+    --placeholder "203.0.113.10") || return 1
+  ip4="${ip4%%/*}"
+  if ! [[ "$ip4" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    warn "'$ip4' is not an IPv4 address."
+    return 1
+  fi
+  local ip6=""
+  ip6=$(gum input --header "IPv6 address with prefix (optional, Enter to skip):" \
+    --placeholder "2a01:4f8:c012:3456::1/64") || ip6=""
+  if [ -n "$ip6" ]; then
+    case "$ip6" in
+      *:*/*) ;;
+      *:*) ip6="$ip6/64" ;;
+      *)
+        warn "'$ip6' is not an IPv6 address; skipping IPv6."
+        ip6=""
+        ;;
+    esac
+  fi
+  local name="hetzner-static"
+  nmcli connection delete "$name" >/dev/null 2>&1 || true
+  local -a args=(connection add type ethernet con-name "$name" ifname "$nic"
+    ipv4.method manual ipv4.addresses "$ip4/32" ipv4.gateway "$HETZNER_GATEWAY4"
+    ipv4.routes "$HETZNER_GATEWAY4/32" ipv4.dns "$HETZNER_DNS4")
+  if [ -n "$ip6" ]; then
+    args+=(ipv6.method manual ipv6.addresses "$ip6" ipv6.gateway "$HETZNER_GATEWAY6" ipv6.dns "$HETZNER_DNS6")
+  else
+    args+=(ipv6.method disabled)
+  fi
+  if ! nmcli "${args[@]}"; then
+    warn "nmcli could not create the connection."
+    return 1
+  fi
+  if ! nmcli connection up "$name"; then
+    warn "nmcli could not bring '$name' up on $nic."
+    return 1
+  fi
+  info "Static Hetzner address set on $nic: $ip4/32 via $HETZNER_GATEWAY4${ip6:+, $ip6 via $HETZNER_GATEWAY6}."
+}
+
 wait_for_network() {
   # Give the link a real chance to come up before bothering the user (a few
   # seconds of DHCP/Wi-Fi is normal), showing a spinner the whole time.
@@ -211,11 +337,16 @@ wait_for_network() {
     choice=$(gum choose --header "No network detected yet — it's required to fetch the config:" \
       "Retry" \
       "Configure networking (nmtui)" \
+      "Hetzner Cloud: set the static address (its DHCP may not bring the gateway)" \
       "Continue offline (installs will likely fail)" \
       "Drop to a shell" || true)
     case "$choice" in
       "Retry")
         if net_wait; then announce_online; return 0; fi
+        ;;
+      "Hetzner Cloud"*)
+        hetzner_static_network || true
+        if net_wait 10; then announce_online; return 0; fi
         ;;
       "Configure networking"*)
         # nmtui is interactive and can exit non-zero (e.g. the user backs out);
@@ -269,10 +400,12 @@ top_menu() {
     choice=$(gum choose --header "What would you like to do?" \
       "Install Cala-M-OS" \
       "Inspect hardware" \
+      "Update the installer (pull the latest from the flake)" \
       "Drop to a shell" || true)
     case "$choice" in
       "Install Cala-M-OS") return 0 ;;
       "Inspect hardware")  inspect_hardware ;;
+      "Update the installer"*) update_installer "$@" || true ;;
       "Drop to a shell" | "") exit 0 ;;
     esac
   done
@@ -656,7 +789,7 @@ ensure_root() {
   [ "$(id -u)" -eq 0 ] && return 0
   if command -v sudo >/dev/null 2>&1; then
     info "The installer needs root — re-running under sudo…"
-    exec sudo --preserve-env=PATH,TERM,CALA_NET_WAIT_SECS,CALA_LIST_TIMEOUT_SECS,CALA_INSTALLER_HOSTS,CALA_INSTALLER_MACHINES,CALA_INSTALLER_VM_MACHINES,PROTON_PASS_SESSION_DIR,PROTON_PASS_KEY_PROVIDER,PROTON_PASS_PAT_FILE,CALA_SELF_CLONE_DIR,INSTALL_FLAKE_REF,INSTALL_CLONE_URL,INSTALL_SKIP_DISKO "$0" "$@"
+    exec sudo --preserve-env=PATH,TERM,CALA_NET_WAIT_SECS,CALA_LIST_TIMEOUT_SECS,CALA_INSTALLER_HOSTS,CALA_INSTALLER_MACHINES,CALA_INSTALLER_VM_MACHINES,CALA_INSTALLER_UPDATE_ATTR,CALA_INSTALLER_UPDATED,CALA_INSTALLER_MEDIA_DIR,CALA_HETZNER_GATEWAY4,CALA_HETZNER_GATEWAY6,CALA_HETZNER_DNS4,CALA_HETZNER_DNS6,PROTON_PASS_SESSION_DIR,PROTON_PASS_KEY_PROVIDER,PROTON_PASS_PAT_FILE,CALA_SELF_CLONE_DIR,INSTALL_FLAKE_REF,INSTALL_CLONE_URL,INSTALL_SKIP_DISKO "$0" "$@"
   fi
   die "cala-installer must run as root and sudo is unavailable. Re-run with:  sudo cala-installer"
 }
@@ -706,7 +839,7 @@ main() {
     warn "Could not read the host list from $FLAKE_REF — using the built-in list."
   fi
 
-  top_menu
+  top_menu "$@"
 
   pick_host || die "No host selected."
   pick_machine
@@ -742,18 +875,26 @@ main() {
   # asks before it touches anything, and it reports the real error if there is
   # one. A pre-set INSTALL_SKIP_DISKO=1 (a hand-partitioned target) is honoured.
   local wipe_all="" wipe_err=""
+  wipe_err=$(mktemp)
+  if ! wipe_all=$(MACHINE_OVERRIDE="$MACHINE" nix eval --impure \
+    "$ref#nixosConfigurations.$HOST.config.calamoose.install.wipeAllDisks" 2>"$wipe_err"); then
+    warn "Could not read calamoose.install.wipeAllDisks for '$HOST' from $ref:"
+    warn "$(grep -v '^[[:space:]]*$' "$wipe_err" | tail -n2 | tr '\n' ' ')"
+    warn "Treating it as false: disko will show what it would erase and ask first."
+    wipe_all=false
+  fi
+  rm -f "$wipe_err"
   if [ "${INSTALL_SKIP_DISKO:-0}" = "1" ]; then
-    info "INSTALL_SKIP_DISKO=1: assuming the target is already partitioned and mounted at /mnt."
-  else
-    wipe_err=$(mktemp)
-    if ! wipe_all=$(MACHINE_OVERRIDE="$MACHINE" nix eval --impure \
-      "$ref#nixosConfigurations.$HOST.config.calamoose.install.wipeAllDisks" 2>"$wipe_err"); then
-      warn "Could not read calamoose.install.wipeAllDisks for '$HOST' from $ref:"
-      warn "$(grep -v '^[[:space:]]*$' "$wipe_err" | tail -n2 | tr '\n' ' ')"
-      warn "Treating it as false: disko will show what it would erase and ask first."
-      wipe_all=false
+    if [ "$wipe_all" = "true" ]; then
+      # The backend only honours INSTALL_SKIP_DISKO for wipeAllDisks=false hosts;
+      # a wipeAllDisks=true host is wiped by disko --yes-wipe-all-disks regardless.
+      warn "INSTALL_SKIP_DISKO=1 is set, but '$HOST' has calamoose.install.wipeAllDisks = true:"
+      warn "install-cala-m-os will still wipe its disko-owned disk(s) unattended."
+      gum confirm "Continue and let the backend wipe them?" || die "Aborted."
+    else
+      info "INSTALL_SKIP_DISKO=1: assuming the target is already partitioned and mounted at /mnt."
     fi
-    rm -f "$wipe_err"
+  else
     if [ "$wipe_all" = "false" ]; then
       gum style --border rounded --padding "1 2" --margin "1 0" --foreground 11 \
         "Host '$HOST' does not allow an unattended disk wipe (calamoose.install.wipeAllDisks = false)." \

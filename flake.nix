@@ -251,7 +251,7 @@
     };
 
     # ---- Overlay so NixOS / home-manager configs can consume directly ----
-    overlays.default = final: prev:
+    overlays.default = final: _prev:
       {
         antlers = final.callPackage ./flakes/antlers/package.nix {};
         antlers-zed-editor = (final.callPackage ./flakes/zed-editor/package.nix {}) {};
@@ -271,12 +271,18 @@
         thecompanyinc-style = (final.callPackage ./flakes/legal/package.nix {}).thecompanyinc-style;
         thecompanyinc-doc-wizard = (final.callPackage ./flakes/legal/package.nix {}).docWizard;
       }
-      # `prev`, not `final`: this spread decides the overlay's attribute NAMES,
-      # and names that depend on `final` are an infinite recursion inside any
-      # package set the overlay is applied to (nixpkgs.overlays, import nixpkgs
-      # { overlays }). The scripts' inputs are stock nixpkgs packages, so the
-      # previous stage has everything they need.
-      // (prev.callPackages ./flakes/scripts/package.nix {});
+      # This spread decides the overlay's attribute NAMES, and those must not
+      # depend on the consumer's package set: nixpkgs' `callPackages` (read from
+      # `final` OR `prev` — both close over the consumer's fixpoint for their
+      # auto-args) has to call package.nix to learn the names, which forces that
+      # fixpoint while it is still being built: an infinite recursion inside any
+      # set the overlay is applied to (nixpkgs.overlays). So the names come from
+      # antlers' own `scripts` (an independent fixpoint), and only the VALUES are
+      # built against `final`, lazily, one shared callPackages result.
+      // (let
+        s = final.callPackages ./flakes/scripts/package.nix {};
+      in
+        pkgs.lib.genAttrs (builtins.attrNames scripts) (name: s.${name}));
 
     # ---- NixOS modules ----
     # inputs.antlers.nixosModules.{lanserver,vibe,vibe-server}
