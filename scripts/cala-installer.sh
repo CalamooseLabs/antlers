@@ -32,6 +32,13 @@ export PROTON_PASS_KEY_PROVIDER="${PROTON_PASS_KEY_PROVIDER:-fs}"
 # read + backend eval below then resolve the current default-branch HEAD.
 export NIX_CONFIG="tarball-ttl = 0"
 
+# "Update the installer": the flake package that holds the current installer
+# tools for this architecture (cala-m-os iso/tools.nix → packages.<system>.
+# installer-tools: the TUI, the token-aware install-cala-m-os shim + backend,
+# cala-nix-token). update_installer() builds it from $FLAKE_REF and re-launches
+# the TUI from it, so an old image runs today's installer without being reflashed.
+UPDATE_ATTR="${CALA_INSTALLER_UPDATE_ATTR:-installer-tools}"
+
 # ---------------------------------------------------------------------------
 # gum theme — the stock palette (faint grey headers, a 256-colour pink cursor,
 # dark-blue accents) is nearly unreadable on the installer's black VT console
@@ -127,6 +134,48 @@ banner() {
   printf '\033c' 2>/dev/null || true
   gum style --border double --padding "1 3" --margin "1 0" --foreground 14 \
     "Cala-M-OS Installer" "$(uname -srm)"
+  # Running from tools pulled off the flake rather than the image's own copy.
+  [ -z "${CALA_INSTALLER_UPDATED:-}" ] ||
+    info "Updated installer tools in use: ${CALA_INSTALLER_UPDATED}"
+}
+
+# ---------------------------------------------------------------------------
+# Update the installer from the flake
+# ---------------------------------------------------------------------------
+# Builds $FLAKE_REF#$UPDATE_ATTR (the current cala-installer + install-cala-m-os
+# shim/backend + cala-nix-token for this architecture), puts its bin/ first on
+# PATH and re-executes the TUI from it. Everything the new TUI calls by name —
+# install-cala-m-os (→ the shim → the backend) — resolves to the update; disko,
+# nix, proton-secrets and the rest still come from the image. Nothing is written
+# outside the nix store, so a reboot is back to the image's own tools. A
+# failure (offline, a flake without the package) just keeps the current TUI.
+update_installer() {
+  local ref="$FLAKE_REF" out="" err=""
+  err=$(mktemp)
+  # gum spin captures stdout (the store path); nix's progress goes to $err.
+  # shellcheck disable=SC2016  # the child shell, not this one, expands $1/$2
+  if ! out=$(gum spin --show-output --spinner dot --title "Pulling the latest installer from $ref…" -- \
+    bash -c 'nix build --refresh --no-link --print-out-paths "$1" 2>"$2"' _ "$ref#$UPDATE_ATTR" "$err"); then
+    warn "Could not build $ref#$UPDATE_ATTR:"
+    warn "$(grep -v '^[[:space:]]*$' "$err" | tail -n3 | tr '\n' ' ')"
+    warn "Is the network up, and does that flake export the package? Keeping this image's installer."
+    rm -f "$err"
+    return 1
+  fi
+  rm -f "$err"
+  out=$(printf '%s\n' "$out" | grep '^/nix/store/' | tail -n1)
+  if [ -z "$out" ] || [ ! -x "$out/bin/cala-installer" ]; then
+    warn "$ref#$UPDATE_ATTR did not produce bin/cala-installer; keeping this image's installer."
+    return 1
+  fi
+  if [ "$out/bin/cala-installer" -ef "$(readlink -f "$0")" ]; then
+    info "This installer is already the latest ($out)."
+    return 0
+  fi
+  info "Installer tools updated: $out — relaunching."
+  export PATH="$out/bin:$PATH"
+  export CALA_INSTALLER_UPDATED="$out"
+  exec "$out/bin/cala-installer" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -269,10 +318,12 @@ top_menu() {
     choice=$(gum choose --header "What would you like to do?" \
       "Install Cala-M-OS" \
       "Inspect hardware" \
+      "Update the installer (pull the latest from the flake)" \
       "Drop to a shell" || true)
     case "$choice" in
       "Install Cala-M-OS") return 0 ;;
       "Inspect hardware")  inspect_hardware ;;
+      "Update the installer"*) update_installer "$@" || true ;;
       "Drop to a shell" | "") exit 0 ;;
     esac
   done
@@ -656,7 +707,7 @@ ensure_root() {
   [ "$(id -u)" -eq 0 ] && return 0
   if command -v sudo >/dev/null 2>&1; then
     info "The installer needs root — re-running under sudo…"
-    exec sudo --preserve-env=PATH,TERM,CALA_NET_WAIT_SECS,CALA_LIST_TIMEOUT_SECS,CALA_INSTALLER_HOSTS,CALA_INSTALLER_MACHINES,CALA_INSTALLER_VM_MACHINES,PROTON_PASS_SESSION_DIR,PROTON_PASS_KEY_PROVIDER,PROTON_PASS_PAT_FILE,CALA_SELF_CLONE_DIR,INSTALL_FLAKE_REF,INSTALL_CLONE_URL,INSTALL_SKIP_DISKO "$0" "$@"
+    exec sudo --preserve-env=PATH,TERM,CALA_NET_WAIT_SECS,CALA_LIST_TIMEOUT_SECS,CALA_INSTALLER_HOSTS,CALA_INSTALLER_MACHINES,CALA_INSTALLER_VM_MACHINES,CALA_INSTALLER_UPDATE_ATTR,CALA_INSTALLER_UPDATED,CALA_INSTALLER_MEDIA_DIR,PROTON_PASS_SESSION_DIR,PROTON_PASS_KEY_PROVIDER,PROTON_PASS_PAT_FILE,CALA_SELF_CLONE_DIR,INSTALL_FLAKE_REF,INSTALL_CLONE_URL,INSTALL_SKIP_DISKO "$0" "$@"
   fi
   die "cala-installer must run as root and sudo is unavailable. Re-run with:  sudo cala-installer"
 }
@@ -706,7 +757,7 @@ main() {
     warn "Could not read the host list from $FLAKE_REF — using the built-in list."
   fi
 
-  top_menu
+  top_menu "$@"
 
   pick_host || die "No host selected."
   pick_machine
