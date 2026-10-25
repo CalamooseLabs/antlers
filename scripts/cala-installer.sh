@@ -55,10 +55,57 @@ export GUM_SPIN_SPINNER_FOREGROUND=14
 export GUM_SPIN_TITLE_FOREGROUND=7
 export GUM_PAGER_FOREGROUND=7
 
-# Host + machine lists — kept in sync with install-cala-m-os.completion.bash.
-# Hosts are listed alphabetically so the picker reads in name order.
-CALA_HOSTS=(ai battlestation broadcast devbox ephemeral homelab lanstation livedata openreturn simple)
-CALA_MACHINES=(A520M-ITX B760-PLUS B850-MAX FW13-11XXP FW13-12XXP FW16-AMD-AI MS-01 MS-02 TRX50-SAGE ZIMA X-Small Small Medium Large)
+# Host + machine lists. The static defaults are a snapshot of the flake (kept in
+# sync with install-cala-m-os.completion.bash). Two things keep them current
+# without a new ISO: the image exports lists computed from the flake at build
+# time (CALA_INSTALLER_HOSTS / _MACHINES / _VM_MACHINES — cala-m-os
+# iso/installer.nix), and once the network is up refresh_lists() asks the flake
+# ref being installed from (see below). Hosts are listed alphabetically so the
+# picker reads in name order; machines are the physical boards, then the microVM
+# sizes (which dmi_match must skip — "SMALL"/"LARGE" would match DMI strings).
+IFS=' ' read -r -a CALA_HOSTS <<<"${CALA_INSTALLER_HOSTS:-ai battlestation broadcast devbox ephemeral homelab lanstation livedata openreturn simple tci-cloud tci-private webhost}"
+IFS=' ' read -r -a CALA_WS_MACHINES <<<"${CALA_INSTALLER_MACHINES:-A520M-ITX B760-PLUS B850-MAX FW13-11XXP FW13-12XXP FW16-AMD-AI HETZNER-CAX HETZNER-CLOUD MS-01 MS-02 TCI-LOCAL TRX50-SAGE ZIMA}"
+IFS=' ' read -r -a CALA_VM_MACHINES <<<"${CALA_INSTALLER_VM_MACHINES:-X-Small Small Medium Large}"
+CALA_MACHINES=("${CALA_WS_MACHINES[@]}" "${CALA_VM_MACHINES[@]}")
+
+# Ask the flake for its current hosts and machines: the installer image may be
+# older than the config it installs, and a host added upstream must still be
+# offered. Hosts are every nixosConfiguration except the installer images;
+# machines are the directories under machines/{workstations,vms} (not flake
+# outputs, so the tree is read through getFlake). Best-effort and bounded: any
+# failure (offline, an old flake) keeps the lists above. Prints three lines —
+# hosts, physical machines, VM sizes — so a caller can capture it from a
+# `gum spin --show-output` child; apply_lists() loads them.
+refresh_lists() {
+  local ref="$1" expr
+  expr=$(cat <<EOF
+let
+  f = builtins.getFlake "$ref";
+  dirs = p: let d = builtins.readDir p; in
+    builtins.filter (n: d.\${n} == "directory" && builtins.substring 0 1 n != "_") (builtins.attrNames d);
+  hosts = builtins.filter (n: n != "iso" && builtins.substring 0 10 n != "installer-")
+    (builtins.attrNames f.nixosConfigurations);
+in builtins.concatStringsSep "\n" [
+  (builtins.concatStringsSep " " hosts)
+  (builtins.concatStringsSep " " (dirs (f.outPath + "/machines/workstations")))
+  (builtins.concatStringsSep " " (dirs (f.outPath + "/machines/vms")))
+]
+EOF
+)
+  timeout "${CALA_LIST_TIMEOUT_SECS:-120}" nix eval --raw --impure --expr "$expr" 2>/dev/null
+}
+
+apply_lists() {
+  local -a lines=()
+  mapfile -t lines <<<"$1"
+  # All three lines, each non-empty, or keep what we have.
+  [ "${#lines[@]}" -ge 3 ] && [ -n "${lines[0]}" ] && [ -n "${lines[1]}" ] && [ -n "${lines[2]}" ] || return 1
+  IFS=' ' read -r -a CALA_HOSTS <<<"${lines[0]}"
+  IFS=' ' read -r -a CALA_WS_MACHINES <<<"${lines[1]}"
+  IFS=' ' read -r -a CALA_VM_MACHINES <<<"${lines[2]}"
+  CALA_MACHINES=("${CALA_WS_MACHINES[@]}" "${CALA_VM_MACHINES[@]}")
+}
+export -f refresh_lists
 
 # Selection state, filled as we go.
 HOST=""
@@ -253,11 +300,9 @@ dmi_match() {
   #   case "$up" in *FRANMHCP*) echo "FW16-AMD-AI"; return 0 ;; esac
 
   # --- Fuzzy: physical-board machine name appears in the DMI strings ------
+  # (VM sizes live in CALA_VM_MACHINES and are not candidates here.)
   local m
-  for m in "${CALA_MACHINES[@]}"; do
-    case "$m" in
-      X-Small | Small | Medium | Large) continue ;; # VM sizes, not physical boards
-    esac
+  for m in "${CALA_WS_MACHINES[@]}"; do
     if [[ "$up" == *"${m^^}"* ]]; then
       echo "$m"
       return 0
@@ -611,7 +656,7 @@ ensure_root() {
   [ "$(id -u)" -eq 0 ] && return 0
   if command -v sudo >/dev/null 2>&1; then
     info "The installer needs root — re-running under sudo…"
-    exec sudo --preserve-env=PATH,TERM,CALA_NET_WAIT_SECS,PROTON_PASS_SESSION_DIR,PROTON_PASS_KEY_PROVIDER,PROTON_PASS_PAT_FILE,CALA_SELF_CLONE_DIR,INSTALL_FLAKE_REF,INSTALL_CLONE_URL "$0" "$@"
+    exec sudo --preserve-env=PATH,TERM,CALA_NET_WAIT_SECS,CALA_LIST_TIMEOUT_SECS,CALA_INSTALLER_HOSTS,CALA_INSTALLER_MACHINES,CALA_INSTALLER_VM_MACHINES,PROTON_PASS_SESSION_DIR,PROTON_PASS_KEY_PROVIDER,PROTON_PASS_PAT_FILE,CALA_SELF_CLONE_DIR,INSTALL_FLAKE_REF,INSTALL_CLONE_URL "$0" "$@"
   fi
   die "cala-installer must run as root and sudo is unavailable. Re-run with:  sudo cala-installer"
 }
@@ -645,6 +690,20 @@ main() {
   [ -n "${CALA_INSTALLER_LOGGING:-}" ] &&
     info "Recording this session to $CALA_INSTALLER_LOG — grab it over SSH if you need to debug."
   wait_for_network
+
+  # Current host/machine lists from the flake (refresh_lists); offline or on a
+  # flake that predates a list this just keeps the built-in ones. --show-output
+  # hands the child's stdout back so the arrays are set in THIS shell.
+  local lists=""
+  # shellcheck disable=SC2016  # the child shell, not this one, expands $1
+  lists=$(gum spin --show-output --spinner dot --title "Reading the host and machine lists from the flake…" -- \
+    bash -c 'refresh_lists "$1"' _ "$FLAKE_REF" 2>/dev/null || true)
+  if apply_lists "$lists"; then
+    info "Hosts and machines read from $FLAKE_REF."
+  else
+    warn "Could not read the host list from $FLAKE_REF — using the built-in list."
+  fi
+
   top_menu
 
   pick_host || die "No host selected."
@@ -680,6 +739,30 @@ main() {
       proton_pat_file=$(mktemp) || die "mktemp failed while staging the Proton PAT."
       (umask 077; printf '%s' "$PROTON_PAT" >"$proton_pat_file")
       export INSTALL_PROTON_PAT_FILE="$proton_pat_file"
+    fi
+  fi
+
+  # install-cala-m-os only partitions on its own for hosts that allow an
+  # UNATTENDED wipe (calamoose.install.wipeAllDisks = true, which needs the OS
+  # disk pinned by-id). Every other host — a cloud VM whose disk serial can't
+  # be pinned (tci-cloud, webhost), a dual-boot box — used to need "Drop to a
+  # shell": disko by hand, then INSTALL_SKIP_DISKO=1. Do the same from here:
+  # disko WITHOUT --yes-wipe-all-disks prints the device(s) it is about to erase
+  # and asks for a typed "yes", which is exactly the safeguard the flag exists
+  # to preserve. disko evaluates --impure, so the machine override reaches it.
+  local wipe_all=""
+  wipe_all=$(nix eval --impure "$ref#nixosConfigurations.$HOST.config.calamoose.install.wipeAllDisks" 2>/dev/null || true)
+  if [ "$wipe_all" = "false" ]; then
+    gum style --border rounded --padding "1 2" --margin "1 0" --foreground 11 \
+      "Host '$HOST' does not allow an unattended disk wipe (calamoose.install.wipeAllDisks = false)." \
+      "disko will list the device(s) it is about to ERASE and ask you to type 'yes'."
+    if gum confirm "Partition and mount the target disk(s) for '$HOST' now?"; then
+      MACHINE_OVERRIDE="$MACHINE" disko --mode destroy,format,mount --flake "$ref#$HOST" ||
+        die "disko did not complete; nothing was installed."
+      # Tell the backend the target is already partitioned and mounted at /mnt.
+      export INSTALL_SKIP_DISKO=1
+    else
+      die "Aborted. Partition and mount the target yourself, then run: INSTALL_SKIP_DISKO=1 install-cala-m-os $HOST${MACHINE:+ $MACHINE}"
     fi
   fi
 
