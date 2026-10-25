@@ -74,7 +74,19 @@ token-aware `install-cala-m-os` shim + backend, `cala-nix-token`), puts its `bin
 first on `PATH` and re-executes the TUI from it — so an old ISO or stick runs
 today's installer without being reflashed. Nothing lands outside the nix store;
 a reboot is back to the image's own tools. Offline, or on a flake without that
-package, it just keeps the current TUI.
+package, it just keeps the current TUI. Before building it runs `cala-nix-token`
+(the install media's Proton PAT → GitHub token) when present: the update itself
+only touches public inputs, but the install that follows needs the token for a
+host with a private flake input.
+
+The no-network menu has **"Hetzner Cloud: set the static address"** for a
+custom-ISO boot on Hetzner Cloud, whose routed network (a /32 behind the
+off-subnet gateway 172.31.1.1) may not come up over DHCP during an ISO install,
+as Hetzner's own docs warn: it asks for the server's IPv4 (and optionally an IPv6
+from its /64) and creates the NetworkManager connection Hetzner documents — the
+/32, the gateway with an explicit host route, Hetzner's resolvers, IPv6 via
+fe80::1. `CALA_HETZNER_GATEWAY4/6` and `CALA_HETZNER_DNS4/6` override the
+constants. This is the installer's own network; the installed host brings its own.
 
 
 `cala-installer` offers every host and machine of the flake: its built-in lists
@@ -117,7 +129,7 @@ options at all — it ships only on the installer image, which sets its vars
 | `bridge-internet`    | `BRIDGE_IP_RANGE` (`10.0.0`), `BRIDGE_NETMASK` (`24`), `BRIDGE_LEASE_TIME` (`24h`), `BRIDGE_DHCP_PORT` (`5353`) — plus `-i`/`-e`/`-r`/`-n`/`-t` flags                                                                |
 | `flash-iso`          | `FLASH_ISO_FLAKE` (git toplevel of `$PWD`), `FLASH_ISO_ATTR` (`nixosConfigurations.iso.config.system.build.isoImage`), `FLASH_ISO_TITLE` (`Cala-M-OS ISO Flash Tool`)                                                |
 | `install-cala-m-os`  | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `INSTALL_VERSION_ATTR`, `INSTALL_TARGET_DIR`, `INSTALL_MNT_DIR`, `INSTALL_PREFETCH_REL`, `INSTALL_PASSWD_USERS`, `INSTALL_SKIP_DISKO` (`0`; `1` = target already partitioned + mounted — honoured only for hosts whose `calamoose.install.wipeAllDisks` is false; a `wipeAllDisks = true` host is always wiped by disko `--yes-wipe-all-disks`) — the completion reads `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated) over its built-in lists |
-| `cala-installer`     | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `CALA_SELF_CLONE_DIR` (`/root/cala-m-os-self`), `CALA_NET_WAIT_SECS` (`15`), `CALA_LIST_TIMEOUT_SECS` (`120`), `CALA_INSTALLER_UPDATE_ATTR` (`installer-tools`, the flake package "Update the installer" builds), `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated picker lists; the ISO exports them from its flake, and once online the TUI refreshes them from `INSTALL_FLAKE_REF` itself), `PROTON_PASS_SESSION_DIR`, `PROTON_PASS_KEY_PROVIDER`, `PROTON_PASS_PAT_FILE` |
+| `cala-installer`     | `INSTALL_FLAKE_REF`, `INSTALL_CLONE_URL`, `CALA_SELF_CLONE_DIR` (`/root/cala-m-os-self`), `CALA_NET_WAIT_SECS` (`15`), `CALA_LIST_TIMEOUT_SECS` (`120`), `CALA_INSTALLER_UPDATE_ATTR` (`installer-tools`, the flake package "Update the installer" builds), `CALA_HETZNER_GATEWAY4` (`172.31.1.1`), `CALA_HETZNER_GATEWAY6` (`fe80::1`), `CALA_HETZNER_DNS4` (`185.12.64.1,185.12.64.2`), `CALA_HETZNER_DNS6` (the IPv6 pair), `CALA_INSTALLER_HOSTS` / `CALA_INSTALLER_MACHINES` / `CALA_INSTALLER_VM_MACHINES` (space-separated picker lists; the ISO exports them from its flake, and once online the TUI refreshes them from `INSTALL_FLAKE_REF` itself), `PROTON_PASS_SESSION_DIR`, `PROTON_PASS_KEY_PROVIDER`, `PROTON_PASS_PAT_FILE` |
 | `gpg-key-import`     | `GPG_KEY_FILE` (`/run/agenix/yubigpg.asc`), `GPG_KEY_ID` (`50D56BF0B93CA212`)                                                                                                                                        |
 | `remote-kvm`         | `REMOTE_KVM_TARGETS` (newline-separated `name dns ip`), `REMOTE_KVM_DEFAULT` (`broadcast`), `REMOTE_KVM_PROFILE_DIR` (`$HOME/.local/share/remote-kvm`) — plus a positional target arg                                |
 | `pi-imager`          | `PI_IMAGER_QT_STYLE_OVERRIDE` (`fusion`), `PI_IMAGER_QT_QPA_PLATFORM` (`wayland`)                                                                                                                                    |

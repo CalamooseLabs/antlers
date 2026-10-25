@@ -151,6 +151,13 @@ banner() {
 # failure (offline, a flake without the package) just keeps the current TUI.
 update_installer() {
   local ref="$FLAKE_REF" out="" err=""
+  # Evaluating the Cala-M-OS flake reaches its private inputs (the lock is
+  # verified against them), so the GitHub token from the media's Proton PAT
+  # has to be in the live nix.conf first — the same cala-nix-token the
+  # install shim runs. Best effort: media without a PAT simply has none.
+  if command -v cala-nix-token >/dev/null 2>&1 && ! cala-nix-token; then
+    warn "No GitHub token from the media PAT; the update will fail if the flake has private inputs."
+  fi
   err=$(mktemp)
   # gum spin captures stdout (the store path); nix's progress goes to $err.
   # shellcheck disable=SC2016  # the child shell, not this one, expands $1/$2
@@ -236,6 +243,76 @@ announce_online() {
   fi
 }
 
+# Hetzner Cloud's network is routed (Layer 3): the server's IPv4 is a /32 and
+# the gateway, 172.31.1.1, is outside it. Hetzner's DHCP does hand all of that
+# out, but Hetzner itself warns that a custom-ISO install may not pick the
+# gateway up automatically — so when the live ISO comes up without a route,
+# set the address by hand, the way Hetzner documents it: the /32, the gateway
+# with an explicit host route to it (NetworkManager adds one on its own today
+# but warns that will change), Hetzner's resolvers, and optionally the static
+# IPv6 (/64 from the Cloud Console, gateway fe80::1 — Hetzner sends no router
+# advertisements). The address is the one the Cloud Console shows. This is only
+# the INSTALLER's network; the installed host's comes from its own config
+# (machines/modules/hetzner-cloud in Cala-M-OS).
+HETZNER_GATEWAY4="${CALA_HETZNER_GATEWAY4:-172.31.1.1}"
+HETZNER_GATEWAY6="${CALA_HETZNER_GATEWAY6:-fe80::1}"
+HETZNER_DNS4="${CALA_HETZNER_DNS4:-185.12.64.1,185.12.64.2}"
+HETZNER_DNS6="${CALA_HETZNER_DNS6:-2a01:4ff:ff00::add:1,2a01:4ff:ff00::add:2}"
+
+hetzner_static_network() {
+  command -v nmcli >/dev/null 2>&1 || { warn "nmcli unavailable."; return 1; }
+  local -a nics=()
+  mapfile -t nics < <(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2 == "ethernet" {print $1}')
+  if [ "${#nics[@]}" -eq 0 ]; then
+    warn "No ethernet device found."
+    return 1
+  fi
+  local nic="${nics[0]}"
+  if [ "${#nics[@]}" -gt 1 ]; then
+    nic=$(gum choose --header "Public NIC:" "${nics[@]}") || return 1
+  fi
+  local ip4=""
+  ip4=$(gum input --header "Hetzner Cloud IPv4 of this server (Cloud Console → Networking):" \
+    --placeholder "203.0.113.10") || return 1
+  ip4="${ip4%%/*}"
+  if ! [[ "$ip4" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    warn "'$ip4' is not an IPv4 address."
+    return 1
+  fi
+  local ip6=""
+  ip6=$(gum input --header "IPv6 address with prefix (optional, Enter to skip):" \
+    --placeholder "2a01:4f8:c012:3456::1/64") || ip6=""
+  if [ -n "$ip6" ]; then
+    case "$ip6" in
+      *:*/*) ;;
+      *:*) ip6="$ip6/64" ;;
+      *)
+        warn "'$ip6' is not an IPv6 address; skipping IPv6."
+        ip6=""
+        ;;
+    esac
+  fi
+  local name="hetzner-static"
+  nmcli connection delete "$name" >/dev/null 2>&1 || true
+  local -a args=(connection add type ethernet con-name "$name" ifname "$nic"
+    ipv4.method manual ipv4.addresses "$ip4/32" ipv4.gateway "$HETZNER_GATEWAY4"
+    ipv4.routes "$HETZNER_GATEWAY4/32" ipv4.dns "$HETZNER_DNS4")
+  if [ -n "$ip6" ]; then
+    args+=(ipv6.method manual ipv6.addresses "$ip6" ipv6.gateway "$HETZNER_GATEWAY6" ipv6.dns "$HETZNER_DNS6")
+  else
+    args+=(ipv6.method disabled)
+  fi
+  if ! nmcli "${args[@]}"; then
+    warn "nmcli could not create the connection."
+    return 1
+  fi
+  if ! nmcli connection up "$name"; then
+    warn "nmcli could not bring '$name' up on $nic."
+    return 1
+  fi
+  info "Static Hetzner address set on $nic: $ip4/32 via $HETZNER_GATEWAY4${ip6:+, $ip6 via $HETZNER_GATEWAY6}."
+}
+
 wait_for_network() {
   # Give the link a real chance to come up before bothering the user (a few
   # seconds of DHCP/Wi-Fi is normal), showing a spinner the whole time.
@@ -260,11 +337,16 @@ wait_for_network() {
     choice=$(gum choose --header "No network detected yet — it's required to fetch the config:" \
       "Retry" \
       "Configure networking (nmtui)" \
+      "Hetzner Cloud: set the static address (its DHCP may not bring the gateway)" \
       "Continue offline (installs will likely fail)" \
       "Drop to a shell" || true)
     case "$choice" in
       "Retry")
         if net_wait; then announce_online; return 0; fi
+        ;;
+      "Hetzner Cloud"*)
+        hetzner_static_network || true
+        if net_wait 10; then announce_online; return 0; fi
         ;;
       "Configure networking"*)
         # nmtui is interactive and can exit non-zero (e.g. the user backs out);
@@ -707,7 +789,7 @@ ensure_root() {
   [ "$(id -u)" -eq 0 ] && return 0
   if command -v sudo >/dev/null 2>&1; then
     info "The installer needs root — re-running under sudo…"
-    exec sudo --preserve-env=PATH,TERM,CALA_NET_WAIT_SECS,CALA_LIST_TIMEOUT_SECS,CALA_INSTALLER_HOSTS,CALA_INSTALLER_MACHINES,CALA_INSTALLER_VM_MACHINES,CALA_INSTALLER_UPDATE_ATTR,CALA_INSTALLER_UPDATED,CALA_INSTALLER_MEDIA_DIR,PROTON_PASS_SESSION_DIR,PROTON_PASS_KEY_PROVIDER,PROTON_PASS_PAT_FILE,CALA_SELF_CLONE_DIR,INSTALL_FLAKE_REF,INSTALL_CLONE_URL,INSTALL_SKIP_DISKO "$0" "$@"
+    exec sudo --preserve-env=PATH,TERM,CALA_NET_WAIT_SECS,CALA_LIST_TIMEOUT_SECS,CALA_INSTALLER_HOSTS,CALA_INSTALLER_MACHINES,CALA_INSTALLER_VM_MACHINES,CALA_INSTALLER_UPDATE_ATTR,CALA_INSTALLER_UPDATED,CALA_INSTALLER_MEDIA_DIR,CALA_HETZNER_GATEWAY4,CALA_HETZNER_GATEWAY6,CALA_HETZNER_DNS4,CALA_HETZNER_DNS6,PROTON_PASS_SESSION_DIR,PROTON_PASS_KEY_PROVIDER,PROTON_PASS_PAT_FILE,CALA_SELF_CLONE_DIR,INSTALL_FLAKE_REF,INSTALL_CLONE_URL,INSTALL_SKIP_DISKO "$0" "$@"
   fi
   die "cala-installer must run as root and sudo is unavailable. Re-run with:  sudo cala-installer"
 }
