@@ -147,16 +147,22 @@ banner() {
 # PATH and re-executes the TUI from it. Everything the new TUI calls by name —
 # install-cala-m-os (→ the shim → the backend) — resolves to the update; disko,
 # nix, proton-secrets and the rest still come from the image. Nothing is written
-# outside the nix store, so a reboot is back to the image's own tools. A
-# failure (offline, a flake without the package) just keeps the current TUI.
+# outside the nix store, so a reboot is back to the image's own tools — and so
+# is the login shell "Drop to a shell" returns to (drop_to_shell says how to
+# reach the update from there). A failure (offline, a flake without the
+# package) just keeps the current TUI.
 update_installer() {
   local ref="$FLAKE_REF" out="" err=""
-  # Evaluating the Cala-M-OS flake reaches its private inputs (the lock is
-  # verified against them), so the GitHub token from the media's Proton PAT
-  # has to be in the live nix.conf first — the same cala-nix-token the
-  # install shim runs. Best effort: media without a PAT simply has none.
+  # The update itself needs no GitHub token: with flake.lock in sync Nix keeps
+  # the locked inputs without fetching them, and installer-tools' evaluation
+  # touches only nixpkgs and antlers (public, like the flake itself). Fetch the
+  # media PAT's token here anyway — the same cala-nix-token the install shim
+  # runs — so it is in the live nix.conf for what the updated TUI does next: its
+  # pre-install evals and the install of a host with a private input. Best
+  # effort: it exits 0 when the media carries no PAT, so a failure here means a
+  # PAT that yielded no token.
   if command -v cala-nix-token >/dev/null 2>&1 && ! cala-nix-token; then
-    warn "No GitHub token from the media PAT; the update will fail if the flake has private inputs."
+    warn "No GitHub token from the media PAT. The update works without one, but installing a host with a private flake input (e.g. tci-cloud) will fail — fix the PAT or network, then run: sudo cala-nix-token --force"
   fi
   err=$(mktemp)
   # gum spin captures stdout (the store path); nix's progress goes to $err.
@@ -175,7 +181,25 @@ update_installer() {
     warn "$ref#$UPDATE_ATTR did not produce bin/cala-installer; keeping this image's installer."
     return 1
   fi
-  if [ "$out/bin/cala-installer" -ef "$(readlink -f "$0")" ]; then
+  # "Already the latest" is decided for the WHOLE bundle. The TUI's derivation
+  # depends only on this script + nixpkgs, so a fix to the install-cala-m-os
+  # shim/backend or to cala-nix-token leaves bin/cala-installer byte-identical;
+  # a TUI-only comparison would call that update current and keep the image's
+  # old tools on PATH. Current = already relaunched from this very bundle, or
+  # every tool it ships resolves (by name, as the TUI calls them) to the same
+  # store file. An image whose baked shim differs only by its media dir
+  # relaunches needlessly — harmless.
+  local same=1 tool="" cur=""
+  if [ "$out" != "${CALA_INSTALLER_UPDATED:-}" ]; then
+    for tool in "$out"/bin/*; do
+      cur=$(command -v "$(basename "$tool")" 2>/dev/null || true)
+      if [ -z "$cur" ] || ! [ "$tool" -ef "$cur" ]; then
+        same=0
+        break
+      fi
+    done
+  fi
+  if [ "$same" -eq 1 ]; then
     info "This installer is already the latest ($out)."
     return 0
   fi
@@ -183,6 +207,19 @@ update_installer() {
   export PATH="$out/bin:$PATH"
   export CALA_INSTALLER_UPDATED="$out"
   exec "$out/bin/cala-installer" "$@"
+}
+
+# "Drop to a shell" ends the TUI and returns to the login shell it was started
+# from (nothing is spawned). That shell's PATH never saw an update, so there
+# `install-cala-m-os` is the image's own copy again — say so, with the
+# paste-able ways to reach the pulled tools, before leaving.
+drop_to_shell() {
+  if [ -n "${CALA_INSTALLER_UPDATED:-}" ]; then
+    info "The updated installer tools live only inside this TUI; the shell gets the image's own. Use them by path:"
+    info "  sudo ${CALA_INSTALLER_UPDATED}/bin/install-cala-m-os <host> [machine]"
+    info "or export PATH=\"${CALA_INSTALLER_UPDATED}/bin:\$PATH\" and run them with sudo --preserve-env=PATH."
+  fi
+  exit 0
 }
 
 # ---------------------------------------------------------------------------
@@ -358,7 +395,7 @@ wait_for_network() {
         warn "Continuing without network — remote fetches will likely fail."
         return 0
         ;;
-      "Drop to a shell" | "") exit 0 ;;
+      "Drop to a shell" | "") drop_to_shell ;;
     esac
   done
 }
@@ -406,7 +443,7 @@ top_menu() {
       "Install Cala-M-OS") return 0 ;;
       "Inspect hardware")  inspect_hardware ;;
       "Update the installer"*) update_installer "$@" || true ;;
-      "Drop to a shell" | "") exit 0 ;;
+      "Drop to a shell" | "") drop_to_shell ;;
     esac
   done
 }
@@ -905,7 +942,10 @@ main() {
         # Tell the backend the target is already partitioned and mounted at /mnt.
         export INSTALL_SKIP_DISKO=1
       else
-        die "Aborted. Partition and mount the target yourself, then run: INSTALL_SKIP_DISKO=1 install-cala-m-os $HOST${MACHINE:+ $MACHINE}"
+        # Typed into the login shell the TUI exits to: unprivileged, and with the
+        # image's PATH even after "Update the installer" — hence sudo + the
+        # pulled bundle's path when one is in use.
+        die "Aborted. Partition and mount the target yourself, then run: sudo INSTALL_SKIP_DISKO=1 ${CALA_INSTALLER_UPDATED:+$CALA_INSTALLER_UPDATED/bin/}install-cala-m-os $HOST${MACHINE:+ $MACHINE}"
       fi
     fi
   fi

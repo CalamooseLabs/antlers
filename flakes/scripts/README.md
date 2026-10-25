@@ -69,15 +69,21 @@ inherited `$PATH`, so they resolve from the host or ISO the script runs on.
 
 The top menu's **"Update the installer (pull the latest from the flake)"** builds
 `$INSTALL_FLAKE_REF#installer-tools` (`CALA_INSTALLER_UPDATE_ATTR` overrides the
-attribute; cala-m-os `iso/tools.nix` defines it per architecture: this TUI, the
-token-aware `install-cala-m-os` shim + backend, `cala-nix-token`), puts its `bin/`
-first on `PATH` and re-executes the TUI from it — so an old ISO or stick runs
-today's installer without being reflashed. Nothing lands outside the nix store;
-a reboot is back to the image's own tools. Offline, or on a flake without that
-package, it just keeps the current TUI. Before building it runs `cala-nix-token`
-(the install media's Proton PAT → GitHub token) when present: the update itself
-only touches public inputs, but the install that follows needs the token for a
-host with a private flake input.
+attribute; cala-m-os `flake.nix` exposes it per architecture from `iso/tools.nix`:
+this TUI, the token-aware `install-cala-m-os` shim + backend, `cala-nix-token`),
+puts its `bin/` first on `PATH` and re-executes the TUI from it — so an old ISO or
+stick runs today's installer without being reflashed. "Already the latest" is
+judged on the whole bundle (every tool it ships, not just this TUI), so a fix to
+the backend or `cala-nix-token` alone is still picked up. Nothing lands outside
+the nix store; a reboot is back to the image's own tools. The update also lives
+only in the TUI's process: **Drop to a shell** (and an abort) returns to the login
+shell with the image's PATH, so the TUI prints the pulled bundle's path to run
+`install-cala-m-os` from (`sudo <bundle>/bin/install-cala-m-os <host>`) and its
+abort hint names it. Offline, or on a flake without that package, it just keeps
+the current TUI. Before building it runs `cala-nix-token` (the install media's
+Proton PAT → GitHub token) when present: the update itself only touches public
+inputs, but the install that follows needs the token for a host with a private
+flake input.
 
 The no-network menu has **"Hetzner Cloud: set the static address"** for a
 custom-ISO boot on Hetzner Cloud, whose routed network (a /32 behind the
