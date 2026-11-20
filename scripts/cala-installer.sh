@@ -784,8 +784,10 @@ seed_proton_target() {
   [ "$PROTON_DO_SEED" -eq 1 ] || return 0
   # install-cala-m-os now seeds the target BEFORE its first activation (Step Five)
   # when INSTALL_PROTON_SEED=1. If it did, skip the re-copy: the target's own
-  # activation may have minted a machine-id-bound session that the installer's
-  # (mismatched) session would clobber. The PAT it wrote is already in place.
+  # activation has used that session since (and may have logged in afresh from
+  # the PAT), so copying the installer's files over it again would put an older
+  # session back. (The session store is not tied to the machine — a copy works
+  # anywhere until Proton drops the session.) The PAT it wrote is already in place.
   if [ "${INSTALL_PROTON_SEED:-0}" = "1" ]; then
     info "Proton session/PAT already seeded to the target by the installer backend."
     return 0

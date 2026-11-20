@@ -1,25 +1,67 @@
-# NixOS module: activation-time secret decryption from Proton Pass — an agenix-shaped
+# NixOS module: secrets fetched from Proton Pass into a ramfs — an agenix-shaped
 # "online" backend.
 #
 # Wired as `nixosModules.proton-secrets = import ./flakes/proton-secrets/module.nix self`.
-# For each `services.proton-secrets.secrets.<name>` it fetches the value with
-# `pass-cli` at ACTIVATION time and installs it into a ramfs generation under
-# `secretsDir` (default /run/proton-secrets) with the requested owner/group/mode.
-# Plaintext NEVER enters the Nix store — only `pass://` references and paths do.
+# For each `services.proton-secrets.secrets.<name>` it reads the value with
+# `pass-cli` and installs it into a ramfs generation under `secretsDir` (default
+# /run/proton-secrets) with the requested owner/group/mode. Plaintext NEVER enters
+# the Nix store — only `pass://` references and paths do.
 #
-# The activation ordering mirrors ryantm/agenix EXACTLY (newGeneration -> install ->
-# users.deps -> chown -> barrier) so `hashedPasswordFile` consumers work during a
-# `nixos-rebuild switch`. See the sibling agenix module for the reference.
+# All of the work is done by ONE script, proton-secrets-fetch (./fetch.sh, built in
+# ./package.nix), driven by a JSON manifest of what is declared here. It runs from:
 #
-# DIVERGENCE FROM AGENIX: agenix decrypts offline with an on-disk identity; this
-# needs NETWORK + a live Proton Pass session at activation. On a running host during
-# `switch` the network is up and this works; a fresh install / a reboot before the
-# network is up cannot fetch. Hence: bootstrap offline (agenix), run `proton-secrets
-# login`, then switch to online. `failClosed` (default true) aborts the rebuild with
-# a clear message when there is no session/network rather than blocking.
+#   * activation (`nixos-rebuild switch`, nixos-install): the snippet names and
+#     order mirror ryantm/agenix (newGeneration -> install -> users.deps -> chown ->
+#     barrier) so `hashedPasswordFile` consumers work during a switch. `failClosed`
+#     (default true) makes a switch that could not read every secret change nothing
+#     and fail; false installs what it could and warns.
+#   * proton-secrets-fetch.service, at boot once the network is up. Secrets live in
+#     RAM, so every boot has to fetch them again, and the boot-time activation
+#     cannot (no network; with systemd stage-1 it runs inside the initrd and is
+#     skipped). The unit retries with back-off until Proton answers; it stops only
+#     on an error retrying cannot fix (exit 78: the PAT was rejected, no session and
+#     no PAT, a required field missing or blank), and then shows as failed.
+#   * proton-secrets-restore.service (with `cache.enable`), before any normal
+#     service: links the sealed last-known-good copies so consumers find their
+#     files on their first start even with Proton unreachable.
+#
+# Consumers that read a secret file when they start (`LoadCredential=`) belong in
+# `restartUnits` and should be ordered `After=proton-secrets-fetch.service` —
+# After= only. With Wants=/Requires= every start of the consumer (each round of a
+# restart loop included) queues a start job for the fetch unit, and a start job
+# runs a unit that is waiting out its back-off immediately. That is harmless
+# (StartLimitIntervalSec=0, one run at a time under the lock) but throws the
+# back-off away; `systemctl start`/`restart` by hand do the same, on purpose.
+#
+# What the script guarantees (./fetch.sh has the details):
+#   - every secret is fetched on its own; one bad field does not cost the others,
+#     and a secret that cannot be fetched keeps the value that is linked (or cached);
+#   - a new generation is only made when content changed, and only the consumers of
+#     changed secrets are restarted (`restartUnits`);
+#   - the session cannot get stuck: it is probed with `pass-cli info`, pass-cli's
+#     error decides between "wait" (network), "log in from the PAT", "reset the
+#     local store and log in again" (only when a PAT exists, once per run) and
+#     "stop: the PAT is no longer valid";
+#   - `statusFile` says what happened, without any secret material.
+#
+# Operator runbook — secrets missing after a boot:
+#   sudo proton-secrets doctor      # session files, session probe, PAT file, last run, cache
+#     session probe: ok            -> read the per-secret lines of the last run (a
+#                                     missing/blank field is named there)
+#     session probe: no-session    -> sudo proton-secrets login
+#     session probe: store-corrupt -> sudo proton-secrets repair
+#     session probe: network       -> wait; the fetch unit keeps retrying
+#     session probe: session-rejected -> sudo proton-secrets repair
+#     "invalid, expired or has been deleted" -> renew/replace the PAT in patFile
+#                                     (a PAT lives one year at most), then repair
+#     (without a patFile: `repair --force`, then `login`)
+#   sudo proton-secrets refresh     # run the fetch unit now and show the result
 #
 # The bundled proton-pass-cli is UNFREE — consumers must allowUnfree it.
-flake: {
+#
+# (The flake argument is not used: the CLI is built against the host's own pkgs,
+# so `cliPackage` and the host's systemd are what get baked in.)
+_flake: {
   config,
   options,
   lib,
@@ -29,148 +71,61 @@ flake: {
 with lib; let
   cfg = config.services.proton-secrets;
 
-  system = pkgs.stdenv.hostPlatform.system;
-  wrapper = flake.packages.${system}.proton-secrets;
-  rawCli = "${pkgs.proton-pass-cli}/bin/pass-cli";
+  wrapper = pkgs.callPackage ./package.nix {
+    proton-pass-cli = cfg.cliPackage;
+    systemd = config.systemd.package;
+    defaultSessionDir = cfg.sessionDir;
+    defaultKeyProvider = cfg.keyProvider;
+  };
 
   users = config.users.users;
 
   sysusersEnabled =
     options.systemd ? sysusers && (config.systemd.sysusers.enable || config.services.userborn.enable);
 
-  # ---- ramfs generation dance (verbatim shape from agenix) ----
-  mountCommand = ''
-    grep -q "${cfg.secretsMountPoint} ramfs" /proc/mounts ||
-      mount -t ramfs none "${cfg.secretsMountPoint}" -o nodev,nosuid,mode=0751
-  '';
+  fetchUnit = "proton-secrets-fetch.service";
+  restoreUnit = "proton-secrets-restore.service";
 
-  newGeneration = ''
-    _ps_generation="$(basename "$(readlink ${cfg.secretsDir})" || echo 0)"
-    (( ++_ps_generation ))
-    echo "[proton-secrets] creating new generation in ${cfg.secretsMountPoint}/$_ps_generation"
-    mkdir -p "${cfg.secretsMountPoint}"
-    chmod 0751 "${cfg.secretsMountPoint}"
-    ${mountCommand}
-    mkdir -p "${cfg.secretsMountPoint}/$_ps_generation"
-    chmod 0751 "${cfg.secretsMountPoint}/$_ps_generation"
-  '';
+  # Everything the script needs to know. Runtime paths and pass:// references only.
+  manifest = {
+    version = 1;
+    inherit (cfg) sessionDir keyProvider patFile secretsDir secretsMountPoint statusFile failClosed restartUnits;
+    lockFile = "/run/lock/proton-pass-cli.lock";
+    # How long one run waits for Proton before it gives the turn back to the
+    # unit's back-off (or fails the activation).
+    probeAttempts = cfg.preflightRetries;
+    probeDelay = cfg.preflightRetryDelay;
+    # A second and third try for an error pass-cli gives no recognisable reason for.
+    fetchRetries = 2;
+    fetchRetryDelay = 3;
+    # Measured worst cases of one pass-cli call: 30 s per stalled request (an
+    # `item view` makes at least three), ~14 s of built-in retries on HTTP 429.
+    timeouts = {
+      probe = 45;
+      login = 45;
+      item = 120;
+      lock = 120;
+    };
+    # The script stops by itself before TimeoutStartSec would kill it mid-write.
+    runBudget = max 30 (cfg.fetchService.timeoutStartSec - 30);
+    # Seconds a PAT that Proton rejected is not presented again (unless its file
+    # changed, or someone runs `proton-secrets repair`).
+    patRetryAfter = 900;
+    unitName =
+      if cfg.fetchService.enable
+      then fetchUnit
+      else null;
+    cache = {inherit (cfg.cache) enable directory withKey;};
+    secrets =
+      map (s: {
+        inherit (s) name reference vaultName itemTitle field path mode owner group symlink optional restartUnits;
+      })
+      (attrValues cfg.secrets);
+  };
 
-  # NOTE: runs inside the `set -e` subshell of installSecrets, so avoid the
-  # `[ … ] && cmd` / `(( … )) && { … }` idioms agenix uses (a false test would
-  # abort under set -e); use explicit `if … fi` instead.
-  cleanupAndLink = ''
-    _ps_generation="$(basename "$(readlink ${cfg.secretsDir})" || echo 0)"
-    (( ++_ps_generation )) || true
-    echo "[proton-secrets] symlinking new secrets to ${cfg.secretsDir} (generation $_ps_generation)..."
-    ln -sfT "${cfg.secretsMountPoint}/$_ps_generation" ${cfg.secretsDir}
-    if (( _ps_generation > 1 )); then
-      echo "[proton-secrets] removing old secrets (generation $(( _ps_generation - 1 )))..."
-      rm -rf "${cfg.secretsMountPoint}/$(( _ps_generation - 1 ))"
-    fi
-  '';
+  manifestFile = pkgs.writeText "proton-secrets-manifest.json" (builtins.toJSON manifest);
 
-  setTruePath = s:
-    if s.symlink
-    then ''_truePath="${cfg.secretsMountPoint}/$_ps_generation/${s.name}"''
-    else ''_truePath="${s.path}"'';
-
-  # `pass-cli item view` selector args. A whole-file secret is just a field whose
-  # value is the file body (a secure-note field), so both value and file secrets
-  # use the same `--field ... --output human` path (no jq / no JSON shape guessing).
-  viewArgs = s:
-    (optionals (s.reference != null) [(escapeShellArg s.reference)])
-    ++ (optionals (s.vaultName != null) ["--vault-name" (escapeShellArg s.vaultName)])
-    ++ (optionals (s.itemTitle != null) ["--item-title" (escapeShellArg s.itemTitle)])
-    ++ (optionals (s.field != null) ["--field" (escapeShellArg s.field)]);
-
-  # Runs inside the `set -e` subshell — use explicit `if … fi`, not `[ … ] && cmd`.
-  installSecret = s: ''
-    ${setTruePath s}
-    echo "[proton-secrets] fetching '${s.name}' -> '$_truePath'..."
-    TMP_FILE="$_truePath.tmp"
-    mkdir -p "$(dirname "$_truePath")"
-    if [ "${s.path}" != "${cfg.secretsDir}/${s.name}" ]; then
-      mkdir -p "$(dirname "${s.path}")"
-    fi
-    if ! ( umask u=r,g=,o=; ${rawCli} item view ${concatStringsSep " " (viewArgs s)} --output human > "$TMP_FILE" ); then
-      echo "[proton-secrets] ERROR: failed to fetch '${s.name}' (bad reference/field or session?)" >&2
-      rm -f "$TMP_FILE"
-      exit 1
-    fi
-    if [ ! -s "$TMP_FILE" ]; then
-      echo "[proton-secrets] ERROR: empty result for '${s.name}' (bad reference/field or session?)" >&2
-      rm -f "$TMP_FILE"
-      exit 1
-    fi
-    chmod ${s.mode} "$TMP_FILE"
-    mv -f "$TMP_FILE" "$_truePath"
-    ${optionalString s.symlink ''
-      if [ "${s.path}" != "${cfg.secretsDir}/${s.name}" ]; then
-        ln -sfT "${cfg.secretsDir}/${s.name}" "${s.path}"
-      fi
-    ''}
-  '';
-
-  # Runs once before the per-secret loop: env, optional PAT login, session preflight.
-  authPrelude = ''
-    export PROTON_PASS_SESSION_DIR=${escapeShellArg cfg.sessionDir}
-    export PROTON_PASS_KEY_PROVIDER=${escapeShellArg cfg.keyProvider}
-    export PROTON_PASS_NO_UPDATE_CHECK=1
-    ${optionalString (cfg.patFile != null) ''
-      if [ -r ${escapeShellArg cfg.patFile} ]; then
-        PROTON_PASS_PERSONAL_ACCESS_TOKEN="$(cat ${escapeShellArg cfg.patFile})"
-        export PROTON_PASS_PERSONAL_ACCESS_TOKEN
-        if ! ${rawCli} test >/dev/null 2>&1; then
-          echo '[proton-secrets] establishing session from PAT...'
-          # pass-cli defaults to web login and ignores the env var; the PAT must
-          # be passed as --pat for a non-interactive (headless) session.
-          ${rawCli} login --pat "$PROTON_PASS_PERSONAL_ACCESS_TOKEN" || true
-        fi
-      fi
-    ''}
-    echo '[proton-secrets] checking Proton Pass session + network...'
-    _ps_tries=0
-    until ${rawCli} test >/dev/null 2>&1; do
-      _ps_tries=$((_ps_tries + 1))
-      if [ "$_ps_tries" -ge ${toString cfg.preflightRetries} ]; then
-        echo '[proton-secrets] ERROR: no usable Proton Pass session and/or no network.' >&2
-        echo '  Fix: ensure this host has network, then run:  sudo proton-secrets login' >&2
-        echo '  (A fresh install / a reboot before the network is up cannot fetch — bootstrap offline.)' >&2
-        exit 1
-      fi
-      sleep ${toString cfg.preflightRetryDelay}
-    done
-  '';
-
-  # The whole online body runs in a `set -e` subshell so a failure is scoped: with
-  # failClosed=true it aborts the rebuild (exit 1); with failClosed=false it warns
-  # and leaves the previous generation in place. newGeneration runs separately (it
-  # must mount the ramfs early), so a skipped body just leaves secretsDir pointing
-  # at the last good generation.
-  installSecrets = ''
-    (
-      set -e
-      ${authPrelude}
-      echo '[proton-secrets] fetching secrets...'
-      ${concatStringsSep "\n" (map installSecret (attrValues cfg.secrets))}
-      ${cleanupAndLink}
-    ) ${
-      if cfg.failClosed
-      then "|| exit 1"
-      else ''|| echo "[proton-secrets] WARNING: refresh failed (failClosed=false); keeping previous secrets." >&2''
-    }
-  '';
-
-  chownSecret = s: ''
-    ${setTruePath s}
-    [ -e "$_truePath" ] && chown ${s.owner}:${s.group} "$_truePath" || true
-  '';
-
-  chownSecrets = ''
-    _ps_generation="$(basename "$(readlink ${cfg.secretsDir})" || echo 0)"
-    echo '[proton-secrets] chowning...'
-    ${concatStringsSep "\n" (map chownSecret (attrValues cfg.secrets))}
-  '';
+  fetch = "${getExe cfg.fetchPackage} --manifest ${manifestFile}";
 
   # In systemd stage-1 (boot.initrd.systemd.enable) NixOS runs the system
   # `activate` INSIDE the initrd (IN_NIXOS_SYSTEMD_STAGE1=true), which has no
@@ -179,8 +134,8 @@ with lib; let
   # root, leaving switch-root with "Switch root target contains no usable init".
   # There is never a reason to fetch in the initrd, so make these snippets a
   # no-op there. They still run normally during a real activation (stage-2 boot
-  # or a live `nixos-rebuild switch`); order a network-online oneshot to
-  # repopulate secrets at boot.
+  # or a live `nixos-rebuild switch`); proton-secrets-fetch.service repopulates
+  # the secrets at boot.
   skipInInitrd = body: ''
     if [ "''${IN_NIXOS_SYSTEMD_STAGE1:-}" = true ]; then
       echo "[proton-secrets] initrd activation has no network — skipping (fetch runs post-switch-root)"
@@ -247,17 +202,69 @@ with lib; let
         description = "Group of the installed secret.";
       };
       symlink = mkEnableOption "symlinking the secret to its destination" // {default = true;};
+      optional = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          A secret the host can run without. Failing to fetch it is reported (log
+          and `statusFile`) but never fails a run: the fetch unit still succeeds
+          and a `failClosed` activation still goes through. Its previous (or
+          cached) value is kept all the same.
+        '';
+      };
+      restartUnits = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        example = ["multichat.service"];
+        description = ''
+          Systemd units to restart when THIS secret's content changed (including
+          the first time it appears) — for consumers that read the file at start,
+          e.g. through `LoadCredential=`. Only units that are active, starting or
+          failed are restarted (`systemctl reset-failed`, then `--no-block
+          restart`); a unit someone stopped is left alone, and so is one whose
+          start is still queued behind the fetch. Order such consumers
+          `After=proton-secrets-fetch.service` (not `Wants=`/`Requires=`).
+        '';
+      };
     };
   });
 in {
   options.services.proton-secrets = {
-    enable = mkEnableOption "Proton Pass activation-time secret decryption";
+    enable = mkEnableOption "Proton Pass secret decryption (at activation and at boot)";
+
+    cliPackage = mkOption {
+      type = types.package;
+      default = pkgs.proton-pass-cli;
+      defaultText = literalExpression "pkgs.proton-pass-cli";
+      description = ''
+        The package providing `pass-cli`. Used everywhere: activation, the units and
+        the default `package`. Set it to pin a pass-cli version on one host.
+      '';
+    };
 
     package = mkOption {
       type = types.package;
       default = wrapper;
-      defaultText = literalExpression "flake.packages.\${system}.proton-secrets";
+      defaultText = literalExpression "pkgs.callPackage ./package.nix { proton-pass-cli = cfg.cliPackage; }";
       description = "The proton-secrets wrapper CLI installed system-wide.";
+    };
+
+    fetchPackage = mkOption {
+      type = types.package;
+      default = wrapper.fetch;
+      defaultText = literalExpression "(pkgs.callPackage ./package.nix { proton-pass-cli = cfg.cliPackage; }).fetch";
+      readOnly = true;
+      internal = true;
+      description = "The built proton-secrets-fetch script (what activation and the units run).";
+    };
+
+    manifestFile = mkOption {
+      type = types.path;
+      default = manifestFile;
+      defaultText = literalMD "the generated manifest";
+      readOnly = true;
+      internal = true;
+      description = "The JSON manifest proton-secrets-fetch is run with (also at /etc/proton-secrets/manifest.json).";
     };
 
     sessionDir = mkOption {
@@ -285,6 +292,21 @@ in {
       description = "Ramfs mount point where generations are created before symlinking.";
     };
 
+    statusFile = mkOption {
+      type = types.str;
+      default = "/run/proton-secrets.status";
+      description = ''
+        JSON file (world-readable, no secret material) rewritten at the end of every
+        fetch: overall `state` (`ok` — everything verified against Proton;
+        `degraded` — not verified, but every required secret still has a value;
+        `failed` — a required secret has none; `restored` — values come from the
+        sealed cache and are not verified yet), time, attempt counter, session
+        state / error class, and per secret where its value came from (`fetched`,
+        `unchanged`, `carried`, `cache`, `missing`), whether it changed, and which
+        units were restarted.
+      '';
+    };
+
     keyProvider = mkOption {
       type = types.enum ["fs" "keyring" "env"];
       default = "fs";
@@ -297,8 +319,13 @@ in {
       example = "/var/lib/proton-pass-cli/pat";
       description = ''
         Path (a runtime filesystem path STRING, never a Nix store path) to a file
-        holding a Personal Access Token (`pst_...::key`). Read at activation to mint
-        a session non-interactively. Leave null to use an interactive login session.
+        holding a Personal Access Token (`pst_...::key`). It is used to log in
+        whenever there is no usable session, and it is what lets the fetch reset a
+        damaged session store by itself — without it nothing is ever logged out
+        automatically and a broken session needs `proton-secrets repair --force` +
+        `proton-secrets login` by hand. Leave null to use an interactive login
+        session. A PAT always expires (one year at most): when Proton rejects it
+        the fetch stops with a distinct error until the file holds a valid one.
       '';
     };
 
@@ -306,27 +333,119 @@ in {
       type = types.bool;
       default = true;
       description = ''
-        When true, abort the rebuild if no session/network is available at activation.
-        When false, warn and keep the previous generation's secrets.
+        For the ACTIVATION path. When true, an activation that could not freshly
+        read every non-`optional` secret changes nothing and aborts the rebuild.
+        When false, it installs what it could read, keeps the previous value of the
+        rest, warns and carries on. (The fetch unit always behaves like `false` and
+        reports through its exit code instead.)
       '';
     };
 
     preflightRetries = mkOption {
       type = types.ints.positive;
       default = 3;
-      description = "How many times to retry `pass-cli test` before giving up.";
+      description = ''
+        How many times ONE run asks Proton for the session state (`pass-cli info`,
+        or the PAT login) while the answer is a network error, before the run gives
+        up as "temporary". This is only the short in-run wait; the long one is the
+        fetch unit's back-off (`fetchService`).
+      '';
     };
 
     preflightRetryDelay = mkOption {
       type = types.ints.positive;
       default = 5;
-      description = "Seconds between preflight retries.";
+      description = "Seconds between those attempts.";
+    };
+
+    restartUnits = mkOption {
+      type = types.listOf types.str;
+      default = [];
+      example = ["chat-cards.service"];
+      description = ''
+        Systemd units to restart when ANY secret's content changed. See
+        `secrets.<name>.restartUnits` for the per-secret list and the rules.
+      '';
+    };
+
+    fetchService = {
+      enable =
+        mkEnableOption "proton-secrets-fetch.service, the boot-time fetch that retries until it succeeds"
+        // {default = true;};
+
+      restartSec = mkOption {
+        type = types.ints.positive;
+        default = 15;
+        description = "Seconds before the first retry of a failed fetch (the back-off grows from here).";
+      };
+
+      restartMaxDelaySec = mkOption {
+        type = types.ints.positive;
+        default = 300;
+        description = "Longest pause between two retries, in seconds.";
+      };
+
+      restartSteps = mkOption {
+        type = types.ints.positive;
+        default = 8;
+        description = "Number of retries over which the pause grows from `restartSec` to `restartMaxDelaySec`.";
+      };
+
+      timeoutStartSec = mkOption {
+        type = types.ints.between 60 3600;
+        default = 300;
+        description = ''
+          Upper bound for one run of the fetch, in seconds. multi-user.target waits
+          for the first run to end (successfully or not), so this is also the
+          longest a hung run can hold the boot. The script stops itself 30 s
+          earlier and reports a temporary failure.
+        '';
+      };
+    };
+
+    cache = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Keep a sealed last-known-good copy of every secret on disk and restore
+          it into the ramfs before any service starts (proton-secrets-restore.service),
+          so a boot without Proton — no internet, an expired PAT, a broken session —
+          still has secrets. Every successful fetch refreshes the copies; a restored
+          value is stale until then, and a secret that was rotated or revoked in
+          Proton stays usable from the cache until the next successful fetch.
+
+          This puts the secrets at rest on the machine, encrypted by `systemd-creds`
+          and bound to the secret's name. Mind what the key protects: with
+          `withKey = "host"` it is /var/lib/systemd/credential.secret on the SAME
+          disk, so the cache is safe against a copy of `cache.directory` leaving the
+          box (a backup, a stray rsync) but NOT against theft of the whole disk —
+          where the PAT in `patFile` already opens the vault anyway. The TPM modes
+          bind the copies to this machine's TPM instead.
+        '';
+      };
+
+      directory = mkOption {
+        type = types.str;
+        default = "/var/lib/proton-secrets-cache";
+        description = "Where the sealed copies live (root-only, 0700). Persist it on impermanent hosts.";
+      };
+
+      withKey = mkOption {
+        type = types.enum ["host" "tpm2" "host+tpm2" "auto"];
+        default = "host";
+        description = ''
+          `systemd-creds encrypt --with-key=`: `host` (the host key file),
+          `tpm2` (the TPM only), `host+tpm2` (both needed), or `auto` (both when a
+          TPM is there and /var is on persistent media).
+        '';
+      };
     };
 
     secrets = mkOption {
       type = types.attrsOf secretType;
       default = {};
-      description = "Secrets to fetch from Proton Pass at activation.";
+      description = "Secrets to fetch from Proton Pass.";
     };
   };
 
@@ -337,63 +456,141 @@ in {
           assertion = s.reference != null || (s.vaultName != null && s.itemTitle != null);
           message = "services.proton-secrets.secrets.\"${name}\": set `reference` (pass://…) or both `vaultName` and `itemTitle`.";
         })
-        cfg.secrets;
+        cfg.secrets
+        ++ mapAttrsToList (name: s: {
+          # One file per secret, directly in the generation directory.
+          assertion = builtins.match "[^/\n\t]+" s.name != null && !(hasPrefix "." s.name);
+          message = "services.proton-secrets.secrets.\"${name}\": `name` must be a plain file name (no '/', tab or newline, not starting with '.').";
+        })
+        cfg.secrets
+        ++ [
+          {
+            assertion = cfg.fetchService.restartMaxDelaySec >= cfg.fetchService.restartSec;
+            message = "services.proton-secrets.fetchService: restartMaxDelaySec must not be smaller than restartSec.";
+          }
+          {
+            assertion = !(elem fetchUnit (cfg.restartUnits ++ concatMap (s: s.restartUnits) (attrValues cfg.secrets)));
+            message = "services.proton-secrets: ${fetchUnit} cannot be in restartUnits (it is the unit that restarts them).";
+          }
+          {
+            # Without activation snippets (see below) the unit is the only fetch.
+            assertion = !sysusersEnabled || cfg.fetchService.enable;
+            message = "services.proton-secrets: with systemd-sysusers/userborn there is no activation-time fetch, so fetchService.enable must stay on.";
+          }
+        ];
 
       environment.systemPackages = [cfg.package];
 
       # Keep interactive `proton-secrets`/`pass-cli` (run by root) aligned with the
-      # session store + key provider the activation step uses.
+      # session store + key provider the fetch uses.
       environment.variables = {
         PROTON_PASS_SESSION_DIR = cfg.sessionDir;
         PROTON_PASS_KEY_PROVIDER = cfg.keyProvider;
         PROTON_PASS_NO_UPDATE_CHECK = "1";
       };
 
-      systemd.tmpfiles.rules = ["d ${cfg.sessionDir} 0700 root root -"];
+      # Where `proton-secrets doctor|repair|refresh` learn about this host (sudo
+      # resets the environment, so a variable would not reach them).
+      environment.etc."proton-secrets/manifest.json".source = manifestFile;
+
+      systemd.tmpfiles.rules =
+        ["d ${cfg.sessionDir} 0700 root root -"]
+        ++ optional cfg.cache.enable "d ${cfg.cache.directory} 0700 root root -";
     }
+
+    # ---- Boot: fetch once the network is up, and keep trying ----
+    (mkIf cfg.fetchService.enable {
+      systemd.services.proton-secrets-fetch = {
+        description = "Fetch Proton Pass secrets into ${cfg.secretsDir}";
+        wantedBy = ["multi-user.target"];
+        wants = ["network-online.target"];
+        after =
+          ["network-online.target"]
+          ++ optional cfg.cache.enable restoreUnit
+          # sysusers/userborn: the owners must exist before the chown.
+          ++ optionals sysusersEnabled ["systemd-sysusers.service" "userborn.service"];
+        # The unit the sysusers path used to have; keep the name resolvable.
+        aliases = optional sysusersEnabled "proton-secrets-install.service";
+        # network-online.target is no promise of a route to Proton, and a power
+        # cut that also restarts the router can keep the internet away for
+        # minutes: retry for as long as it takes, never give up on a counter.
+        startLimitIntervalSec = 0;
+        unitConfig.RequiresMountsFor = [cfg.sessionDir] ++ optional cfg.cache.enable cfg.cache.directory;
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          # Only the fetch — never switch-to-configuration: that starts
+          # multi-user.target, whose job would wait on this unit's own job.
+          ExecStart = "${fetch} unit";
+          Restart = "on-failure";
+          RestartSec = cfg.fetchService.restartSec;
+          RestartSteps = cfg.fetchService.restartSteps;
+          RestartMaxDelaySec = cfg.fetchService.restartMaxDelaySec;
+          # 78 = a human must act (see ./fetch.sh). The unit then stays failed and
+          # visible instead of asking Proton every five minutes with a dead PAT.
+          RestartPreventExitStatus = 78;
+          TimeoutStartSec = cfg.fetchService.timeoutStartSec;
+        };
+      };
+    })
+
+    # ---- Boot, before everything else: the sealed last-known-good copies ----
+    (mkIf cfg.cache.enable {
+      systemd.services.proton-secrets-restore = {
+        description = "Restore Proton Pass secrets from the sealed cache";
+        wantedBy = ["sysinit.target"];
+        # Before sysinit.target is before every normal service, so a consumer's
+        # first start already finds its files.
+        before = ["sysinit.target" "shutdown.target"];
+        after =
+          ["local-fs.target" "systemd-sysusers.service" "userborn.service"]
+          # The TPM device shows up asynchronously.
+          ++ optional (cfg.cache.withKey != "host") "tpm2.target";
+        wants = optional (cfg.cache.withKey != "host") "tpm2.target";
+        conflicts = ["shutdown.target"];
+        # A switch must not re-run it: it never touches a linked generation anyway.
+        restartIfChanged = false;
+        unitConfig = {
+          DefaultDependencies = false;
+          # The host key lives in /var/lib/systemd.
+          RequiresMountsFor = [cfg.cache.directory "/var/lib/systemd"];
+        };
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${fetch} restore";
+        };
+      };
+    })
 
     # ---- Normal path: activation scripts (mirrors agenix names/deps) ----
     (mkIf (!sysusersEnabled) {
       system.activationScripts = {
         protonSecretsNewGeneration = {
-          text = skipInInitrd newGeneration;
+          # The generation itself is built by the install step; this only makes
+          # sure the ramfs is there.
+          text = skipInInitrd "${fetch} mount || true";
           deps = ["specialfs"];
         };
         protonSecretsInstall = {
-          text = skipInInitrd installSecrets;
+          text = skipInInitrd (
+            if cfg.failClosed
+            then "${fetch} activate || exit 1"
+            else ''${fetch} activate || echo "[proton-secrets] WARNING: refresh failed (failClosed=false); keeping previous secrets." >&2''
+          );
           deps = ["protonSecretsNewGeneration" "specialfs"];
         };
         # So user passwords (hashedPasswordFile) can be sourced online during switch.
         users.deps = ["protonSecretsInstall"];
         # Ownership after users and groups exist.
         protonSecretsChown = {
-          text = skipInInitrd chownSecrets;
+          text = skipInInitrd "${fetch} chown || true";
           deps = ["users" "groups"];
         };
         # Barrier other activation scripts can depend on.
         protonSecrets = {
           text = "";
           deps = ["protonSecretsChown"];
-        };
-      };
-    })
-
-    # ---- sysusers/userborn path: a network-ordered oneshot (mirrors agenix) ----
-    (mkIf sysusersEnabled {
-      systemd.services.proton-secrets-install = {
-        wantedBy = ["sysinit.target"];
-        after = ["systemd-sysusers.service" "network-online.target"];
-        wants = ["network-online.target"];
-        unitConfig.DefaultDependencies = "no";
-        path = [pkgs.mount];
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-          ExecStart = pkgs.writeShellScript "proton-secrets-install" ''
-            ${newGeneration}
-            ${installSecrets}
-            ${chownSecrets}
-          '';
         };
       };
     })

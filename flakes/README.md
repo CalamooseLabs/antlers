@@ -24,9 +24,9 @@ there is a single source of truth and no per-package flakes to keep in sync.
 | `vibe-server/` | `nixosModules.vibe-server`          | NixOS module: `services.vibe-server` (browser session manager; import with `vibe` to inherit its pins) |
 | `cobblemon-overlay/` | `packages.<system>.cobblemon-overlay` | OBS stream-overlay Deno web service for The Cobblemon Initiative — ingests the mod's streamsync pushes (`POST /ingest`, wire protocol v1), tracks hardcore attempts + the cemetery memorial, and serves transparent SSE-live overlay pages with bundled pokesprite box icons; also `overlays.default.cobblemon-overlay` |
 | `cobblemon-overlay/` | `nixosModules.cobblemon-overlay`    | NixOS service module (`services.cobblemon-overlay`) whose `ExecStart` is the package above (hardened unit, LoadCredential-staged ingest token, source-restricted firewall knobs) |
-| `proton-secrets/` | `packages.<system>.proton-secrets` | headless wrapper CLI around Proton Pass `pass-cli` (fixed session dir + `fs` key provider); also `apps.<system>.proton-secrets` + `overlays.default.proton-secrets` |
+| `proton-secrets/` | `packages.<system>.proton-secrets` | headless wrapper CLI around Proton Pass `pass-cli` (fixed session dir + `fs` key provider; `login`/`status`/`resolve`/`doctor`/`repair`/`refresh`); carries the fetch engine `proton-secrets-fetch` as `passthru.fetch`; also `apps.<system>.proton-secrets` + `overlays.default.proton-secrets` |
 | `proton-secrets/` | `packages.<system>.proton-pass-cli` | re-export of nixpkgs' `proton-pass-cli` (UNFREE — needs a paid Proton plan + allowUnfree) |
-| `proton-secrets/` | `nixosModules.proton-secrets`       | NixOS module: `services.proton-secrets` — agenix-shaped, activation-time secret decryption from Proton Pass (`/run/proton-secrets`; needs network + a live session at activation) |
+| `proton-secrets/` | `nixosModules.proton-secrets`       | NixOS module: `services.proton-secrets` — agenix-shaped secrets from Proton Pass in a ramfs (`/run/proton-secrets`): fetched at activation, by a boot-time unit that retries until Proton answers, and optionally restored from a sealed last-known-good cache — see [below](#proton-secrets-servicesproton-secrets) |
 
 Consume from the root flake:
 
@@ -49,3 +49,112 @@ inputs.antlers.url = "github:CalamooseLabs/antlers";
 1. Create `flakes/<name>/package.nix` as a `{ <deps>, ... }: <derivation>` function.
 2. Wire it into the root `flake.nix`: `packages.${system}.<name> = pkgs.callPackage ./flakes/<name>/package.nix {};` (add an `apps`/overlay entry if it is runnable).
 3. `git add` the new file (untracked `.nix` files are invisible to flake evaluation), then `nix flake check`.
+
+## proton-secrets (`services.proton-secrets`)
+
+Secrets are declared as `services.proton-secrets.secrets.<name>` (a `pass://`
+reference, or `vaultName` + `itemTitle` + `field`) and end up as files in a ramfs
+generation, linked at `/run/proton-secrets/<name>` with the declared
+`owner`/`group`/`mode`. Plaintext never enters the Nix store, and never touches
+the disk unless the sealed cache is switched on.
+
+One script does all of it — `proton-secrets-fetch` (`fetch.sh`), driven by a JSON
+manifest the module generates — from three places:
+
+| When | What runs | Behaviour |
+| --- | --- | --- |
+| `nixos-rebuild switch`, `nixos-install` | activation snippets `protonSecretsNewGeneration` → `protonSecretsInstall` → `users` → `protonSecretsChown` → `protonSecrets` (same names/order as agenix) | `failClosed = true` (default): a run that could not read every non-optional secret changes nothing and aborts the activation. `false`: installs what it read, keeps the rest, warns. Skipped inside the initrd. |
+| boot, after `network-online.target` | `proton-secrets-fetch.service` | Retries with back-off until it succeeds (`Restart=on-failure`, no start limit); stops, visibly failed, only on exit 78. Safe to `systemctl restart` at any time. |
+| boot, before `sysinit.target` (only with `cache.enable`) | `proton-secrets-restore.service` | Decrypts the sealed cache into the first generation, no network. Never fatal, never overwrites a linked generation. |
+
+What a fetch does:
+
+- **Session.** Probed with `pass-cli info` (the authenticated check; `pass-cli test`
+  cannot see a dead session and is gone from pass-cli 2.2.4+). pass-cli exits 1 for
+  everything, so its stderr decides: *network* → wait a little, never log in or
+  out; *no session* → log in from `patFile`, the PAT passed in the environment;
+  *store unreadable*, *session rejected by Proton*, or reads failing because
+  pass-cli's stored PAT key is gone (a power cut shortly after a login leaves it
+  empty) → `pass-cli logout --force` and log in again, once per run and **only when
+  a PAT exists** — an interactive session is never thrown away; *PAT rejected* → a
+  distinct permanent error that names the file; anything unrecognised → retry
+  later, touch nothing. Every pass-cli call runs under one flock (shared with the
+  `proton-secrets` CLI) and a timeout; the session files are fsynced after a login.
+- **Per secret.** Each one is fetched on its own. A secret that cannot be fetched
+  keeps the value that is linked now (or the cached one) and is marked stale; a
+  blank field counts as a failure. `secrets.<name>.optional = true` keeps such a
+  failure from failing the run.
+- **Change-aware.** If every value is byte-identical to what is linked, nothing is
+  touched. Otherwise generation N+1 is built completely, the symlink is renamed
+  onto it, then the old one is removed. Only the consumers of changed secrets are
+  restarted: `secrets.<name>.restartUnits` plus the global `restartUnits`, and only
+  units that are active, starting or failed.
+- **Status.** `statusFile` (default `/run/proton-secrets.status`, JSON, no secret
+  material): `state` (`ok` / `degraded` / `failed` / `restored`), time, attempt
+  counter, session state, error class, and per secret its `source` (`fetched`,
+  `unchanged`, `carried`, `cache`, `missing`), `changed`, plus the units restarted.
+
+Exit codes of `proton-secrets-fetch unit` (and of a `failClosed` activation):
+
+| Code | Meaning | systemd |
+| --- | --- | --- |
+| `0` | every non-optional secret was read from Proton in this run | unit active |
+| `75` | temporary: Proton unreachable, 5xx/429, lock busy, an error not recognised | retried with back-off |
+| `78` | a human must act: PAT rejected, no session and no PAT, a required field missing or blank, a vault the PAT cannot see | not retried (`RestartPreventExitStatus`), unit failed |
+
+Options beyond the per-secret ones (`reference`/`vaultName`/`itemTitle`/`field`,
+`path`, `mode`, `owner`, `group`, `symlink`, `optional`, `restartUnits`):
+
+| Option | Default | |
+| --- | --- | --- |
+| `cliPackage` | `pkgs.proton-pass-cli` | the `pass-cli` used by the module and the CLI |
+| `patFile` | `null` | file with a PAT; what allows unattended (re)login and repair |
+| `failClosed` | `true` | activation path only, see above |
+| `restartUnits` | `[]` | restarted when any secret changed |
+| `preflightRetries` / `preflightRetryDelay` | `3` / `5` | attempts / seconds one run waits on a network error before it gives up as temporary |
+| `fetchService.enable` | `true` | the boot-time unit |
+| `fetchService.restartSec` / `restartMaxDelaySec` / `restartSteps` | `15` / `300` / `8` | its back-off |
+| `fetchService.timeoutStartSec` | `300` | upper bound of one run |
+| `cache.enable` / `cache.directory` / `cache.withKey` | `false` / `/var/lib/proton-secrets-cache` / `"host"` | sealed last-known-good cache |
+| `statusFile` | `/run/proton-secrets.status` | |
+| `sessionDir`, `secretsDir`, `secretsMountPoint`, `keyProvider`, `package` | | as before |
+
+Consumers that read a secret at start (`LoadCredential=`) go into `restartUnits`
+and are ordered `After=proton-secrets-fetch.service` — `After=` only: with
+`Wants=`/`Requires=` every restart of a looping consumer starts the fetch unit
+again at once and its back-off is lost.
+
+**The sealed cache** (`cache.enable`) keeps a `systemd-creds`-encrypted copy of
+each secret in `cache.directory`, bound to the secret's name and rewritten only
+when the content changed. It exists so a boot without Proton (no internet, an
+expired PAT) still has secrets. What it protects against depends on `withKey`:
+with `"host"` the key is `/var/lib/systemd/credential.secret` on the same disk —
+safe against a copy of the cache directory leaving the machine, **not** against
+theft of the whole disk (where the PAT file opens the vault anyway). `"tpm2"` /
+`"host+tpm2"` / `"auto"` bind it to the machine's TPM. A secret rotated or revoked
+in Proton stays usable from the cache until the next successful fetch.
+
+**Secrets missing after a boot** — as root:
+
+```sh
+proton-secrets doctor     # pass-cli version, session files, session probe, PAT file,
+                          # the last fetch per secret, cache entries; prints no secret
+proton-secrets refresh    # run the fetch unit now and show the result
+```
+
+| `doctor` says | Meaning | Do |
+| --- | --- | --- |
+| `session probe: ok`, a secret `missing`/`carried` with `missing` or `blank` | the vault field is gone or empty | fix it in Proton Pass, `proton-secrets refresh` |
+| `session probe: network` | Proton unreachable | nothing: the unit keeps retrying (`systemctl status proton-secrets-fetch`) |
+| `session probe: no-session` | nobody is logged in and there is no PAT | `proton-secrets login` |
+| `session probe: store-corrupt`, or `pat_key: 0 bytes` | session files damaged (power cut) | `proton-secrets repair` |
+| `session probe: session-rejected` | Proton dropped the session | `proton-secrets repair` |
+| `error: pat-invalid` | the PAT expired (one year at most) or was deleted | `pass-cli personal-access-token renew` from an account login, or put a new PAT into `patFile`; then `proton-secrets repair` |
+| `error: vault` | the PAT is not granted that vault, or the name is wrong | grant it / fix the name, `proton-secrets refresh` |
+
+With no `patFile`, `repair` needs `--force` (it drops the interactive session) and
+is followed by `proton-secrets login`.
+
+The module is covered offline by `checks.<system>.proton-secrets-fetch`: a NixOS
+configuration with a stub `pass-cli` (`tests/pass-cli-stub.sh`), and the built
+script run through `tests/scenarios.sh`.

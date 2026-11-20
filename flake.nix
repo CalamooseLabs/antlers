@@ -80,9 +80,11 @@
     # crate here; shares moosewire's ratatui-only lockfile shape.
     moosebroom = pkgs.callPackage ./flakes/moosebroom/package.nix {};
 
-    # proton-secrets — headless Proton Pass CLI (`pass-cli`) wrapper + an
-    # agenix-shaped, activation-time secret-decryption NixOS module
-    # (services.proton-secrets). The bundled proton-pass-cli is UNFREE.
+    # proton-secrets — headless Proton Pass CLI (`pass-cli`) wrapper, the fetch
+    # engine behind it (`passthru.fetch`, proton-secrets-fetch) and an
+    # agenix-shaped NixOS module (services.proton-secrets) that fetches secrets
+    # into a ramfs at activation and from a retrying boot-time unit. The bundled
+    # proton-pass-cli is UNFREE.
     proton-secrets = pkgs.callPackage ./flakes/proton-secrets/package.nix {};
 
     # legal — shared infra for The Company, Inc. legal documents: the ONE canonical
@@ -238,6 +240,158 @@
           cp ${sys.config.environment.etc."unifi-protect-monitor/config.json".source} config.json
           cat config.json >> $out
         '';
+
+      # services.proton-secrets, offline and end to end. A small NixOS
+      # configuration is evaluated with `cliPackage` = a stub pass-cli
+      # (tests/pass-cli-stub.sh: the real one's session files, error texts and
+      # exit codes, driven by control files), and the proton-secrets-fetch that
+      # configuration BUILT is run through tests/scenarios.sh — unprivileged,
+      # against a temp directory, via the manifest's test seams. It asserts on
+      # the generation directories, the status JSON, exit codes and the stub's
+      # call log: session state machine (network wait, PAT login through the
+      # environment, the logout --force reset, an expired PAT), per-secret
+      # failures and carry-forward, change-aware generations and consumer
+      # restarts, failClosed on the activation path, the sealed cache round
+      # trip, the lock, and the `proton-secrets` CLI on top. The rendered units
+      # and activation snippets are checked too, for the activation-script and
+      # the userborn (no activation scripts) variants.
+      proton-secrets-fetch = let
+        t = ./flakes/proton-secrets/tests;
+        stub = name: file:
+          pkgs.writeShellApplication {
+            inherit name;
+            runtimeInputs = [pkgs.coreutils pkgs.gnugrep];
+            text = builtins.readFile file;
+          };
+        passCli = stub "pass-cli" (t + "/pass-cli-stub.sh");
+        systemctl = stub "systemctl" (t + "/systemctl-stub.sh");
+        systemdCreds = stub "systemd-creds" (t + "/systemd-creds-stub.sh");
+        mkSys = extra:
+          nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              self.nixosModules.proton-secrets
+              {
+                boot.isContainer = true;
+                system.stateVersion = "24.11";
+                users.users.hub = {
+                  isNormalUser = true;
+                  group = "users";
+                };
+                services.proton-secrets = {
+                  enable = true;
+                  cliPackage = passCli;
+                  patFile = "/var/lib/proton-pass-cli/pat";
+                  cache.enable = true;
+                  restartUnits = ["any-change.service"];
+                  secrets = let
+                    item = itemTitle: {
+                      vaultName = "Vault";
+                      inherit itemTitle;
+                      field = "secret";
+                    };
+                  in {
+                    alpha = item "alpha" // {restartUnits = ["alpha-consumer.service"];};
+                    beta = {
+                      vaultName = "Vault";
+                      itemTitle = "Stream Keys";
+                      field = "YouTube Vertical";
+                      owner = "hub";
+                      mode = "0440";
+                      restartUnits = ["beta-consumer.service" "shared.service"];
+                    };
+                    gamma = {
+                      reference = "pass://SHARE/ITEM/password";
+                      restartUnits = ["shared.service"];
+                    };
+                    delta = item "delta" // {optional = true;};
+                    linked = item "linked" // {path = "/etc/app/linked-secret";};
+                    plain =
+                      item "plain"
+                      // {
+                        symlink = false;
+                        path = "/var/lib/app/plain-secret";
+                      };
+                  };
+                };
+              }
+              extra
+            ];
+          };
+        sys = mkSys {};
+        # systemd-sysusers/userborn hosts have no `users` activation snippet to
+        # hook, so there the fetch unit is the only path.
+        sysUserborn = mkSys {services.userborn.enable = true;};
+        ps = sys.config.services.proton-secrets;
+        unit = name: s: pkgs.writeText name s.config.systemd.units.${name}.text;
+        activation = sys.config.system.activationScripts;
+      in
+        pkgs.runCommand "proton-secrets-fetch" {
+          nativeBuildInputs = [pkgs.jq pkgs.util-linux pkgs.diffutils pkgs.findutils pkgs.gnugrep pkgs.gnused];
+          FETCH = pkgs.lib.getExe ps.fetchPackage;
+          WRAPPER = pkgs.lib.getExe ps.package;
+          MANIFEST = ps.manifestFile;
+          SYSTEMCTL_STUB = pkgs.lib.getExe systemctl;
+          CREDS_STUB = pkgs.lib.getExe systemdCreds;
+          fetchUnit = unit "proton-secrets-fetch.service" sys;
+          restoreUnit = unit "proton-secrets-restore.service" sys;
+          fetchUnitUserborn = unit "proton-secrets-fetch.service" sysUserborn;
+          install = activation.protonSecretsInstall.text;
+          # The agenix-shaped snippet names consumers depend on.
+          snippets = builtins.concatStringsSep " " (builtins.filter (n: pkgs.lib.hasPrefix "protonSecrets" n) (builtins.attrNames activation));
+          usersDeps = builtins.concatStringsSep " " activation.users.deps;
+          userbornSnippets = builtins.concatStringsSep " " (builtins.filter (n: pkgs.lib.hasPrefix "protonSecrets" n) (builtins.attrNames sysUserborn.config.system.activationScripts));
+          etcManifest = sys.config.environment.etc."proton-secrets/manifest.json".source;
+        } ''
+          has() { grep -qF -- "$2" "$1" || { echo "missing in $1: $2"; cat "$1"; exit 1; }; }
+          hasNot() { if grep -q -- "$2" "$1"; then echo "unexpected in $1: $2"; exit 1; fi; }
+
+          # The manifest the module generated.
+          jq -e '.version == 1 and (.secrets | length) == 6 and .cache.withKey == "host"
+            and .unitName == "proton-secrets-fetch.service" and .failClosed
+            and (.secrets[] | select(.name == "beta") | .owner == "hub" and .group == "users" and .mode == "0440")
+            and (.secrets[] | select(.name == "delta") | .optional)
+            and (has("seams") | not)' "$MANIFEST" >/dev/null
+          cmp "$MANIFEST" "$etcManifest"
+
+          # The boot-time fetch: retried with back-off until it works, stopped only
+          # by the "a human must act" exit code, never by the start limit.
+          has "$fetchUnit" "ExecStart=$FETCH --manifest $MANIFEST unit"
+          has "$fetchUnit" "Type=oneshot"
+          has "$fetchUnit" "RemainAfterExit=true"
+          has "$fetchUnit" "Restart=on-failure"
+          has "$fetchUnit" "RestartSec=15"
+          has "$fetchUnit" "RestartSteps=8"
+          has "$fetchUnit" "RestartMaxDelaySec=300"
+          has "$fetchUnit" "RestartPreventExitStatus=78"
+          has "$fetchUnit" "TimeoutStartSec=300"
+          has "$fetchUnit" "StartLimitIntervalSec=0"
+          has "$fetchUnit" "Wants=network-online.target"
+          grep -q '^After=.*network-online.target' "$fetchUnit"
+          grep -q '^After=.*proton-secrets-restore.service' "$fetchUnit"
+          grep -q '^WantedBy=multi-user.target' "$fetchUnit"
+          hasNot "$fetchUnit" switch-to-configuration
+
+          # The cache restore: before every normal service, no network.
+          has "$restoreUnit" "ExecStart=$FETCH --manifest $MANIFEST restore"
+          has "$restoreUnit" "DefaultDependencies=false"
+          grep -q '^Before=.*sysinit.target' "$restoreUnit"
+          grep -q '^After=.*local-fs.target' "$restoreUnit"
+          hasNot "$restoreUnit" network
+
+          # Activation: same names and order as before, the script behind them.
+          test "$snippets" = "protonSecrets protonSecretsChown protonSecretsInstall protonSecretsNewGeneration"
+          test "$usersDeps" = "protonSecretsInstall"
+          grep -qF "$FETCH --manifest $MANIFEST activate || exit 1" <<<"$install"
+          grep -qF 'IN_NIXOS_SYSTEMD_STAGE1' <<<"$install"
+
+          # userborn: no activation snippets; the unit waits for the users.
+          test -z "$userbornSnippets"
+          grep -q '^After=.*userborn.service' "$fetchUnitUserborn"
+
+          bash ${t + "/scenarios.sh"}
+          touch $out
+        '';
     };
 
     # ---- Parameterized builders for downstream flakes that need custom config ----
@@ -299,7 +453,8 @@
       cobblemon-overlay = import ./flakes/cobblemon-overlay/module.nix self;
       antlers-scripts = import ./flakes/scripts/module.nix "system";
       moosefetch = import ./flakes/moosefetch/module.nix "system";
-      # services.proton-secrets — activation-time secret decryption from Proton Pass.
+      # services.proton-secrets — secrets from Proton Pass into a ramfs: at
+      # activation, from a retrying boot-time unit, optionally from a sealed cache.
       proton-secrets = import ./flakes/proton-secrets/module.nix self;
       # services.calman-sony — background Windows VM running Calman Home for Sony.
       calman-sony = import ./flakes/calman-sony/module.nix self;
