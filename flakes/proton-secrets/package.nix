@@ -5,7 +5,8 @@
 # files next to this one, so they can be read, linted and tested as scripts):
 #
 #   proton-secrets-fetch   (./fetch.sh, `passthru.fetch`) — the engine. It owns
-#       every pass-cli call: one flock, a timeout per call, a session probe that
+#       every pass-cli call: one flock, a timeout on each call it makes for the
+#       fetch (not on what the CLI passes straight through), a session probe that
 #       reads pass-cli's stderr (`pass-cli info`; `test` cannot see a dead session
 #       and no longer exists in pass-cli 2.2.4+), the PAT login through the
 #       environment, the `logout --force` reset, and the per-secret fetch into

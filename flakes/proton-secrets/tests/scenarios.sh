@@ -8,7 +8,7 @@
 #   FETCH           .../bin/proton-secrets-fetch
 #   WRAPPER         .../bin/proton-secrets
 #   MANIFEST        the manifest the module generated
-#   SYSTEMCTL_STUB  CREDS_STUB   the stand-ins for systemctl / systemd-creds
+#   SYSTEMCTL_STUB  CREDS_STUB  SYNC_STUB   the stand-ins for systemctl / systemd-creds / sync
 #
 # The declared secrets (see the check in flake.nix), and the stub's key for each:
 #   alpha   Vault/alpha/secret                    restartUnits alpha-consumer
@@ -52,8 +52,8 @@ scenario() { # <name>: a fresh root, stub state and manifest
 # (Re)write this scenario's manifest: the module's, relocated under $R, with the
 # waits taken out and the cache off unless a scenario turns it on.
 manifest() { # <jq filter>
-  jq --arg root "$R" --arg systemctl "$SYSTEMCTL_STUB" --arg creds "$CREDS_STUB" "
-    .seams = {root: \$root, unprivileged: true, systemctl: \$systemctl, systemdCreds: \$creds}
+  jq --arg root "$R" --arg systemctl "$SYSTEMCTL_STUB" --arg creds "$CREDS_STUB" --arg sync "$SYNC_STUB" "
+    .seams = {root: \$root, unprivileged: true, systemctl: \$systemctl, systemdCreds: \$creds, sync: \$sync}
     | .probeDelay = 0 | .fetchRetryDelay = 0 | .cache.enable = false
     | $1" "$MANIFEST" >"$M"
 }
@@ -85,6 +85,8 @@ wrapper() { # <proton-secrets args>; the CLI finds the manifest through the envi
   PROTON_SECRETS_MANIFEST="$M" "$WRAPPER" "$@" >"$OUT" 2>&1 || RC=$?
 }
 
+session_files() { (cd "$R/var/lib/proton-pass-cli" && find . -type f -exec md5sum {} + | sort); }
+
 check() { # <what> <command...>
   CHECKS=$((CHECKS + 1))
   local what=$1
@@ -105,6 +107,7 @@ value() { cat "$R/run/proton-secrets/$1" 2>/dev/null; }
 linked() { readlink "$R/run/proton-secrets" 2>/dev/null; }
 generations() { find "$R/run/proton-secrets.d" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%f\n' 2>/dev/null | sort | tr '\n' ' '; }
 calls() { grep -c -- "$1" "$STUB_CTL/calls.log" || true; }
+synced() { grep -c -- "$1" "$STUB_CTL/sync.log" 2>/dev/null || true; }
 restarts() { sed -n 's/^--no-block restart -- //p' "$STUB_CTL/systemctl.log" | sort | tr '\n' ' '; }
 not_dangling() { [ ! -L "$R/run/proton-secrets" ] || [ -d "$R/run/proton-secrets" ]; }
 no() { ! "$@"; }
@@ -147,13 +150,18 @@ check "starting and failed consumers restarted, the stopped one left alone" \
 check "status: restarted" eq "$(st '.restarted | sort | join(" ")')" "alpha-consumer.service any-change.service beta-consumer.service"
 check "status: restartSkipped" eq "$(st '.restartSkipped | join(" ")')" "shared.service"
 check "reset-failed before the restart" grep -qx -- 'reset-failed -- beta-consumer.service' "$STUB_CTL/systemctl.log"
+check "a value is private from the moment it is fetched" eq "$(sort -u "$STUB_CTL/out-modes" | tr '\n' ' ')" "600 "
+check "the lock file is private" eq "$(stat -c %a "$R/run/lock/proton-pass-cli.lock")" 600
+check "the session files are synced at the end of the run" eq "$(synced "/\.session/pat_key .*/\.session\$")" 1
 
 # ---- 2. unchanged content: nothing moves -----------------------------------------
 
 : >"$STUB_CTL/systemctl.log"
 ino=$(stat -c %i "$R/run/proton-secrets.d/1/alpha")
+chmod 644 "$R/run/lock/proton-pass-cli.lock" # as an older version made it
 run unit
 check "exit 0" eq "$RC" 0
+check "a lock file others could open is closed to them" eq "$(stat -c %a "$R/run/lock/proton-pass-cli.lock")" 600
 check "still generation 1" eq "$(linked)" "$R/run/proton-secrets.d/1"
 check "the file was not rewritten" eq "$(stat -c %i "$R/run/proton-secrets.d/1/alpha")" "$ino"
 check "only generation 1 exists" eq "$(generations)" "1 "
@@ -247,6 +255,43 @@ check "status: degraded (stale values)" eq "$(st .state)" degraded
 check "status: carried" eq "$(st '[.secrets[].source] | unique | join(",")')" carried
 check "status: stale" eq "$(st '.secrets.alpha.stale')" true
 
+# A call that hangs is cut off by its own timeout and counts as "unreachable".
+scenario hung-read
+session valid
+manifest '.timeouts.item = 1'
+echo 60 >"$STUB_CTL/slow"
+t0=$SECONDS
+run unit
+check "exit 75" eq "$RC" 75
+check "the timeout cut the call short" test $((SECONDS - t0)) -lt 30
+check "says which call" out_has "pass-cli item did not finish within 1s"
+check "status: class network" eq "$(st .secrets.alpha.error.class)" network
+check "no further read was tried" eq "$(calls '^item view')" 0
+check "no login, no logout" eq "$(calls '^log')" 0
+
+scenario hung-login
+session none
+manifest '.timeouts.login = 1'
+echo 60 >"$STUB_CTL/slow-login"
+t0=$SECONDS
+run unit
+check "exit 75" eq "$RC" 75
+check "the timeout cut every attempt short" test $((SECONDS - t0)) -lt 30
+check "says which call" out_has "pass-cli login did not finish within 1s"
+check "status: session network" eq "$(st .session.state)" network
+check "never a logout" eq "$(calls '^logout')" 0
+
+# The whole run has a time budget too, below the unit's TimeoutStartSec.
+scenario run-budget
+session valid
+manifest '.runBudget = 2'
+echo 60 >"$STUB_CTL/slow"
+t0=$SECONDS
+run unit
+check "exit 75" eq "$RC" 75
+check "stopped by the budget, long before the per-call timeout" test $((SECONDS - t0)) -lt 30
+check "status: retry" eq "$(st .retry)" true
+
 # ---- 6. one missing field among several ------------------------------------------
 
 scenario missing-field
@@ -265,6 +310,18 @@ check "status: alpha fetched" eq "$(st .secrets.alpha.source)" fetched
 check "status: permanent" eq "$(st .error.permanent)" true
 check "no in-run retry of a missing field" eq "$(calls 'YouTube Vertical')" 1
 check "session left alone" eq "$(calls '^log')" 0
+
+# A missing field next to a read that failed for a passing reason: the run is
+# worth repeating, so the temporary failure decides the exit code.
+scenario missing-and-unreachable
+session valid
+echo "Vault/alpha/secret" >"$STUB_CTL/missing"
+echo 2 >"$STUB_CTL/net-up-calls" # the probe and alpha's read get through
+run unit
+check "exit 75" eq "$RC" 75
+check "status: alpha missing for good" eq "$(st .secrets.alpha.error.class)" missing
+check "status: beta unreachable" eq "$(st .secrets.beta.error.class)" network
+check "status: not permanent" eq "$(st .error.permanent)" false
 
 # The same for a field that exists but is empty.
 scenario blank-field
@@ -285,6 +342,29 @@ check "status: ok" eq "$(st .state)" ok
 check "status: delta reported" eq "$(st .secrets.delta.error.class)" missing
 check "status: delta missing" eq "$(st .secrets.delta.source)" missing
 check "the warning names it" out_has "optional secret 'delta'"
+check "the summary does not count it as verified" out_has "optional and not fetched: delta"
+
+# An optional secret Proton could not be asked about is another matter: the unit
+# comes back for it (nothing else would before the next boot), while an
+# activation still never fails over it.
+scenario optional-unreachable
+session valid
+manifest '.secrets |= (map(select(.name != "delta")) + map(select(.name == "delta")))'
+echo 6 >"$STUB_CTL/net-up-calls" # the probe and the five required reads
+run unit
+check "unit: exit 75" eq "$RC" 75
+check "unit: the required secrets are installed" eq "$(value alpha)" "VALUE[Vault/alpha/secret]"
+check "unit: status degraded" eq "$(st .state)" degraded
+check "unit: status retry" eq "$(st .retry)" true
+check "unit: delta unreachable" eq "$(st .secrets.delta.error.class)" network
+echo 6 >"$STUB_CTL/net-up-calls"
+run activate
+check "activation: exit 0 (failClosed is set)" eq "$RC" 0
+check "activation: status ok" eq "$(st .state)" ok
+rm "$STUB_CTL/net-up-calls"
+run unit
+check "unit: fetched once Proton answers" eq "$RC" 0
+check "unit: delta installed" eq "$(value delta)" "VALUE[Vault/delta/secret]"
 
 # ---- 7. carry-forward ------------------------------------------------------------
 
@@ -320,6 +400,8 @@ check "the PAT is not in the status file" no grep -qF "pst_" "$R/run/proton-secr
 check "no logout" eq "$(calls '^logout')" 0
 check "status: logged in" eq "$(st .session.loggedIn)" true
 check "session files exist" test -s "$R/var/lib/proton-pass-cli/.session/pat_key"
+# pass-cli does not fsync them; a power cut soon after would leave pat_key empty.
+check "session files synced after the login and again at the end" eq "$(synced "/\.session/pat_key .*/\.session\$")" 2
 
 # Network errors during the login are retried inside the run.
 scenario login-network-flap
@@ -353,15 +435,22 @@ check "one login" eq "$(calls '^login => logged in')" 1
 check "never tried to log in over the dead session" eq "$(calls 'already authenticated')" 0
 check "status: reset" eq "$(st .session.reset)" true
 
-# The same, noticed only in the middle of the fetch.
+# The same, between the probe and a read. All a read says then is "Error listing
+# vaults", which is what an unreachable Proton looks like too: this run ends as
+# temporary and touches nothing, and the next one's probe sees the rejection.
 scenario session-rejected-mid-fetch
 session valid
 echo 3 >"$STUB_CTL/reject-after" # the probe and two reads get through
 run unit
-check "exit 0" eq "$RC" 0
-check "one reset" eq "$(calls '^logout --force')" 1
-check "one login" eq "$(calls '^login => logged in')" 1
-check "every secret fetched in the end" eq "$(st '[.secrets[].source] | unique | join(",")')" fetched
+check "exit 75" eq "$RC" 75
+check "no login, no logout in that run" eq "$(calls '^log')" 0
+check "status: class network" eq "$(st .secrets.delta.error.class)" network
+check "what was read is installed" eq "$(value alpha)" "VALUE[Vault/alpha/secret]"
+run unit
+check "the next run: exit 0" eq "$RC" 0
+check "the next run: one reset" eq "$(calls '^logout --force')" 1
+check "the next run: one login" eq "$(calls '^login => logged in')" 1
+check "the next run: every secret verified" eq "$(st '[.secrets[].source] | unique | join(",")')" "fetched,unchanged"
 
 # Without a PAT the dead session is reported, not removed.
 scenario session-rejected-no-pat
@@ -422,6 +511,36 @@ check "exactly one login" eq "$(calls '^login')" 1
 check "each secret tried twice, not more" eq "$(calls '^item view')" 12
 check "status: class vault" eq "$(st .secrets.alpha.error.class)" vault
 check "status: permanent" eq "$(st .error.permanent)" true
+
+# Without a PAT there is nothing to log in again with, so not even that reset.
+scenario vault-not-granted-no-pat
+session valid
+manifest '.patFile = null'
+: >"$STUB_CTL/vault-hidden"
+before=$(session_files)
+run unit
+check "exit 78" eq "$RC" 78
+check "no logout, no login" eq "$(calls '^log')" 0
+check "session files untouched" eq "$(session_files)" "$before"
+check "each secret tried once" eq "$(calls '^item view')" 6
+
+# A share whose keys Proton would not hand out (an HTTP status nothing above
+# knows) ends in the same "Could not find vault" line. That may pass: temporary,
+# and no reason to reset a session that works.
+scenario share-keys-refused
+session valid
+touch "$STUB_CTL/share-refused"
+before=$(session_files)
+run unit
+check "exit 75" eq "$RC" 75
+check "no logout, no login" eq "$(calls '^log')" 0
+check "session files untouched" eq "$(session_files)" "$before"
+check "three tries per secret" eq "$(calls '^item view')" 18
+check "status: class unknown" eq "$(st .secrets.alpha.error.class)" unknown
+check "status: retry" eq "$(st .retry)" true
+rm "$STUB_CTL/share-refused"
+run unit
+check "works again once Proton does" eq "$RC" 0
 
 # One vault not visible among good ones is a naming/grant problem: the session
 # that read the others is left alone.
@@ -509,6 +628,14 @@ check "again: says so" out_has "not asked again"
 check "again: status still pat-invalid" eq "$(st .session.state)" pat-invalid
 wrapper repair
 check "repair tries the PAT at once (and it is still rejected)" eq "$(calls '^login')" 2
+# The pause is not for ever: after patRetryAfter the PAT is presented once more.
+manifest '.patRetryAfter = 1'
+sleep 1.1
+run unit
+check "after the pause: one more attempt" eq "$(calls '^login')" 3
+manifest .
+run unit
+check "and the pause starts again" eq "$(calls '^login')" 3
 # A new PAT in the file is tried immediately.
 rm "$STUB_CTL/pat-invalid"
 sleep 0.05
@@ -516,6 +643,19 @@ printf '%s\n' "$PAT" >"$R/var/lib/proton-pass-cli/pat"
 run unit
 check "new PAT file: logged in" eq "$(calls '^login => logged in')" 1
 check "new PAT file: exit 0" eq "$RC" 0
+check "new PAT file: the pause is over" no test -e "$R/run/proton-secrets.status.pat-rejected"
+
+# A PAT file that does not hold a PAT never reaches Proton, and is not reported
+# as rejected by it.
+scenario pat-malformed
+session none
+echo "not-a-token" >"$R/var/lib/proton-pass-cli/pat"
+run unit
+check "exit 78" eq "$RC" 78
+check "says it is malformed" out_has "is malformed"
+check "does not blame Proton" no out_has "Proton rejected"
+check "status: pat-invalid" eq "$(st .error.class)" pat-invalid
+check "status: message" eq "$(st '.error.message | test("malformed")')" true
 
 # With secrets linked from before, they stay.
 scenario pat-invalid-warm
@@ -543,6 +683,22 @@ run unit
 check "exit 75 (unknown is temporary)" eq "$RC" 75
 check "session never touched" eq "$(calls '^log')" 0
 check "three tries per secret" eq "$(calls 'Vault/alpha/secret\|item view --vault-name Vault --item-title alpha')" 3
+check "a token in pass-cli's words is blanked" out_has "pst_<redacted>"
+
+# The same from the probe: whatever `info` failed with, the session stays.
+scenario odd-probe-error
+session valid
+echo 1 >"$STUB_CTL/odd-info"
+before=$(session_files)
+run unit
+check "exit 75" eq "$RC" 75
+check "one probe, nothing else" eq "$(cat "$STUB_CTL/calls.log")" "info => odd error"
+check "session files untouched" eq "$(session_files)" "$before"
+check "status: session unknown" eq "$(st .session.state)" unknown
+check "status: not permanent" eq "$(st .error.permanent)" false
+check "pass-cli's own words are shown" out_has "Invalid status code: 403"
+run unit
+check "the next run works" eq "$RC" 0
 
 # ---- 13. activation: failClosed ---------------------------------------------------
 
@@ -640,6 +796,13 @@ check "leftovers: ok" eq "$RC" 0
 check "leftovers: generation 5 rebuilt" eq "$(value alpha)" "v5"
 check "leftovers: only generation 5" eq "$(generations)" "5 "
 check "leftovers: work directory gone" no test -e "$R/run/proton-secrets.d/.work.dead"
+# A run stopped right after the link moved leaves the previous generation; it
+# goes even when nothing changes any more.
+mkdir "$R/run/proton-secrets.d/4"
+echo old >"$R/run/proton-secrets.d/4/alpha"
+run unit
+check "stale generation: ok" eq "$RC" 0
+check "stale generation: removed without a new one" eq "$(generations)" "5 "
 
 # A secret dropped from the configuration leaves the ramfs.
 manifest '.secrets |= map(select(.name != "gamma"))'
@@ -648,6 +811,59 @@ check "dropped: ok" eq "$RC" 0
 check "dropped: gamma is gone" no test -e "$R/run/proton-secrets/gamma"
 check "dropped: generation 6" eq "$(generations)" "6 "
 check "dropped: nothing restarted for it" eq "$(st '.changed | length')" 0
+
+# The unit is stopped (systemctl restart, a switch, its timeout) after the new
+# generation is linked and before its consumers are restarted. The next run sees
+# nothing changed, and still owes them the restart.
+scenario stopped-after-link
+session valid
+run unit
+echo "rotated-alpha" >"$STUB_CTL/values/Vault_alpha_secret"
+: >"$STUB_CTL/systemctl.log"
+touch "$STUB_CTL/kill-on-show"
+RC=0
+setsid --wait "$FETCH" --manifest "$M" unit >"$OUT" 2>&1 || RC=$?
+cat "$OUT" >>"$ALL_OUT"
+check "stopped by SIGTERM" eq "$RC" 143
+check "the new generation is linked" eq "$(value alpha)" "rotated-alpha"
+check "nothing was restarted yet" eq "$(restarts)" ""
+run unit
+check "the next run: exit 0" eq "$RC" 0
+check "the next run: nothing changed" eq "$(st '.changed | length')" 0
+check "the next run: the owed restarts happen" eq "$(restarts)" "alpha-consumer.service any-change.service "
+check "the next run: status restarted" eq "$(st '.restarted | sort | join(" ")')" "alpha-consumer.service any-change.service"
+: >"$STUB_CTL/systemctl.log"
+run unit
+check "and only once" eq "$(wc -l <"$STUB_CTL/systemctl.log")" 0
+# A restart systemctl refused stays owed as well.
+echo "rotated-again" >"$STUB_CTL/values/Vault_alpha_secret"
+touch "$STUB_CTL/unit-restart-fails"
+run unit
+check "refused restart: reported" eq "$(st '.problems | map(select(startswith("restart "))) | length')" 2
+rm "$STUB_CTL/unit-restart-fails"
+: >"$STUB_CTL/systemctl.log"
+run unit
+check "refused restart: made up for by the next run" eq "$(restarts)" "alpha-consumer.service any-change.service "
+
+# A value that cannot be put where its consumer reads it has not arrived.
+scenario path-blocked
+session valid
+mkdir -p "$R/var/lib" "$R/etc"
+: >"$R/var/lib/app" # files where the parents of two secrets' paths belong
+: >"$R/etc/app"
+run unit
+check "exit 75" eq "$RC" 75
+check "status: class install" eq "$(st .error.class)" install
+check "status: failed (plain has no value)" eq "$(st .state)" failed
+check "status: plain" eq "$(st .secrets.plain.error.class)" install
+check "status: linked" eq "$(st .secrets.linked.error.class)" install
+check "says which" out_has "not installed at their path: linked plain"
+check "the others are in place" eq "$(value alpha)" "VALUE[Vault/alpha/secret]"
+rm "$R/var/lib/app" "$R/etc/app"
+run unit
+check "unblocked: exit 0" eq "$RC" 0
+check "unblocked: the file" eq "$(cat "$R/var/lib/app/plain-secret")" "VALUE[Vault/plain/secret]"
+check "unblocked: the link" eq "$(readlink "$R/etc/app/linked-secret")" "$R/run/proton-secrets/linked"
 
 scenario link-blocked
 session valid
@@ -691,13 +907,21 @@ scenario lock-busy
 session valid
 manifest '.timeouts.lock = 1'
 mkdir -p "$R/run/lock"
-flock "$R/run/lock/proton-pass-cli.lock" sleep 3 &
+(flock 8 && exec sleep 600) 8>>"$R/run/lock/proton-pass-cli.lock" &
+holder=$!
 sleep 0.3
 run unit
 check "exit 75" eq "$RC" 75
 check "pass-cli not called" eq "$(wc -l <"$STUB_CTL/calls.log")" 0
 check "status: lock" eq "$(st .error.class)" lock
-wait
+# The wait for the lock is part of the run's time budget.
+manifest '.timeouts.lock = 45 | .runBudget = 1'
+t0=$SECONDS
+run unit
+check "budget: exit 75" eq "$RC" 75
+check "budget: did not wait out the lock timeout" test $((SECONDS - t0)) -lt 30
+kill "$holder"
+wait "$holder" 2>/dev/null
 
 # ---- 16. the sealed cache ---------------------------------------------------------
 
@@ -713,6 +937,7 @@ check "entries are 0600" eq "$(stat -c %a "$C/alpha.cred")" 600
 check "sealed with the configured key, bound to the name" eq "$(head -n 1 "$C/alpha.cred")" "SEALED host proton-secrets.alpha"
 check "no plaintext in the cache" no grep -rq 'VALUE\[' "$C"
 check "status: cache written" eq "$(st '.cache.written | length')" 6
+check "a new entry is synced to disk" eq "$(synced "/alpha\.cred ")" 1
 ino=$(stat -c %i "$C/alpha.cred")
 run unit
 check "unchanged content: entries not rewritten" eq "$(stat -c %i "$C/alpha.cred")" "$ino"
@@ -794,6 +1019,23 @@ check "fallback: value from the cache" eq "$(value alpha)" "rotated-alpha"
 check "fallback: source cache" eq "$(st .secrets.alpha.source)" cache
 check "fallback: degraded" eq "$(st .state)" degraded
 
+# Switched off again: nothing stays at rest.
+scenario cache-switched-off
+session valid
+manifest '.cache.enable = true'
+C="$R/var/lib/proton-secrets-cache"
+run unit
+check "on: one entry per secret" eq "$(find "$C" -name '*.cred' | wc -l)" 6
+: >"$C/alpha.cred.tmp"
+manifest .
+run unit
+check "off: exit 0" eq "$RC" 0
+check "off: the entries are removed" eq "$(find "$C" -type f | wc -l)" 0
+check "off: status pruned" eq "$(st '.cache.pruned | length')" 6
+check "off: says so" out_has "the sealed cache is off; removed its entries"
+run restore
+check "off: nothing to restore" out_has "the sealed cache is off"
+
 # The sealing tool failing never fails the fetch.
 scenario cache-broken
 session valid
@@ -836,6 +1078,7 @@ check "doctor: last run" out_has "state: ok"
 check "doctor: per-secret line" out_has "alpha: fetched (changed)"
 check "doctor: prints no secret" no out_has "VALUE["
 check "doctor: prints no PAT" no out_has "pst_"
+check "doctor: points at refresh" out_has "'proton-secrets refresh' fetches now"
 : >"$R/var/lib/proton-pass-cli/.session/pat_key"
 wrapper doctor
 check "doctor: flags the empty pat_key" out_has "pat_key: 0 bytes   <-- EMPTY"
@@ -871,6 +1114,30 @@ check "session removed" no test -e "$R/var/lib/proton-pass-cli/.session"
 wrapper login
 check "interactive login is pass-cli's (the stub has no web flow)" eq "$(calls '^login => web login')" 1
 
+# A PAT variable left in the shell does not take the place of the module's PAT
+# file: `repair` drops the session first and must not then log in with a stale token.
+scenario cli-env-pat
+session valid
+STALE='pst_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff::Stale'
+RC=0
+PROTON_PASS_PERSONAL_ACCESS_TOKEN="$STALE" PROTON_SECRETS_MANIFEST="$M" "$WRAPPER" repair >"$OUT" 2>&1 || RC=$?
+check "repair with a stale PAT in the environment: ok" eq "$RC" 0
+check "logged in from the PAT file" eq "$(calls '^login => logged in')" 1
+# The variable is what is left when the file holds nothing.
+session none
+: >"$R/var/lib/proton-pass-cli/pat"
+: >"$STUB_CTL/calls.log"
+RC=0
+PROTON_PASS_PERSONAL_ACCESS_TOKEN="$PAT" PROTON_SECRETS_MANIFEST="$M" "$WRAPPER" login >"$OUT" 2>&1 || RC=$?
+check "empty PAT file: the variable is used" eq "$(calls '^login => logged in (PAT via env)')" 1
+session none
+RC=0
+PROTON_PASS_PERSONAL_ACCESS_TOKEN="$STALE" PROTON_SECRETS_MANIFEST="$M" "$WRAPPER" login >"$OUT" 2>&1 || RC=$?
+check "a rejected variable: exit 78" eq "$RC" 78
+check "names the variable, not the file" out_has "PROTON_PASS_PERSONAL_ACCESS_TOKEN"
+check "does not tell to edit the PAT file" no out_has "put the token into the PAT file"
+check "does not hold the PAT file back for it" no test -e "$R/run/proton-secrets.status.pat-rejected"
+
 # The installer image: no module, no manifest, a PAT in the environment.
 scenario cli-installer
 RC=0
@@ -887,6 +1154,10 @@ RC=0
 env -u PROTON_SECRETS_MANIFEST PROTON_PASS_SESSION_DIR="$R/session" PROTON_PASS_PAT_FILE="$R/pat-crlf" \
   "$WRAPPER" login >"$OUT" 2>&1 || RC=$?
 check "login from PROTON_PASS_PAT_FILE (CRLF tolerated)" eq "$RC" 0
+RC=0
+env -u PROTON_SECRETS_MANIFEST PROTON_PASS_SESSION_DIR="$R/session" "$WRAPPER" doctor >"$OUT" 2>&1 || RC=$?
+check "doctor without the module: exit 0" eq "$RC" 0
+check "doctor without the module: does not point at a fetch unit" no out_has "proton-secrets refresh"
 
 # ---- nothing above ever printed a secret or the PAT --------------------------------
 
@@ -896,6 +1167,7 @@ check "no secret value in any fetch output" no grep -q 'VALUE\[\|rotated-' "$ALL
 check "no PAT in any fetch output" no grep -qF 'pst_0123' "$ALL_OUT"
 check "no PAT in any call log" no grep -rqF 'pst_0123' --include=calls.log "$T"
 check "no PAT in any status file" no grep -rqF 'pst_0123' --include=proton-secrets.status "$T"
+check "the PAT was handed to no command but login" eq "$(find "$T" -name pat-leak | wc -l)" 0
 
 echo
 echo "$CHECKS checks, $FAILED failed"

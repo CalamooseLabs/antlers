@@ -25,16 +25,21 @@
 # else the baked default path if it exists, and the session commands also honour
 # PROTON_PASS_SESSION_DIR / PROTON_PASS_KEY_PROVIDER / PROTON_PASS_PAT_FILE /
 # PROTON_PASS_PERSONAL_ACCESS_TOKEN — so the CLI works on a box without the module
-# (the installer image).
+# (the installer image). A `patFile` the manifest names comes before the two PAT
+# variables: they are only used when it names none, or that file holds nothing.
 #
 # Exit codes of `activate` and `unit` (systemd tells "try again" from "a human must
 # act" by them; `activate` with failClosed=false warns and exits 0 instead):
 #    0  every non-optional secret was read from Proton in this run
-#   75  temporary — Proton unreachable, 5xx/429, lock busy, an error not recognised.
-#       Nothing was destroyed; run again later.
+#   75  temporary — Proton unreachable, 5xx/429, lock busy, an error not recognised,
+#       a secret that could not be put at its `path`. Nothing was destroyed; run
+#       again later. `unit` also answers 75 when an `optional` secret failed for
+#       such a reason, so the unit comes back for it; `activate` never fails over
+#       an optional secret.
 #   78  permanent until someone acts — the PAT was rejected, there is no session and
 #       no PAT, or a required field is missing or blank.
-# `login` adds 3: no PAT is available, so only an interactive login can help.
+# `login` and `repair` add 3: no PAT is available, so only an interactive login
+# can help.
 #
 # pass-cli exits 1 for every failure, so the cause is read from its stderr. The
 # signatures below are the ones pass-cli 2.1.3 and 2.4.1 print. Anything not
@@ -57,6 +62,7 @@
 #                 nothing is chowned
 #   systemctl     command run instead of systemctl
 #   systemdCreds  command run instead of systemd-creds
+#   sync          command run instead of sync
 
 EX_USAGE=64
 EX_NO_PAT=3
@@ -100,6 +106,7 @@ ROOT=""
 UNPRIVILEGED=0
 SYSTEMCTL=systemctl
 CREDS=systemd-creds
+SYNC=sync
 SESSION_DIR='__DEFAULT_SESSION_DIR__'
 KEY_PROVIDER='__DEFAULT_KEY_PROVIDER__'
 PAT_FILE=""
@@ -146,6 +153,7 @@ load_manifest() {
     @sh "UNPRIVILEGED=\(if .seams.unprivileged then 1 else 0 end)",
     @sh "SYSTEMCTL=\(.seams.systemctl // "systemctl")",
     @sh "CREDS=\(.seams.systemdCreds // "systemd-creds")",
+    @sh "SYNC=\(.seams.sync // "sync")",
     @sh "SESSION_DIR=\(.sessionDir)",
     @sh "KEY_PROVIDER=\(.keyProvider)",
     @sh "PAT_FILE=\(.patFile // "")",
@@ -210,11 +218,18 @@ if [ -n "$MANIFEST" ]; then load_manifest; fi
 # The CLI on a box without the module (or pointed elsewhere on purpose) follows the
 # environment; activation and the units pass --manifest and never do.
 PAT=""
+ENV_PAT=""
+PAT_FROM_ENV=0
+# The PAT file the fetch unit logs in from. A PAT variable left in a root shell
+# must not take its place: `repair` would drop a working session and then fail
+# to log in with the stale token.
+PAT_FILE_PINNED=0
+if [ -n "$PAT_FILE" ]; then PAT_FILE_PINNED=1; fi
 if [ "$MANIFEST_EXPLICIT" -eq 0 ]; then
   SESSION_DIR=${PROTON_PASS_SESSION_DIR:-$SESSION_DIR}
   KEY_PROVIDER=${PROTON_PASS_KEY_PROVIDER:-$KEY_PROVIDER}
-  PAT_FILE=${PROTON_PASS_PAT_FILE:-$PAT_FILE}
-  PAT=${PROTON_PASS_PERSONAL_ACCESS_TOKEN:-}
+  PAT_FILE=${PAT_FILE:-${PROTON_PASS_PAT_FILE:-}}
+  ENV_PAT=${PROTON_PASS_PERSONAL_ACCESS_TOKEN:-}
 fi
 # pass-cli only reads the PAT on `login`; it is handed to that one call and kept
 # out of every other child's environment.
@@ -244,16 +259,31 @@ ensure_session_dir() {
 # The fetch holds it for its whole run, which also keeps two runs from building
 # the same generation.
 LOCKED=0
+
+# Open the lock file on fd 9. It is 0600: flock(2) works on any open descriptor,
+# a read-only one included, so a lock file others can open is one any local
+# user can hold — and with it every fetch.
+open_lock() { # <file>
+  local old rc=0
+  old=$(umask)
+  umask 077
+  { exec 9>>"$1"; } 2>/dev/null || rc=1
+  umask "$old"
+  # A file that was already there keeps the mode it was made with.
+  if [ "$rc" -eq 0 ]; then chmod 0600 "$1" 2>/dev/null || true; fi
+  return "$rc"
+}
+
 acquire_lock() { # <seconds to wait>
   local wait=$1
   if [ "$LOCKED" -eq 1 ]; then return 0; fi
   mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
-  if ! { exec 9>>"$LOCK_FILE"; } 2>/dev/null; then
+  if ! open_lock "$LOCK_FILE"; then
     # Not root (or /run/lock is not there to write to): whoever can use the
     # session directory can lock inside it.
     ensure_session_dir
     LOCK_FILE="$SESSION_DIR/.proton-secrets.lock"
-    if ! { exec 9>>"$LOCK_FILE"; } 2>/dev/null; then
+    if ! open_lock "$LOCK_FILE"; then
       err "cannot open a lock file ($LOCK_FILE)"
       return 1
     fi
@@ -284,6 +314,8 @@ detail() {
     tail -n 8 | cut -c1-400
 }
 
+# The whole text is matched, and pass-cli repeats the vault, item and field
+# names it was given: a name that contains one of these phrases is misread.
 classify() { # <exit code> <stderr>
   local rc=$1 text=$2
   if [ "$rc" -eq 0 ]; then
@@ -322,7 +354,13 @@ classify() { # <exit code> <stderr>
     *"personal access token key"*)
       echo pat-key
       ;;
-    # Without that line: the vault is not shared with this login, or misnamed.
+    # Any other reason a share could not be opened (an HTTP status with no
+    # signature above, an answer pass-cli could not use) ends in the same
+    # "Could not find vault" line as a vault that is not there. It may pass.
+    *"Error opening share"*)
+      echo unknown
+      ;;
+    # Without any such line: the vault is not shared with this login, or misnamed.
     *"Could not find vault"*)
       echo vault
       ;;
@@ -352,7 +390,9 @@ pcli() {
     PC_CLASS=network
     return 0
   fi
-  PC_ERR=$(timeout --kill-after=10 "$t" pass-cli "$@" 2>&1 >"$out" </dev/null) || PC_RC=$?
+  # umask 077: a value must not exist with group or other bits, not even for
+  # the moment before its declared mode is applied.
+  PC_ERR=$(umask 077 && timeout --kill-after=10 "$t" pass-cli "$@" 2>&1 >"$out" </dev/null) || PC_RC=$?
   if [ "$PC_RC" -eq 124 ] || [ "$PC_RC" -eq 137 ]; then
     PC_ERR="pass-cli $1 did not finish within ${t}s"
   fi
@@ -364,19 +404,29 @@ pcli() {
 probe() { pcli "$T_PROBE" /dev/null info; }
 
 have_pat() {
+  local from_file=""
   if [ -n "$PAT" ]; then return 0; fi
   if [ -n "$PAT_FILE" ] && [ -r "$PAT_FILE" ]; then
     # No whitespace belongs in a PAT; a stray CR or newline would fail the login.
-    PAT=$(tr -d '[:space:]' <"$PAT_FILE") || PAT=""
+    from_file=$(tr -d '[:space:]' <"$PAT_FILE") || from_file=""
+  fi
+  # The manifest's patFile first; without one the variable comes before
+  # PROTON_PASS_PAT_FILE (the installer image exports both).
+  if [ -n "$from_file" ] && { [ "$PAT_FILE_PINNED" -eq 1 ] || [ -z "$ENV_PAT" ]; }; then
+    PAT=$from_file
+  elif [ -n "$ENV_PAT" ]; then
+    PAT=$ENV_PAT
+    PAT_FROM_ENV=1
   fi
   [ -n "$PAT" ]
 }
 
+# Where the PAT in use came from (call after have_pat).
 pat_source() {
-  if [ -n "$PAT_FILE" ]; then
+  if [ "$PAT_FROM_ENV" -eq 0 ] && [ -n "$PAT_FILE" ]; then
     echo "$PAT_FILE"
   else
-    echo "PROTON_PASS_PERSONAL_ACCESS_TOKEN"
+    echo "PROTON_PASS_PERSONAL_ACCESS_TOKEN (this command's environment)"
   fi
 }
 
@@ -390,7 +440,7 @@ sync_session() {
   for f in "$d"/*; do
     if [ -f "$f" ]; then files+=("$f"); fi
   done
-  sync "${files[@]}" "$d" 2>/dev/null || true
+  "$SYNC" "${files[@]}" "$d" 2>/dev/null || true
 }
 
 # A PAT Proton rejected is not presented again for a while unless its file
@@ -400,7 +450,7 @@ sync_session() {
 IGNORE_PAT_COOLDOWN=0
 pat_on_cooldown() {
   local marker="$STATUS_FILE.pat-rejected" age
-  if [ "$IGNORE_PAT_COOLDOWN" -eq 1 ] || [ -z "$STATUS_FILE" ] || [ -z "$PAT_FILE" ]; then return 1; fi
+  if [ "$IGNORE_PAT_COOLDOWN" -eq 1 ] || [ -z "$STATUS_FILE" ] || [ -z "$PAT_FILE" ] || [ "$PAT_FROM_ENV" -eq 1 ]; then return 1; fi
   if [ ! -e "$marker" ] || [ "$PAT_FILE" -nt "$marker" ]; then return 1; fi
   age=$(($(date +%s) - $(stat -c %Y "$marker")))
   [ "$age" -lt "$PAT_RETRY_AFTER" ]
@@ -429,7 +479,9 @@ login() {
     LOGGED_IN=1
     sync_session
     if [ -n "$STATUS_FILE" ]; then rm -f "$STATUS_FILE.pat-rejected"; fi
-  elif [ "$PC_CLASS" = pat-invalid ] && [ -n "$STATUS_FILE" ]; then
+  elif [ "$PC_CLASS" = pat-invalid ] && [ -n "$STATUS_FILE" ] && [ "$PAT_FROM_ENV" -eq 0 ]; then
+    # The marker stands for the PAT file; a token from someone's environment
+    # says nothing about it.
     mkdir -p "$(dirname "$STATUS_FILE")" 2>/dev/null || true
     touch "$STATUS_FILE.pat-rejected" 2>/dev/null || true
   fi
@@ -470,11 +522,27 @@ run_fail() { # temporary|permanent <class> <message> [pass-cli stderr]
   if [ "$1" = permanent ]; then RUN_ERR_PERMANENT=1; fi
 }
 
-pat_invalid_help() {
-  err "Proton rejected the personal access token in $(pat_source)."
-  err "  A PAT always expires (1 year at most) and can be deleted from the account."
-  err "  From a machine logged in to the ACCOUNT (not with a PAT):"
-  err "    pass-cli personal-access-token renew --expiration 1y    (or create a new one)"
+# pass-cli refuses a PAT it cannot parse before anything is sent to Proton.
+pat_malformed() { # <pass-cli stderr of the login>
+  case "$1" in
+    *"Failed to parse personal access token"* | *"Failed to decode personal access token"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+pat_invalid_help() { # <pass-cli stderr of the login>
+  if pat_malformed "$1"; then
+    err "the personal access token in $(pat_source) is malformed (one line, pst_...::...); it was not sent to Proton."
+  else
+    err "Proton rejected the personal access token in $(pat_source)."
+    err "  A PAT always expires (1 year at most) and can be deleted from the account."
+    err "  From a machine logged in to the ACCOUNT (not with a PAT):"
+    err "    pass-cli personal-access-token renew --expiration 1y    (or create a new one)"
+  fi
+  if [ "$PAT_FROM_ENV" -eq 1 ]; then
+    err "  That token came from the environment of this command, not from a PAT file: correct or unset the variable."
+    return 0
+  fi
   err "  put the token into the PAT file (mode 0600, one line), then run: proton-secrets repair"
   err "  (until that file changes, the fetch does not present this PAT again for $((PAT_RETRY_AFTER / 60)) minutes)"
 }
@@ -583,8 +651,12 @@ ensure_session() {
         ;;
       pat-invalid)
         SESSION_STATE=pat-invalid
-        pat_invalid_help
-        run_fail permanent pat-invalid "the personal access token in $(pat_source) is invalid, expired or deleted" "$PC_ERR"
+        pat_invalid_help "$PC_ERR"
+        if pat_malformed "$PC_ERR"; then
+          run_fail permanent pat-invalid "the personal access token in $(pat_source) is malformed" "$PC_ERR"
+        else
+          run_fail permanent pat-invalid "the personal access token in $(pat_source) is invalid, expired or deleted" "$PC_ERR"
+        fi
         return 1
         ;;
       *)
@@ -676,6 +748,7 @@ RESTART_SKIPPED=()
 CACHE_WRITTEN=()
 CACHE_PRUNED=()
 QUIET_CHOWN=0
+I_FAILED=() # 1 when the value could not be put at the secret's `path`
 
 init_results() {
   local i
@@ -685,13 +758,29 @@ init_results() {
     F_CLASS[i]=""
     F_ERR[i]=""
     F_PERM[i]=0
+    I_FAILED[i]=0
+  done
+}
+
+# Every numbered directory but the linked one is a leftover: the generation a
+# new one has just replaced, or what a run that was stopped around the flip of
+# the link left behind (old values would otherwise stay on the ramfs until the
+# next change).
+prune_generations() {
+  local keep d
+  keep=$(linked_generation)
+  for d in "$MOUNT_POINT"/*; do
+    case "$(basename "$d")" in
+      "$keep" | *[!0-9]*) ;;
+      *) rm -rf "$d" || warn "could not remove the old generation $d" ;;
+    esac
   done
 }
 
 # Build generation N+1 completely, flip the symlink, then drop the old ones. A
 # failure before the flip leaves what was linked untouched.
 install_generation() {
-  local cur new gen d
+  local cur new gen
   cur=$(linked_generation)
   new=$((cur + 1))
   gen="$MOUNT_POINT/$new"
@@ -702,12 +791,7 @@ install_generation() {
     return 1
   fi
   # Only now, with the link on the new generation, may the old ones go.
-  for d in "$MOUNT_POINT"/*; do
-    case "$(basename "$d")" in
-      "$new" | *[!0-9]*) ;;
-      *) rm -rf "$d" || warn "could not remove the old generation $d" ;;
-    esac
-  done
+  prune_generations
 }
 
 build_generation() { # <directory>
@@ -720,10 +804,12 @@ build_generation() { # <directory>
     name=${S_NAME[$i]}
     src="$WORK/new/$name"
     if [ "${S_SYMLINK[$i]}" -ne 1 ] || [ ! -f "$src" ]; then continue; fi
+    # Mode and owner are set in the private work directory, so the file enters
+    # the generation (which others can traverse) with nothing left to tighten.
+    # ensure_links_and_modes is the one that reports a failed chown.
+    chmod "${S_MODE[$i]}" "$src" || return 1
+    apply_owner "$i" "$src" 1
     mv -f "$src" "$gen/$name" || return 1
-    chmod "${S_MODE[$i]}" "$gen/$name" || return 1
-    # Owned before it is linked; ensure_links_and_modes is the one that reports.
-    apply_owner "$i" "$gen/$name" 1
   done
 }
 
@@ -778,6 +864,7 @@ ensure_links_and_modes() {
         if ! mkdir -p "$(dirname "${S_PATH[$i]}")" || ! ln -sfT "$f" "${S_PATH[$i]}"; then
           warn "could not link ${S_PATH[$i]} -> $f"
           PROBLEMS+=("link $name")
+          I_FAILED[i]=1
         fi
       fi
     fi
@@ -831,13 +918,26 @@ cache_write() { # <name> <plaintext file>
   fi
   chmod 0600 "$f.tmp" || return 1
   mv -f "$f.tmp" "$f" || return 1
-  sync "$f" "$CACHE_DIR" 2>/dev/null || true
+  "$SYNC" "$f" "$CACHE_DIR" 2>/dev/null || true
 }
 
 # Seal what this run read from Proton; never what was merely carried along.
 cache_update() {
   local i name cur f known
-  if [ "$CACHE_ENABLE" -ne 1 ]; then return 0; fi
+  if [ "$CACHE_ENABLE" -ne 1 ]; then
+    # Switched off: what was sealed while it was on does not stay at rest.
+    for f in "$CACHE_DIR"/*.cred "$CACHE_DIR"/*.cred.tmp; do
+      if [ ! -e "$f" ] && [ ! -L "$f" ]; then continue; fi
+      if rm -f "$f"; then
+        case "$f" in *.cred) CACHE_PRUNED+=("$(basename "$f" .cred)") ;; esac
+      else
+        warn "the sealed cache is off, but $f could not be removed"
+        PROBLEMS+=("cache entry left")
+      fi
+    done
+    if [ "${#CACHE_PRUNED[@]}" -gt 0 ]; then log "the sealed cache is off; removed its entries: ${CACHE_PRUNED[*]}"; fi
+    return 0
+  fi
   if ! mkdir -p "$CACHE_DIR" || ! chmod 0700 "$CACHE_DIR"; then
     warn "cannot prepare the cache directory $CACHE_DIR; the sealed cache was not updated"
     PROBLEMS+=("cache directory")
@@ -1047,11 +1147,20 @@ resolve_all() {
 
 # ---- consumers ---------------------------------------------------------------
 
+# Units still owed a restart. The list goes onto the ramfs before a change is
+# installed and comes off once systemctl has taken the jobs. A run that is
+# stopped in between (`systemctl restart`, a switch, TimeoutStartSec) would
+# otherwise lose them for good: the next run finds every secret unchanged. At
+# worst a consumer is restarted once more than it needed.
+pending_file() { echo "$MOUNT_POINT/.restart-pending"; }
+
 # Units to restart: the global list when anything changed, plus the lists of the
-# secrets that changed. One per line, no duplicates.
+# secrets that changed, plus what an earlier run still owes. One per line, no
+# duplicates.
 units_to_restart() {
   local i any=0
   local -a units=() list=()
+  if [ -f "$(pending_file)" ]; then mapfile -t units <"$(pending_file)"; fi
   for i in "${!S_NAME[@]}"; do
     if [ "${R_CHANGED[$i]}" -ne 1 ]; then continue; fi
     any=1
@@ -1062,7 +1171,18 @@ units_to_restart() {
     eval "list=($GLOBAL_UNITS)"
     units+=("${list[@]}")
   fi
-  if [ "${#units[@]}" -gt 0 ]; then printf '%s\n' "${units[@]}" | awk '!seen[$0]++'; fi
+  if [ "${#units[@]}" -gt 0 ]; then printf '%s\n' "${units[@]}" | awk 'NF && !seen[$0]++'; fi
+}
+
+note_pending_restarts() {
+  local f
+  local -a units=()
+  f=$(pending_file)
+  mapfile -t units < <(units_to_restart)
+  if [ "${#units[@]}" -eq 0 ]; then return 0; fi
+  if ! printf '%s\n' "${units[@]}" >"$f.tmp" || ! mv -f "$f.tmp" "$f"; then
+    warn "could not note the units to restart in $f"
+  fi
 }
 
 # A consumer that reads its secret at start (LoadCredential=) must be restarted
@@ -1078,12 +1198,13 @@ units_to_restart() {
 # then restarted twice, which is harmless.
 restart_consumers() {
   local u state
-  local -a units=()
+  local -a units=() owed=()
   mapfile -t units < <(units_to_restart)
   if [ "${#units[@]}" -eq 0 ]; then return 0; fi
   if [ ! -d "$ROOT/run/systemd/system" ]; then
     # nixos-install's chroot, or an activation before systemd is up.
     log "systemd is not running here; not restarting: ${units[*]}"
+    rm -f "$(pending_file)"
     return 0
   fi
   for u in "${units[@]}"; do
@@ -1099,6 +1220,7 @@ restart_consumers() {
         else
           warn "could not restart $u"
           PROBLEMS+=("restart $u")
+          owed+=("$u")
         fi
         ;;
       *)
@@ -1106,6 +1228,11 @@ restart_consumers() {
         ;;
     esac
   done
+  if [ "${#owed[@]}" -gt 0 ]; then
+    printf '%s\n' "${owed[@]}" >"$(pending_file)" || true
+  else
+    rm -f "$(pending_file)"
+  fi
   if [ "${#RESTARTED[@]}" -gt 0 ]; then log "restarted (changed secrets): ${RESTARTED[*]}"; fi
   if [ "${#RESTART_SKIPPED[@]}" -gt 0 ]; then log "not running, left alone: ${RESTART_SKIPPED[*]}"; fi
 }
@@ -1243,7 +1370,7 @@ print_status() {
 # ---- commands ----------------------------------------------------------------
 
 run_fetch() { # activate | unit
-  local mode=$1 i code=0 need=0 temporary=0 permanent=0 names=""
+  local mode=$1 i code=0 need=0 temporary=0 permanent=0 names="" skipped="" unplaced="" wait=$T_LOCK
   if [ "$mode" = activate ]; then
     # Before users and groups exist (a first install) the chown cannot work
     # yet; the `chown` step after them is the one that reports.
@@ -1251,7 +1378,9 @@ run_fetch() { # activate | unit
   fi
   init_results
   read_attempt
-  if ! acquire_lock "$T_LOCK"; then
+  # The wait for the lock counts against the run's time like everything else.
+  if [ "$(remaining)" -lt "$wait" ]; then wait=$(remaining); fi
+  if ! acquire_lock "$wait"; then
     run_fail temporary lock "another run still holds the lock; nothing was fetched"
     mark_current
     write_status "$mode" "$(state_for "$EX_TEMPORARY")" "$EX_TEMPORARY"
@@ -1263,6 +1392,7 @@ run_fetch() { # activate | unit
     write_status "$mode" "$(state_for "$EX_TEMPORARY")" "$EX_TEMPORARY"
     return "$EX_TEMPORARY"
   fi
+  prune_generations
   ensure_session_dir
   if ensure_session; then
     fetch_all
@@ -1278,7 +1408,11 @@ run_fetch() { # activate | unit
     case "${R_SOURCE[$i]}" in fetched | unchanged) continue ;; esac
     if [ "${S_OPTIONAL[$i]}" -eq 1 ]; then
       warn "optional secret '${S_NAME[$i]}' was not fetched (${F_CLASS[$i]:-unknown}); it is now: ${R_SOURCE[$i]}"
-      continue
+      skipped="$skipped ${S_NAME[$i]}"
+      # An optional secret never fails an activation, and a field that is not
+      # there never fails the unit. But when Proton could not really be asked,
+      # the unit comes back for it: nothing else would before the next boot.
+      if [ "$mode" != unit ] || [ "${F_PERM[$i]}" -eq 1 ]; then continue; fi
     fi
     names="$names ${S_NAME[$i]}"
     if [ "${F_PERM[$i]}" -eq 1 ]; then permanent=1; else temporary=1; fi
@@ -1304,6 +1438,7 @@ run_fetch() { # activate | unit
     return "$code"
   fi
 
+  note_pending_restarts
   if ! generation_matches; then
     for i in "${!S_NAME[@]}"; do
       if [ "${S_SYMLINK[$i]}" -eq 1 ] && [ -f "$WORK/new/${S_NAME[$i]}" ]; then need=1; fi
@@ -1323,23 +1458,46 @@ run_fetch() { # activate | unit
       warn "could not install '${S_NAME[$i]}' at ${S_PATH[$i]}"
       PROBLEMS+=("install ${S_NAME[$i]}")
       R_CHANGED[i]=0
+      I_FAILED[i]=1
     fi
   done
   ensure_links_and_modes
+  # A value that is not where its consumer looks for it has not arrived: the run
+  # must not end as "ok" and never be tried again.
+  for i in "${!S_NAME[@]}"; do
+    if [ "${I_FAILED[$i]}" -ne 1 ]; then continue; fi
+    if [ -z "${F_CLASS[$i]}" ]; then
+      F_CLASS[i]=install
+      F_ERR[i]="could not be put at ${S_PATH[$i]}"
+    fi
+    if [ "${S_OPTIONAL[$i]}" -eq 1 ] && [ "$mode" != unit ]; then continue; fi
+    unplaced="$unplaced ${S_NAME[$i]}"
+  done
+  if [ -n "$unplaced" ] && [ "$code" -eq 0 ]; then
+    code=$EX_TEMPORARY
+    if [ -z "$RUN_ERR_CLASS" ]; then
+      RUN_ERR_CLASS=install
+      RUN_ERR_MSG="not installed at their path:$unplaced"
+    fi
+  fi
   cache_update
   restart_consumers
   # Reading may have refreshed the tokens in session.json (same unsynced write).
   sync_session
 
   if [ "$code" -eq 0 ]; then
-    log "every required secret verified against Proton Pass (generation $(linked_generation))"
+    log "every required secret verified against Proton Pass (generation $(linked_generation))${skipped:+; optional and not fetched:$skipped}"
+  elif [ -z "$names" ]; then
+    err "not installed at their path:$unplaced — see above; run again once that is fixed (the fetch unit does)"
   elif [ "$temporary" -eq 1 ]; then
     err "not fetched:$names — temporary; run again later (the fetch unit does)"
   else
     err "not fetched:$names — this will not fix itself; see above, then run: proton-secrets refresh"
   fi
   write_status "$mode" "$(state_for "$code")" "$code"
-  if [ "$code" -ne 0 ] && [ "$mode" = activate ]; then
+  # With failClosed only a value that was read but could not be put in place
+  # gets this far with a failure, and that fails the activation too.
+  if [ "$code" -ne 0 ] && [ "$mode" = activate ] && [ "$FAIL_CLOSED" -ne 1 ]; then
     warn "refresh failed (failClosed=false); keeping previous secrets where there are any."
     return 0
   fi
@@ -1514,7 +1672,7 @@ cmd_doctor() {
     else
       echo "  PAT file:      $PAT_FILE (MISSING)"
     fi
-  elif [ -n "$PAT" ]; then
+  elif [ -n "$ENV_PAT" ]; then
     echo "  PAT:           from the environment"
   else
     echo "  PAT file:      not configured (interactive session)"
@@ -1546,7 +1704,11 @@ cmd_doctor() {
       echo "  fetch unit:    $UNIT_NAME: $("$SYSTEMCTL" is-active "$UNIT_NAME" 2>/dev/null || true)"
     fi
   fi
-  echo "Next: 'proton-secrets refresh' fetches now; 'proton-secrets repair' re-creates the session from the PAT."
+  if [ -n "$MANIFEST" ] && [ -n "$UNIT_NAME" ]; then
+    echo "Next: 'proton-secrets refresh' fetches now; 'proton-secrets repair' re-creates the session from the PAT."
+  else
+    echo "Next: 'proton-secrets login' logs in; 'proton-secrets repair' re-creates the session from a PAT."
+  fi
 }
 
 # Run the fetch unit now and say how it went. The unit does the work (not this

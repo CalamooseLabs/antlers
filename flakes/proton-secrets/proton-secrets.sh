@@ -108,11 +108,14 @@ Secrets missing after a boot?  proton-secrets doctor  — its "session probe" li
   network           Proton cannot be reached; the fetch unit keeps retrying
 then:  proton-secrets refresh
 
-Environment (when no services.proton-secrets manifest pins them):
-  PROTON_PASS_SESSION_DIR            session store (default: baked-in persistent dir)
+Environment:
+  PROTON_PASS_SESSION_DIR            session store (default: the module's sessionDir, else the baked-in dir)
   PROTON_PASS_KEY_PROVIDER           key backend: fs|keyring|env (default: fs, headless)
   PROTON_PASS_PAT_FILE               file holding a PAT (pst_...::key) for login
   PROTON_PASS_PERSONAL_ACCESS_TOKEN  the PAT itself
+The two PAT variables are for a box without services.proton-secrets. Where the
+module names a patFile, that file comes first and they are only used when it
+holds nothing.
 EOF
     exit 0
     ;;

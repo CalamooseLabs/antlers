@@ -4,14 +4,17 @@
 # It keeps the same files as the real one under $PROTON_PASS_SESSION_DIR/.session
 # (local.key, pass-cli.db, session.json, pat_key), fails with the stderr text and
 # exit code pass-cli 2.1.3 / 2.4.1 print in each state, and records every call.
+# Two texts were never seen from a real vault and are taken from the binaries'
+# strings: a field that does not exist, and what an empty field prints.
 # Behaviour is driven by files in $STUB_CTL:
 #   net-down            the API is unreachable
 #   net-down-calls      a number: that many more API calls fail as unreachable
 #   net-up-calls        a number: that many more API calls get through, then none
 #   pat-invalid         Proton rejects the PAT
 #   session-rejected    the server no longer knows the session, pass-cli 2.1.3
-#                       style: the next authenticated command says so and drops
-#                       .session, except for a session.json nothing can decrypt
+#                       style: the next authenticated command drops .session,
+#                       except for a session.json nothing can decrypt. `info`
+#                       says why; `item view` only says "Error listing vaults"
 #   session-rejected-keep  the same, pass-cli 2.4.1 style: every authenticated
 #                       command fails, the files stay and `login` refuses
 #   reject-after        a number: the session is rejected (2.4.1 style) from that
@@ -20,21 +23,33 @@
 #                       (an empty file: no vault at all)
 #   pat-key-broken      no login can open the vault keys (the ERROR line of an
 #                       empty pat_key, whatever is in the file)
+#   share-refused       the share's keys cannot be fetched (HTTP 403): the last
+#                       line is the one of a vault that is not there
 #   missing             lines of keys whose field does not exist
 #   blank               lines of keys whose field is empty
 #   odd-errors          a number: that many `item view` calls fail with an
-#                       error no classifier knows
+#                       error no classifier knows (it quotes the seeded PAT, which
+#                       nothing may repeat)
+#   odd-info            a number: that many `info` calls fail with an error no
+#                       classifier knows (HTTP 403)
 #   values/<key>        the value of a key (default: VALUE[<key>]); '/' -> '_'
 #   slow                seconds every `item view` takes
+#   slow-login          seconds every `login` takes
 #   expected-pat        the PAT the test seeded (to tell "in the env" from "not")
 # and it writes there:
 #   calls.log           one line per call: the argv, then " => " and the outcome
 #   overlap             appended to when two calls ran at the same time
+#   out-modes           the mode of the file each fetched value was written to
+#   pat-leak            appended to when a command other than `login` was handed
+#                       the PAT in its environment
 # A key is VAULT/ITEM/FIELD, or the pass:// reference (plus /FIELD).
 
 CTL=${STUB_CTL:?STUB_CTL is not set}
 SESS="${PROTON_PASS_SESSION_DIR:?PROTON_PASS_SESSION_DIR is not set}/.session"
 ARGV="$*"
+
+# Only `login` reads the PAT; no other command should ever be given it.
+if [ -n "${PROTON_PASS_PERSONAL_ACCESS_TOKEN:-}" ] && [ "${1:-}" != login ]; then echo "$ARGV" >>"$CTL/pat-leak"; fi
 
 # pass-cli has no lock of its own; the fetch engine must never run two at once.
 if ! mkdir "$CTL/busy" 2>/dev/null; then echo "overlap: $ARGV" >>"$CTL/overlap"; fi
@@ -119,7 +134,8 @@ need_session() {
 }
 
 # ...that the server still accepts (called once the network is known to be up).
-server_accepts() {
+# `info` reports the rejection; a read only gets as far as "Error listing vaults".
+server_accepts() { # [<vault name>, for a read]
   local n
   if [ -e "$CTL/reject-after" ]; then
     n=$(cat "$CTL/reject-after")
@@ -130,11 +146,20 @@ server_accepts() {
     rm -rf "$SESS"
     mkdir -p "$SESS"
     echo left-behind >"$SESS/session.json"
-    printf 'Your session has been invalidated and you have been logged out automatically.\nPlease log in again with: pass login\n' >&2
+    if [ "$#" -gt 0 ]; then
+      printf 'Error: Error finding vault [%s]: Error listing vaults\n' "$1" >&2
+      backtrace
+    else
+      printf 'Your session has been invalidated and you have been logged out automatically.\nPlease log in again with: pass login\n' >&2
+    fi
     done_ 1 "session invalidated, mostly wiped"
   fi
   if [ -e "$CTL/session-rejected-keep" ]; then
-    printf 'Error: Error getting personal access token name\n\nCaused by:\n    0: Error sending request\n    1: failed to authenticate: non-existent session\n    2: non-existent session\n' >&2
+    if [ "$#" -gt 0 ]; then
+      printf 'Error: Error finding vault [%s]: Error listing vaults\n' "$1" >&2
+    else
+      printf 'Error: Error getting personal access token name\n\nCaused by:\n    0: Error sending request\n    1: failed to authenticate: non-existent session\n    2: non-existent session\n' >&2
+    fi
     backtrace
     done_ 1 "session rejected, files kept"
   fi
@@ -158,6 +183,12 @@ case "${1:-}" in
       done_ 1 "network"
     fi
     server_accepts
+    if [ -e "$CTL/odd-info" ] && [ "$(cat "$CTL/odd-info")" -gt 0 ]; then
+      echo $(($(cat "$CTL/odd-info") - 1)) >"$CTL/odd-info"
+      printf 'Error: Error getting personal access token name\n\nCaused by:\n    Invalid status code: 403 Forbidden\n' >&2
+      backtrace
+      done_ 1 "odd error"
+    fi
     echo '{"name":"stub"}'
     done_ 0 ok
     ;;
@@ -178,6 +209,16 @@ case "${1:-}" in
       printf 'Error: Error in web login flow\n' >&2
       done_ 1 "web login (no PAT given)"
     fi
+    if [ -e "$CTL/slow-login" ]; then sleep "$(cat "$CTL/slow-login")"; fi
+    case "$pat" in
+      pst_*::*) ;;
+      *)
+        # Refused before anything is sent.
+        printf 'Error: Error in personal access token login flow\n\nCaused by:\n    0: Failed to parse personal access token token\n    1: Personal access token token must have exactly 64 characters after '"'pst_'"' prefix\n' >&2
+        backtrace
+        done_ 1 "PAT malformed (PAT via $how)"
+        ;;
+    esac
     mkdir -p "$SESS"
     chmod 0700 "$SESS"
     if [ ! -e "$SESS/local.key" ]; then head -c 32 /dev/zero | tr '\0' k >"$SESS/local.key"; fi
@@ -251,7 +292,7 @@ case "${1:-}" in
       backtrace
       done_ 1 "network"
     fi
-    server_accepts
+    server_accepts "$vault"
     if [ -e "$CTL/vault-hidden" ] && { [ ! -s "$CTL/vault-hidden" ] || grep -qxF "$key" "$CTL/vault-hidden"; }; then
       printf 'Error: Error finding vault [%s]: Could not find vault %s\n' "$vault" "$vault" >&2
       backtrace
@@ -263,9 +304,14 @@ case "${1:-}" in
       backtrace
       done_ 1 "vault not readable (pat_key)"
     fi
+    if [ -e "$CTL/share-refused" ]; then
+      printf 'ERROR pass/src/vault/list.rs:76: Error opening share share0001: Error getting opened share key: Error requesting share keys: Invalid status code: 403 Forbidden\nError: Error finding vault [%s]: Could not find vault %s\n' "$vault" "$vault" >&2
+      backtrace
+      done_ 1 "share keys refused"
+    fi
     if [ -e "$CTL/odd-errors" ] && [ "$(cat "$CTL/odd-errors")" -gt 0 ]; then
       echo $(($(cat "$CTL/odd-errors") - 1)) >"$CTL/odd-errors"
-      echo 'Error: the stub does something no classifier knows' >&2
+      printf 'Error: the stub does something no classifier knows (%s)\n' "$(cat "$CTL/expected-pat" 2>/dev/null || true)" >&2
       done_ 1 "odd error"
     fi
     if grep -qxF "$key" "$CTL/missing" 2>/dev/null; then
@@ -277,6 +323,7 @@ case "${1:-}" in
       echo
       done_ 0 "blank"
     fi
+    stat -L -c %a "/proc/$$/fd/1" >>"$CTL/out-modes"
     if [ -e "$CTL/values/${key//\//_}" ]; then
       cat "$CTL/values/${key//\//_}"
     else

@@ -254,7 +254,8 @@
       # restarts, failClosed on the activation path, the sealed cache round
       # trip, the lock, and the `proton-secrets` CLI on top. The rendered units
       # and activation snippets are checked too, for the activation-script and
-      # the userborn (no activation scripts) variants.
+      # the userborn (no activation scripts) variants, and so are the module's
+      # assertions.
       proton-secrets-fetch = let
         t = ./flakes/proton-secrets/tests;
         stub = name: file:
@@ -266,6 +267,7 @@
         passCli = stub "pass-cli" (t + "/pass-cli-stub.sh");
         systemctl = stub "systemctl" (t + "/systemctl-stub.sh");
         systemdCreds = stub "systemd-creds" (t + "/systemd-creds-stub.sh");
+        sync = stub "sync" (t + "/sync-stub.sh");
         mkSys = extra:
           nixpkgs.lib.nixosSystem {
             inherit system;
@@ -322,6 +324,24 @@
         # systemd-sysusers/userborn hosts have no `users` activation snippet to
         # hook, so there the fetch unit is the only path.
         sysUserborn = mkSys {services.userborn.enable = true;};
+        # A cache key that may involve the TPM.
+        sysTpm = mkSys {services.proton-secrets.cache.withKey = "auto";};
+        # One configuration that breaks each of the module's assertions.
+        sysBroken = mkSys {
+          services.userborn.enable = true;
+          services.proton-secrets = {
+            restartUnits = ["proton-secrets-fetch.service"];
+            fetchService = {
+              enable = false;
+              restartSec = 900;
+            };
+            secrets = {
+              nowhere = {};
+              "sub/dir" = {reference = "pass://SHARE/ITEM/password";};
+            };
+          };
+        };
+        failedAssertions = s: map (a: a.message) (builtins.filter (a: !a.assertion) s.config.assertions);
         ps = sys.config.services.proton-secrets;
         unit = name: s: pkgs.writeText name s.config.systemd.units.${name}.text;
         activation = sys.config.system.activationScripts;
@@ -333,10 +353,18 @@
           MANIFEST = ps.manifestFile;
           SYSTEMCTL_STUB = pkgs.lib.getExe systemctl;
           CREDS_STUB = pkgs.lib.getExe systemdCreds;
+          SYNC_STUB = pkgs.lib.getExe sync;
           fetchUnit = unit "proton-secrets-fetch.service" sys;
           restoreUnit = unit "proton-secrets-restore.service" sys;
+          restoreUnitTpm = unit "proton-secrets-restore.service" sysTpm;
           fetchUnitUserborn = unit "proton-secrets-fetch.service" sysUserborn;
+          userbornAliases = builtins.concatStringsSep " " sysUserborn.config.systemd.units."proton-secrets-fetch.service".aliases;
           install = activation.protonSecretsInstall.text;
+          newGeneration = activation.protonSecretsNewGeneration.text;
+          chown = activation.protonSecretsChown.text;
+          chownDeps = builtins.concatStringsSep " " activation.protonSecretsChown.deps;
+          assertionsOk = builtins.toJSON (failedAssertions sys);
+          assertionsBroken = builtins.toJSON (failedAssertions sysBroken);
           # The agenix-shaped snippet names consumers depend on.
           snippets = builtins.concatStringsSep " " (builtins.filter (n: pkgs.lib.hasPrefix "protonSecrets" n) (builtins.attrNames activation));
           usersDeps = builtins.concatStringsSep " " activation.users.deps;
@@ -370,6 +398,8 @@
           grep -q '^After=.*network-online.target' "$fetchUnit"
           grep -q '^After=.*proton-secrets-restore.service' "$fetchUnit"
           grep -q '^WantedBy=multi-user.target' "$fetchUnit"
+          has "$fetchUnit" "RequiresMountsFor=/var/lib/proton-pass-cli"
+          has "$fetchUnit" "RequiresMountsFor=/var/lib/proton-secrets-cache"
           hasNot "$fetchUnit" switch-to-configuration
 
           # The cache restore: before every normal service, no network.
@@ -377,17 +407,44 @@
           has "$restoreUnit" "DefaultDependencies=false"
           grep -q '^Before=.*sysinit.target' "$restoreUnit"
           grep -q '^After=.*local-fs.target' "$restoreUnit"
+          # The owners must exist before the chown, and the host key must be there.
+          grep -q '^After=.*systemd-sysusers.service userborn.service' "$restoreUnit"
+          has "$restoreUnit" "RequiresMountsFor=/var/lib/proton-secrets-cache"
+          has "$restoreUnit" "RequiresMountsFor=/var/lib/systemd"
+          grep -q '^WantedBy=sysinit.target' "$restoreUnit"
+          # A switch must not run it again.
+          has "$restoreUnit" "X-RestartIfChanged=false"
           hasNot "$restoreUnit" network
+          hasNot "$restoreUnit" tpm2
+          # With a TPM key: after tpm2.target, never pulling it in — on a machine
+          # without a TPM that holds sysinit.target for the device timeout.
+          grep -q '^After=.*tpm2.target' "$restoreUnitTpm"
+          hasNot "$restoreUnitTpm" '^Wants='
+          hasNot "$restoreUnitTpm" '^Requires='
 
           # Activation: same names and order as before, the script behind them.
           test "$snippets" = "protonSecrets protonSecretsChown protonSecretsInstall protonSecretsNewGeneration"
           test "$usersDeps" = "protonSecretsInstall"
           grep -qF "$FETCH --manifest $MANIFEST activate || exit 1" <<<"$install"
           grep -qF 'IN_NIXOS_SYSTEMD_STAGE1' <<<"$install"
+          grep -qF "$FETCH --manifest $MANIFEST mount || true" <<<"$newGeneration"
+          grep -qF "$FETCH --manifest $MANIFEST chown || true" <<<"$chown"
+          test "$chownDeps" = "users groups"
 
-          # userborn: no activation snippets; the unit waits for the users.
+          # userborn: no activation snippets; the unit waits for the users and
+          # still answers to the name the sysusers path used to have.
           test -z "$userbornSnippets"
           grep -q '^After=.*userborn.service' "$fetchUnitUserborn"
+          test "$userbornAliases" = "proton-secrets-install.service"
+
+          # The module's assertions: none fires for the configuration above, and
+          # each one does for a configuration that breaks it.
+          test "$assertionsOk" = "[]" || { echo "unexpected assertion: $assertionsOk"; exit 1; }
+          for needle in '"nowhere\": set `reference`' '"sub/dir\": `name` must be a plain file name' \
+            'restartMaxDelaySec must not be smaller' 'cannot be in restartUnits' 'fetchService.enable must stay on'; do
+            grep -qF -- "$needle" <<<"$assertionsBroken" || { echo "assertion not raised: $needle"; echo "$assertionsBroken"; exit 1; }
+          done
+          test "$(jq length <<<"$assertionsBroken")" = 5
 
           bash ${t + "/scenarios.sh"}
           touch $out

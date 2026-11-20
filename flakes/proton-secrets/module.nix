@@ -207,9 +207,12 @@ with lib; let
         default = false;
         description = ''
           A secret the host can run without. Failing to fetch it is reported (log
-          and `statusFile`) but never fails a run: the fetch unit still succeeds
-          and a `failClosed` activation still goes through. Its previous (or
-          cached) value is kept all the same.
+          and `statusFile`) but never fails an activation (also with `failClosed`),
+          and a field that is missing or blank in Proton never fails the fetch
+          unit. When Proton could not be asked at all (unreachable, an error
+          nothing recognises) the unit does end as "temporary" and retries, so the
+          secret still arrives once Proton answers. Its previous (or cached) value
+          is kept all the same.
         '';
       };
       restartUnits = mkOption {
@@ -297,8 +300,8 @@ in {
       default = "/run/proton-secrets.status";
       description = ''
         JSON file (world-readable, no secret material) rewritten at the end of every
-        fetch: overall `state` (`ok` — everything verified against Proton;
-        `degraded` — not verified, but every required secret still has a value;
+        fetch: overall `state` (`ok` — every non-`optional` secret verified against
+        Proton; `degraded` — not verified, but every required secret still has a value;
         `failed` — a required secret has none; `restored` — values come from the
         sealed cache and are not verified yet), time, attempt counter, session
         state / error class, and per secret where its value came from (`fetched`,
@@ -422,13 +425,24 @@ in {
           box (a backup, a stray rsync) but NOT against theft of the whole disk —
           where the PAT in `patFile` already opens the vault anyway. The TPM modes
           bind the copies to this machine's TPM instead.
+
+          Turning this off again removes the sealed copies at the next fetch.
         '';
       };
 
       directory = mkOption {
         type = types.str;
         default = "/var/lib/proton-secrets-cache";
-        description = "Where the sealed copies live (root-only, 0700). Persist it on impermanent hosts.";
+        description = ''
+          Where the sealed copies live (root-only, 0700). On an impermanent host,
+          persist it TOGETHER with what opens it: with `host` and `host+tpm2`
+          (and `auto`, unless it settled on the TPM alone) that is the host key
+          /var/lib/systemd/credential.secret, and /etc/machine-id must stay the
+          same. systemd makes a new host key when there is none, and copies
+          sealed with the old one no longer decrypt: the restore unit then skips
+          every entry (one journal warning each) and the cache silently gives
+          nothing on the boot it exists for.
+        '';
       };
 
       withKey = mkOption {
@@ -544,9 +558,11 @@ in {
         before = ["sysinit.target" "shutdown.target"];
         after =
           ["local-fs.target" "systemd-sysusers.service" "userborn.service"]
-          # The TPM device shows up asynchronously.
+          # The TPM device shows up asynchronously. Ordered after its target and
+          # nothing more: systemd starts tpm2.target itself when there is a TPM,
+          # while Wants= on a machine without one holds this unit — and
+          # sysinit.target behind it — for the 90 s device timeout.
           ++ optional (cfg.cache.withKey != "host") "tpm2.target";
-        wants = optional (cfg.cache.withKey != "host") "tpm2.target";
         conflicts = ["shutdown.target"];
         # A switch must not re-run it: it never touches a linked generation anyway.
         restartIfChanged = false;
